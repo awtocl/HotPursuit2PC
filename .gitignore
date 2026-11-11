@@ -1,0 +1,25 @@
+# --- user data: NEVER commit (C1/C2) ---------------------------------------
+/ROM/
+/game/
+game/
+*.iso
+*.ISO
+
+# --- local notes that predate the repo (kept in place, superseded by docs/) --
+/Build prompt - Claude Fable 5.2.md
+/ROM - dump analysis.md
+
+# --- build / caches (all local tooling state lives under .cache) -----------
+/.cache/
+/build/
+/out/
+CMakeUserPresets.json
+__pycache__/
+*.pyc
+
+# --- editors / OS ----------------------------------------------------------
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
