@@ -3,15 +3,15 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-11 — end of phase **P0 Recon**.
+**Last update:** 2026-11-11 — end of phase **P1 Scaffold**.
 
 ## Where we are
 
 | Phase | State | Evidence |
 |---|---|---|
-| P0 Recon | **done** | this commit; `docs/dump-analysis.md`, `docs/prior-art.md`, ADR 0001, ADR 0002 |
-| P1 Scaffold | next | — |
-| P2 Unpack & Inventory | pending | format knowledge already verified in P0 (dump-analysis §3–4) |
+| P0 Recon | **done** | commit `2f150c6`; `docs/dump-analysis.md`, `docs/prior-art.md`, ADR 0001, ADR 0002 |
+| P1 Scaffold | **done** | this commit; `pwsh tools/build.ps1` → `selftest` passes (Ninja/dev preset) and the CI command sequence passes locally with the Visual Studio generator. **Not verified:** the GitHub Actions run itself (nothing pushed yet). |
+| P2 Unpack & Inventory | next | format knowledge already verified in P0 (dump-analysis §3–4) |
 | P3 Converter v0 | pending | — |
 | P4 M1 Build | pending | needs owner go-ahead to fetch third-party source (see Open questions) |
 | P5 M1 Evidence + Gate Report | pending | — |
@@ -62,8 +62,20 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 | Q4 | Names of 40 unnamed files (31 replays, 4 movies, 5 misc) — are any loaded by the game? | P4/P5 (watch file accesses at runtime) | no |
 | Q5 | Which IRX set (243 vs 253) the ELF loads, and when | P4 | no |
 
-## Next steps (P1)
+## How to build and test
 
-1. Repo scaffold: `CMakeLists.txt` + presets, `assets-pipeline/`, `converter/`, `engine/` placeholders, `tests/`, `.gitattributes`, `LICENSE` (MIT), `CONTRIBUTING.md`, README skeleton.
-2. CI: GitHub Actions on `windows-latest` — configure, build, run CTest; fail loudly on path/permission errors.
-3. Commit `P1 Scaffold: …`, update this file.
+```powershell
+pwsh tools/build.ps1            # loads MSVC env, cmake preset "dev", builds, runs CTest
+```
+
+Build output and compiler temp files stay in `.cache/` (git-ignored). CI
+(`.github/workflows/ci.yml`) runs: tracked-file guard → configure (`-A x64 -DHP2_WERROR=ON`)
+→ build Release → `ctest --no-tests=error`. Tests that need the dump exit 77 = skipped when it is absent.
+
+## Next steps (P2)
+
+1. ADR 0004 (asset pipeline).
+2. `assets-pipeline/`: C++ library `hp2assets` — name hash, ZDIR parser + layout validation, LZC decoder, name table (from `tools/recon/zrecon.py` output), unpacker with manifest, inventory.
+3. Tests: synthetic fixtures (always) + the owner's dump (skipped when absent); cross-check against the Python reference.
+4. Full asset inventory into `docs/dump-analysis.md` §5 + `docs/asset-inventory.tsv`.
+5. Commit `P2 Unpack & Inventory: …`, update this file.
