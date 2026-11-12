@@ -21,12 +21,24 @@ Windows 10/11 x64 — the PS2 game, not the 2003 PC port.
 
 ## Using it
 
-Not released yet. The intended flow (brief §3):
+Not released yet — build it from source. What works today (converter v0):
 
-1. Put the converter `.exe` in an empty folder and start it.
+1. Put `HotPursuit2PC.exe` (GUI) and/or `hp2pc-cli.exe` in an empty folder and start it.
 2. Select your ROM folder (the extracted disc: `SYSTEM.CNF`, `SLUS_203.62`, `NFSHP2/…`).
+   It is validated file by file and never modified.
 3. Choose *portable* (everything in `game/` next to the `.exe`) or *installed* (a folder you pick).
-4. Convert, then run the launcher inside `game/`.
+4. Convert: the ROM is stored and verified, and the 402 game files are unpacked
+   with their names into `game/assets/`. Running it again resumes.
+
+What does **not** work yet: step 5, *run the game*. The launcher arrives with Milestone 1.
+
+```
+hp2pc-cli validate "D:\ROMs\Need for Speed - Hot Pursuit 2 (USA)"
+hp2pc-cli convert --rom "D:\ROMs\Need for Speed - Hot Pursuit 2 (USA)"
+hp2pc-cli status
+```
+
+Details: [`converter/README.md`](converter/README.md).
 
 ## Building from source
 

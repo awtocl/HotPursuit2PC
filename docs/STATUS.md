@@ -3,7 +3,7 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-12 — end of phase **P2 Unpack & Inventory**.
+**Last update:** 2026-11-12 — end of phase **P3 Converter v0**. **P4 is blocked on owner decisions Q1/Q2** (see Open questions).
 
 ## Where we are
 
@@ -11,9 +11,9 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 |---|---|---|
 | P0 Recon | **done** | commit `2f150c6`; `docs/dump-analysis.md`, `docs/prior-art.md`, ADR 0001, ADR 0002 |
 | P1 Scaffold | **done** | commit `fe8ab16`; `pwsh tools/build.ps1` → `selftest` passes (Ninja/dev preset) and the CI command sequence passes locally with the Visual Studio generator. **Not verified:** the GitHub Actions run itself (nothing pushed yet). |
-| P2 Unpack & Inventory | **done** | this commit; ADR 0004; `assets-pipeline/` (`hp2assets` library + `hp2assets.exe`); `test_assets` (synthetic) and `test_dump` (real dump) pass; full unpack 402 files / 3,098,727,312 bytes, resume and `--verify` clean; inventory in `docs/dump-analysis.md` §5; C++ inventory equals an independent Python re-hash for all 405 records. |
-| P3 Converter v0 | next | — |
-| P4 M1 Build | pending | needs owner go-ahead to fetch third-party source (see Open questions) |
+| P2 Unpack & Inventory | **done** | commit `0751cc8`; ADR 0004; `assets-pipeline/` (`hp2assets` library + `hp2assets.exe`); `test_assets` (synthetic) and `test_dump` (real dump) pass; full unpack 402 files / 3,098,727,312 bytes, resume and `--verify` clean; inventory in `docs/dump-analysis.md` §5; C++ inventory equals an independent Python re-hash for all 405 records. |
+| P3 Converter v0 | **done** | this commit; ADR 0003; `converter/` (`hp2core`, `hp2pc-cli.exe`, `HotPursuit2PC.exe`); 8 CTest tests pass (dev + release presets); end-to-end run on the real dump from a clean folder: 27 ROM files copied + SHA-256 verified, 402 assets unpacked, 4.5 s; re-run rewrote nothing; ROM folder unchanged (sizes + timestamps); only `game/` next to the exes; GUI checked by screenshot and by a headless test that drives the real window through a conversion. **Not done in v0:** stage `build` (the runnable game). |
+| P4 M1 Build | **blocked** | needs owner go-ahead to fetch third-party source (Q1) — see Open questions |
 | P5 M1 Evidence + Gate Report | pending | — |
 
 ## Decisions (ADRs)
@@ -22,7 +22,7 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 |---|---|---|
 | [0001](adr/0001-architecture.md) | Architecture | Target = static recompilation + native runtime (A′). **M1 ships emulator-backed (Path C1: embedded Play! core, BSD-2, no BIOS), labelled as not native.** Path B rejected for game logic. |
 | [0002](adr/0002-language-stack.md) | Language stack | C++20 / MSVC / CMake+Ninja for everything shipped; Python (stdlib) for dev-only recon scripts. |
-| 0003 | GUI framework | to write in P3 (leaning: plain Win32, same core as the CLI) |
+| [0003](adr/0003-gui-framework.md) | GUI framework | Plain Win32 + Common Controls 6; all logic in `hp2core`; GUI and CLI are thin front-ends, so parity holds by construction. |
 | [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names come from a table recovered from the dump (compiled in); unpack = exact 1:1 extents + manifest with SHA-256; resumable, never overwrites silently; ROM opened read-only. |
 | 0005 | Rendering & audio | to write in P4 |
 
@@ -33,7 +33,7 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 - Name hash: `h = 0xFFFFFFFF; h = h*33 + byte` over the upper-cased `\`-separated path.
 - `.LZC` = `COMP` header + LZSS (u16 flag words, 4-bit length + 12-bit distance); decoder verified byte-exact on all 11 LZC/BUN pairs on the disc.
 - **362 of 402** file names recovered from the dump itself (ELF strings/templates + strings inside data). No third-party name list is used. 40 files stay unnamed (31 unreferenced replays, 4 movies, 5 misc).
-- SHA-256 manifest of the dump: `tests/fixtures/slus20362_rom_manifest.tsv`.
+- SHA-256 manifest of the dump: `converter/data/slus20362_rom_manifest.tsv` (27 files, 3,120,519,117 bytes).
 
 ## What P2 added
 
@@ -84,11 +84,24 @@ Build output and compiler temp files stay in `.cache/` (git-ignored). CI
 (`.github/workflows/ci.yml`) runs: tracked-file guard → configure (`-A x64 -DHP2_WERROR=ON`)
 → build Release → `ctest --no-tests=error`. Tests that need the dump exit 77 = skipped when it is absent.
 
-## Next steps (P3)
+## What P3 added
 
-1. ADR 0003 (GUI framework).
-2. `converter/core`: ROM validation against `tests/fixtures/slus20362_rom_manifest.tsv` (compiled in) with clear, actionable errors;
-   `game/` folder layout (C6), portable/installed modes, settings + state file, stage runner (`validate → rom → unpack`), resume, logs.
-3. `converter/cli` (`hp2pc-cli.exe`) and `converter/gui` (`HotPursuit2PC.exe`, stub per ADR 0003) on the same core.
-4. Tests: synthetic ROM folders (always) + the owner's dump (skipped when absent).
-5. Commit `P3 Converter v0: …`, update this file.
+- `hp2core`: `check_rom` (quick/full; corrects a neighbouring folder; actionable errors), `inspect_game_folder`,
+  `find_game_folder`, `convert` (stages `validate → rom → unpack`, then `build` = not available yet), `KeyValueFile` (`hp2pc.cfg`).
+- Game folder layout (C6): `hp2pc.cfg`, `rom/`, `assets/`, `logs/` (+ `build/` from P4). Portable = next to the exe with its own ROM copy,
+  relocatable (re-run falls back to `game/rom` if the original ROM is gone). Installed = chosen directory, ROM copy or reference.
+- Rules enforced and tested: ROM folder never written; no game folder inside the ROM folder; foreign non-empty folders refused;
+  `.part` + rename; mismatching files never overwritten silently (`repair` moves them aside); cancel keeps finished work.
+- Release executables ≈ 0.7 MB each, dependencies: only Windows system DLLs (checked with `dumpbin /dependents`).
+- Evidence run left a complete converted folder at `.cache/p3-run/game/` (6.2 GB, git-ignored; the owner may remove it).
+- Dev switches of the GUI: `--selftest`, `--selftest-convert <rom> <game>`, `--screenshot <bmp>`.
+
+## Next steps (P4 — Milestone 1 build) — needs Q1 answered first
+
+1. Go/no-go test: does the Play! core run SLUS-20362 to gameplay at a stable 60 fps? (compatibility is UNVERIFIED for NTSC-U).
+   Needs: fetch Play! source + submodules from GitHub (BSD-2), build its core/libretro target with MSVC, boot the disc.
+   The disc must be presented as an image: write an ISO9660 builder in `converter/core` (stage `package`: `game/rom/` → `game/build/disc.iso`).
+2. ADR 0005 (rendering & audio) for the launcher: window, graphics API, audio device, XInput → pad.
+3. `engine/`: launcher hosting the core; converter stage `build` copies launcher + runtime into `game/build/`, writes per-game config.
+4. If Play! fails the bar: fallback C2 (PCSX2 as external process) — needs Q2 (owner's own BIOS dump).
+5. P5: acceptance runs, evidence, Gate Report.

@@ -15,7 +15,8 @@ python -B tools/recon/lzc.py    "ROM/Need for Speed - Hot Pursuit 2 (USA)"
 ## 1. Disc layout — and corrections to brief §4
 
 27 files (the brief said 25). SHA-256 of each file is in
-`tests/fixtures/slus20362_rom_manifest.tsv`.
+`converter/data/slus20362_rom_manifest.tsv` (compiled into the converter as the
+reference for ROM validation).
 
 | Path | Size (bytes) | Notes |
 |---|---:|---|
