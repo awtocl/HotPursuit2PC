@@ -105,6 +105,33 @@ What this says:
 
 Consequence: ADR 0006 — the recompiled build becomes the product; this build becomes the reference.
 
+## 4b. Addendum — a defect in the P6 pacer, found and fixed in R1 (2026-11-12)
+
+The addendum above reported emulated-refresh intervals for the race window only. Profiling for stage R1
+(`docs/recomp-analysis.md` §5) showed that **in 60 fps content — the intro videos and parts of the menus — the
+pacer added in P6 let emulated time advance two refreshes at once every 33 ms**: images were presented evenly, but
+the game's clock, its sound output and input sampling moved in bursts. This may be part of the sound problem the
+owner reported; that is **not verified** (the runs were muted, and the owner played the build *before* the pacer).
+
+Cause: the core lets the VM thread run at most two frames ahead of presentation; our `WaitPresent` holds each
+presentation until its instant. A VM thread that is more than one refresh behind the grid never waits in the
+pacer, so it runs two refreshes, then blocks until two presentations are done. The pacer tolerated a lag of up to
+four refreshes before restarting its grid, so this state was stable. Races were not affected (one presentation
+per two refreshes).
+
+Fix: restart the grid when more than **one** refresh behind (`FramePacer::WaitFrameEnd` in `engine/src/main.cpp`).
+Same scripted session, measurement build, `tools/frametimes.py` on the emulated-refresh ("vblank") intervals:
+
+| Window | Before (`.cache/r1-trace`) | After (`.cache/r1-trace2`) |
+|---|---|---|
+| Intro videos, 5–14 s | 48.4 % of intervals more than 25 % off; 138 longer than 25 ms (alternating ≈ 1 ms / 32 ms) | 1.4 % off; 4 longer than 25 ms |
+| Menus, 26–46 s | 23.0 % off; 101 longer than 25 ms | 2.6 % off; 17 longer than 25 ms |
+| Race, 56–79 s | 3.7 % off; 14 longer than 25 ms | 2.4 % off; 13 longer than 25 ms (unchanged) |
+
+Presentation intervals did not change (videos: median 16.67 ms, p95 16.9 ms in both runs). The intervals that
+remain long coincide with the core compiling code or with loading (`docs/recomp-analysis.md` §5).
+**Not verified:** by ear or by eye by the owner; un-muted.
+
 ## 5. What this evidence does not cover
 
 - No human has played it: feel of the handling, audio quality by ear, and

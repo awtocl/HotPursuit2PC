@@ -81,6 +81,9 @@ So that this can be checked, here is everything in the repository that was
 | `assets-pipeline/data/hp2_slus20362_names.txt` | the names of 362 files inside the game's archive, recovered so that unpacked files get readable names |
 | `tests/fixtures/slus20362_zfileset_inventory.tsv` | per-file offsets, sizes and SHA-256 hashes inside that archive, used by the tests |
 | `docs/dump-analysis.md` | a description of the archive's container format and the full file inventory |
+| `docs/recomp-analysis.md`, `recomp/tests/test_recomp_dump.cpp` | measurements of the game program: section addresses and sizes, counts of instructions, functions and switch tables, a handful of code addresses, timing of the reference build. No instructions or bytes of the program itself. |
+
+The test programs and status documents repeat some of these numbers.
 
 **You must bring your own copy.** To use these tools you need a dump of a
 copy of the game that *you* legally own, made by you from your own disc. This
@@ -159,18 +162,23 @@ What this means for you:
 | Disc image | Done. `hp2pc-cli image` rebuilds an ISO 9660 image from the validated folder (verified with an independent reader). |
 | Running the game | **Works, with problems.** Boots, plays movies, menus, races, pause, and saves to / loads from a virtual PS2 memory card. Emulator-backed. |
 | GUI and CLI | Done. Same operations in both. |
-| Automated tests | 10 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
+| Recompiler, analysis half | Done. Every one of the 431,681 instruction words of the game program decodes; 10,146 functions and 193 switch tables are found without symbols; in a traced session every one of the 29,860 code blocks the embedded core executed starts where the analysis predicted. The translator itself does not exist yet. |
+| Automated tests | 12 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
 
 ## Known problems
 
 Reported by the project owner after playing, then reproduced and measured:
 
-- **Stutter.** The emulated game's heavy frames take about 13 ms of one CPU
-  thread in the embedded core's JIT — sometimes more than the 16.7 ms
-  available — while the rest of the machine sits idle. Code and shaders are
-  also compiled the first time they are needed, which causes longer hitches.
-  A frame pacer added afterwards removes the constant jitter (presentation
-  now sits on an exact 60 Hz grid) but cannot remove the hitches.
+- **Stutter.** The emulated game's heavy frames take 13–15 ms of one CPU
+  thread in the embedded core — sometimes more than the 16.7 ms available —
+  while the rest of the machine sits idle. About a third of that is the game
+  program, a third the PS2's vector unit (geometry), a fifth passing drawing
+  data on. The core also compiles code the first time it runs (about 0.2 ms
+  per block, almost 30,000 blocks in an 80-second session, in bursts of up to
+  half a second) and shaders the first time they are used.
+  A frame pacer added afterwards removes the constant jitter (the game clock
+  and presentation sit on an exact 60 Hz grid) but cannot remove the hitches.
+  Measurements: [`docs/recomp-analysis.md`](docs/recomp-analysis.md).
 - **Rendering defects.** Tyre smoke and the glow of brake lights are drawn
   as flat translucent polygons instead of soft sprites. The cause inside the
   third-party renderer has not been identified yet.
@@ -271,6 +279,7 @@ Things worked out from the dump along the way (full evidence in
 | `assets-pipeline/` | C++ library and tool for the disc's containers (directory, hash, LZC, unpack, inventory) |
 | `converter/` | Converter core, CLI and GUI; disc-image builder |
 | `engine/` | The launcher and the virtual disc |
+| `recomp/` | Static recompiler, analysis half: executable reader, PS2 instruction decoder, function discovery, and the tool that checks them against the embedded core |
 | `tests/` | Test harness and fixtures (names, sizes and hashes only) |
 | `tools/` | Build helper, Play! fetch script, launcher run/measurement scripts, dev-only analysis scripts |
 | `docs/` | Status, decisions, evidence, reports, the original project brief |
@@ -282,6 +291,7 @@ Things worked out from the dump along the way (full evidence in
 | [`docs/STATUS.md`](docs/STATUS.md) | Where the project stands, what is next, open questions |
 | [`docs/adr/`](docs/adr/) | Architecture decision records, each with the options that were rejected |
 | [`docs/dump-analysis.md`](docs/dump-analysis.md) | Byte-level findings about the disc and the full file inventory |
+| [`docs/recomp-analysis.md`](docs/recomp-analysis.md) | What was measured about the game program and the reference build before writing the translator |
 | [`docs/prior-art.md`](docs/prior-art.md) | Every third-party source consulted or used, with its license and what was taken |
 | [`docs/evidence/`](docs/evidence/) | Measurements and acceptance runs |
 | [`docs/gate-reports/`](docs/gate-reports/) | End-of-phase reports: verified, not verified, what the owner must decide |
@@ -295,10 +305,14 @@ ends with a build the owner can play and numbers comparable with the stage
 before it; the emulator-backed build stays as the reference the new code is
 checked against.
 
-1. **Static recompilation of the game program.** The converter translates
-   the game's MIPS code to x64 ahead of time, on the user's machine. No code
-   is compiled while playing. Checked by running it in lock-step against the
-   reference core.
+1. **Static recompilation of the game program and of its vector-unit
+   microprograms.** The converter translates the game's PS2 code to x64 ahead
+   of time, on the user's machine. No code is compiled while playing. Checked
+   by running it in lock-step against the reference core.
+   *Analysis done* (function discovery validated against a traced session);
+   *translator not started*: the code generator is proposed in
+   [ADR 0007](docs/adr/0007-code-generator.md) and waits for the owner's
+   go-ahead on a dependency.
 2. **Host services instead of emulated hardware** where the game calls its
    libraries: disc reads straight from files, controller with analog
    triggers and rumble, memory card, timers.
@@ -308,8 +322,10 @@ checked against.
    optional 60 fps race mode.
 4. **Audio** mixed natively.
 
-Quality-of-life features (settings UI, save states, remapping) follow, each
-opt-in where it changes original behaviour.
+The modern graphics settings are to live inside the game's own options menus,
+not in a separate launcher window (owner's requirement). Other
+quality-of-life features (save states, remapping) follow, each opt-in where
+it changes original behaviour.
 
 This is a long road and there is no promise of dates.
 

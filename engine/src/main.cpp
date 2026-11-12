@@ -24,6 +24,8 @@
 //   --core-limiter        use the core's own frame limiter instead of our pacer (comparison only)
 //   --frametimes <csv>    record the instant of every emulated refresh and every presented image
 //                         (analyse with tools/frametimes.py)
+//   --trace <dir>         reference measurements for the recompiler (ref_trace.h): every block of
+//                         game code the core executed, time per refresh, a copy of main memory
 #include <windows.h>
 
 #include <dbghelp.h>
@@ -51,6 +53,7 @@
 
 #include <GL/wglew.h>
 
+#include "ref_trace.h"
 #include "virtual_disc.h"
 
 namespace
@@ -137,10 +140,16 @@ namespace
 			static thread_local HANDLE timer = CreateTimer();
 			const int64_t now = Now();
 			int64_t deadline = m_nextFrameEnd;
-			if(deadline == 0 || now - deadline > 4 * m_period)
+			if(deadline == 0 || now - deadline > m_period)
 			{
-				// First frame, or far behind after a load/hitch: restart the grid here
-				// instead of racing to catch up.
+				// First frame, or more than one refresh behind after a load/hitch:
+				// restart the grid here instead of racing to catch up.
+				// The limit must not be larger. The core lets the VM thread run at
+				// most two frames ahead of presentation, and each presentation waits
+				// for its instant (WaitPresent). A VM more than one period late never
+				// waits here, so with 60 fps content (videos, menus) it then advances
+				// two refreshes at once every 33 ms and can never catch up - measured
+				// with a limit of four periods (docs/evidence/m1-acceptance.md §4b).
 				deadline = now;
 				m_anchor.store(now);
 			}
@@ -341,6 +350,7 @@ namespace
 		void PresentBackbuffer() override
 		{
 			if(m_shotRequested.exchange(false)) SaveBackbuffer();
+			hp2ref::TracePresent();
 			g_pacer.WaitPresent();
 			SwapBuffers(m_dc);
 			g_frameTimes.Mark('P');
@@ -481,6 +491,7 @@ namespace
 		fs::path disc;  // or a disc image file (development)
 		fs::path shots;
 		fs::path frameTimes;  // CSV of every vblank and present (development)
+		fs::path trace;       // folder for reference measurements (development, ref_trace.h)
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -557,6 +568,7 @@ namespace
 				g_frameTimes.enabled = true;
 				g_frameTimes.events.reserve(1 << 18);
 			}
+			else if(a == L"--trace" && hasValue) options.trace = argv[++i];
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
 			else if(a == L"--unlimited") options.unlimited = true;
@@ -792,12 +804,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		Log("step: GS handler created");
 		UpdatePresentation(window);
 		auto frameConnection = g_vm->OnNewFrame.Connect([]() {
+			hp2ref::TraceVmFrameWorkDone(g_vmFrames.load());
 			g_pacer.WaitFrameEnd();  // on the VM thread: this is what holds the game to 60 Hz
+			hp2ref::TraceVmFrameWaitDone();
 			++g_vmFrames;
 			g_frameTimes.Mark('V');
 		});
 
 		g_vm->Pause();
+		if(!options.trace.empty())
+		{
+			hp2ref::TraceInstall(*g_vm, options.trace);
+			Log("step: reference tracing installed");
+		}
 		g_vm->Reset();
 		Log("step: VM reset");
 		if(g_disc)
@@ -881,6 +900,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->Pause();
 		frameConnection.reset();
 		g_frameTimes.Save(options.frameTimes);
+		hp2ref::TraceFinish(*g_vm);
 		g_vm->DestroyPadHandler();
 		g_vm->DestroyGSHandler();
 		g_vm->DestroySoundHandler();

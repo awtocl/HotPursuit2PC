@@ -14,7 +14,7 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('dev', 'release')] [string]$Preset = 'dev',
+  [ValidateSet('dev', 'release', 'profile')] [string]$Preset = 'dev',
   [switch]$NoTest,
   [switch]$Fresh,
   [string]$TestFilter = ''

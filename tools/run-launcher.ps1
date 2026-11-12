@@ -14,7 +14,7 @@
 [CmdletBinding()]
 param(
   [string]$RunName = 'run',
-  [ValidateSet('dev', 'release')] [string]$Preset = 'release',
+  [ValidateSet('dev', 'release', 'profile')] [string]$Preset = 'release',
   [string]$Disc = '',
   [string]$Rom = '',
   [int]$Frames = 1800,
@@ -25,6 +25,7 @@ param(
   [string[]]$Extra = @(),
   [switch]$Mute,
   [switch]$Unlimited,
+  [switch]$Trace,
   [switch]$KeepData,
   [int]$TimeoutSeconds = 0
 )
@@ -56,6 +57,7 @@ $a = $source + @('--data', "`"$data`"", '--shots', "`"$shots`"", '--shot-every',
        '--frames', $Frames, '--size', $Size, '--res', $Res)
 if ($Script) { $a += @('--script', $Script) }
 $a += @('--frametimes', "`"$(Join-Path $run 'frametimes.csv')`"")
+if ($Trace) { $a += @('--trace', "`"$(Join-Path $run 'trace')`"") }
 if ($Extra) { $a += $Extra }
 if ($Mute) { $a += '--mute' }
 if ($Unlimited) { $a += '--unlimited' }

@@ -31,6 +31,15 @@ data is in the tree itself.
 | [ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp) | GPL-3.0 | **reference-only** | "PlayStation 2 Static Recompiler (Experimental)". README limitations: "Performance is very bad for VU and GS", "Hardware emulation is partial and many paths are stubbed". Emits C++ (needs a C++20 compiler at conversion time). No tested-games list. | Any commercial game booting. Not a basis for M1; revisit when planning stage N1/N2 (ADR 0001). |
 | [Arntzen-Software/parallel-gs](https://github.com/Arntzen-Software/parallel-gs) | LGPL-3.0+ ("dual-licensing may be possible") | **reference-only** for now (M2 candidate) | Vulkan compute-shader GS emulation, 2x–16x SSAA, standalone tools + experimental PCSX2 integration; "early days". | No documented embedding API; external contributions not accepted. LGPL needs dynamic linking or relinkable objects. |
 
+## Translating the game (stage R1, ADR 0007)
+
+| Source | License | Verdict | What was confirmed | What remains UNVERIFIED |
+|---|---|---|---|---|
+| [LLVM](https://llvm.org/) | Apache 2.0 with LLVM exceptions (**from prior knowledge**) | **candidate, not fetched** — proposed as the recompiler's code generator in ADR 0007; needs the owner's permission to download | nothing yet | The license text (to be read from the fetched `LICENSE.TXT` before use), the release to pin, download and build size, whether it builds here with MSVC and the static C runtime. |
+| Play! CodeGen (already linked, see below) | BSD 2-Clause | **in use by the reference build only** | Its block-level code is what the measurements in `docs/recomp-analysis.md` §5 time. | — |
+| Cranelift, QBE, MIR, asmjit | — | **not used, not fetched** | Named in ADR 0007 from prior knowledge only. | Everything about them. |
+| The MIPS R5900 instruction encodings | public processor documentation; also visible in the reference core's sources (BSD 2-Clause) | **reference-only** | `recomp/src/r5900.cpp` was written from the published opcode tables; no code was copied. All 431,681 words of the game's code decode with it and its control-flow predictions match what the reference core executed. | The meaning of each instruction is not implemented yet. |
+
 ## Third-party software in the launcher (`HotPursuit2.exe`)
 
 Exactly the static libraries that the link step uses (checked in the build

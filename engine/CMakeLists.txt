@@ -40,6 +40,13 @@ set(BUILD_SHARED_LIBS OFF)
 set(HP2_ROOT_BUILD_TESTING ${BUILD_TESTING})
 set(BUILD_TESTING OFF)                   # keep third-party libraries from adding their own test targets
 
+# Measurement builds only (preset "profile"): Play!'s own per-zone profiler
+# (EE, VU, VIF, GIF, IOP, SPU ...), read by the launcher's --trace switch.
+option(HP2_PLAY_PROFILE "Build the Play! core with its profiler zones (measurement builds)" OFF)
+if(HP2_PLAY_PROFILE)
+  set(PROFILE ON)
+endif()
+
 add_subdirectory("${HP2_PLAY_DIR}/Source" "${CMAKE_CURRENT_BINARY_DIR}/play/core" EXCLUDE_FROM_ALL)
 add_subdirectory("${HP2_PLAY_DIR}/Source/gs/GSH_OpenGL" "${CMAKE_CURRENT_BINARY_DIR}/play/gsh_opengl" EXCLUDE_FROM_ALL)
 
@@ -59,6 +66,8 @@ target_link_libraries(hp2vdisc PRIVATE hp2core)
 # ---- the launcher -------------------------------------------------------------
 add_executable(hp2-launcher WIN32
   src/main.cpp
+  src/ref_trace.cpp
+  src/ref_trace.h
   src/launcher.manifest
   "${HP2_PLAY_DIR}/Source/sound/SH_WaveOut/SH_WaveOut.cpp")
 set_target_properties(hp2-launcher PROPERTIES OUTPUT_NAME HotPursuit2)

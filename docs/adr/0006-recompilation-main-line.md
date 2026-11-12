@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (2026-11-12). Supersedes the staging in ADR 0001 §Decision 2 ("Milestone 1 ships on Path C1") as the
   *product* direction; ADR 0001's target architecture (A′) is unchanged and is now what is being built.
+- **Amended 2026-11-12** by [ADR 0007](0007-code-generator.md): scope and acceptance of R1 (see "Amendments" at the end).
 - **Constraints in play:** C1, C5, C7, C8
 
 ## Context
@@ -83,4 +84,20 @@ R3: how much of the game's renderer can be intercepted at a high level rather th
 
 - The R1 spike showing that function-level translation of this binary is impractical (e.g. pervasive
   self-modifying or data-driven code), which would push towards block-level ahead-of-time translation instead.
+  **Checked 2026-11-12: it is practical** (`docs/recomp-analysis.md` §3–4, §7).
 - The owner preferring a quicker, smaller improvement (option A) for the time being.
+
+## Amendments
+
+**2026-11-12, after the R1 analysis stage** (`docs/recomp-analysis.md`, ADR 0007):
+
+- Owner requirements added the same day: the game must run **natively and make full use of the PC's hardware**;
+  the modern graphics settings must be **inside the game's own options menus**; the recompiled build is to be
+  **published to the GitHub repository only once it works well and those settings are in** (nothing is pushed
+  before that).
+- The measured cost of a busy race refresh is one third game program, one third vector-unit microcode, one fifth
+  passing geometry and drawing commands on. **R1 therefore translates the VU1 microprograms as well as the game
+  program**, and its acceptance is restated in ADR 0007 (EE + VU share ≤ 3 ms, nothing compiled while playing);
+  the "at least 3× lower" figure in the table above moves to R3.
+- R0 was not complete as stated: the pacer had a defect in 60 fps content, fixed during R1
+  (`docs/evidence/m1-acceptance.md` §4b).

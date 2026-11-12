@@ -11,7 +11,7 @@ it is now the **reference build**; the product is the recompiled one.
 |---|---|---|
 | Reference (was "M1") | the Play! PS2 core (BSD 2-Clause) linked into our launcher — **emulator-backed, not native** | works; known problems below |
 | R0 | same, with our frame pacer and per-frame measurement | **done** |
-| R1 | game code translated ahead of time by the converter | next |
+| R1 | game code and vector-unit microcode translated ahead of time by the converter | analysis done (`recomp/`); translator waits for ADR 0007 |
 | R2–R4 | host services, own renderer, native audio | not started |
 
 ## What is here
@@ -59,12 +59,33 @@ python -B tools/frametimes.py .cache\pace\frametimes.csv --from 52000 --to 75000
 ```
 
 `-Extra '--core-limiter'` reproduces the pacing the build had before the
-pacer. Numbers so far: `docs/evidence/m1-acceptance.md` §4a.
+pacer. Numbers so far: `docs/evidence/m1-acceptance.md` §4a and §4b.
+
+## Reference measurements for the recompiler
+
+`--trace <dir>` (`src/ref_trace.cpp`; `-Trace` in `tools/run-launcher.ps1`)
+replaces the core's executors by recording subclasses and writes:
+
+| File | Contents |
+|---|---|
+| `blocks.tsv` | every block of game code the core compiled, i.e. executed |
+| `vu1-blocks.tsv` | every vector-unit microcode block, with its contents |
+| `profile.csv` | per emulated refresh: CPU time of the VM and graphics threads, pacer wait, and — in the `profile` build — the core's own zones (EE, VU, VIF, GIF, IOP, SPU) |
+| `ee-ram.bin`, `vu1-micro.bin`, `ee-bios.bin` | memory at the end of the session |
+
+```powershell
+pwsh tools/build.ps1 -Preset profile -NoTest     # Release + the core's profiler zones, in .cache/build/profile
+pwsh tools/run-launcher.ps1 -RunName trace -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Trace ...
+python -B tools/profile.py .cache\trace\trace\profile.csv --from-frame 3120 --to-frame 4500 --label race
+```
+
+Analysis and results: `recomp/README.md`, `docs/recomp-analysis.md`.
 
 ## Known problems of the reference build
 
-- Heavy frames cost about 13 ms on one thread of the core's JIT and sometimes
-  miss the 16.7 ms refresh; code and shaders compile on first use (hitches).
+- Heavy frames cost 13–15 ms on one thread of the core and sometimes miss the
+  16.7 ms refresh; code (≈ 0.2 ms per block) and shaders compile on first use
+  (hitches).
 - Tyre smoke and brake-light glow are drawn as flat translucent polygons
   (cause in the core's OpenGL renderer not identified).
 - Races are drawn at 30 frames per second by the game itself; menus at 60 (ADR 0005 §6).
