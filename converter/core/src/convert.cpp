@@ -1,5 +1,7 @@
 #include "hp2/convert.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <ctime>
 #include <cwctype>
@@ -11,6 +13,16 @@
 namespace hp2 {
 
 namespace {
+
+// Resources embedded by converter/CMakeLists.txt when the engine is built.
+ByteView embedded_resource(const wchar_t* name) {
+  const HRSRC res = FindResourceW(nullptr, name, MAKEINTRESOURCEW(10) /* RT_RCDATA */);
+  if (!res) return {};
+  const HGLOBAL handle = LoadResource(nullptr, res);
+  const void* data = handle ? LockResource(handle) : nullptr;
+  if (!data) return {};
+  return ByteView(static_cast<const std::uint8_t*>(data), SizeofResource(nullptr, res));
+}
 
 constexpr std::uint64_t kQuickHashLimit = 64ull << 20;
 constexpr std::uint64_t kSpaceMargin = 64ull << 20;
@@ -167,6 +179,60 @@ std::size_t count_files(const fs::path& dir) {
 
 }  // namespace
 
+// --------------------------------------------------------------------- runtime
+
+RuntimePayload load_embedded_runtime() {
+  RuntimePayload payload;
+  const ByteView launcher = embedded_resource(L"HP2_LAUNCHER");
+  const ByteView notices = embedded_resource(L"HP2_NOTICES");
+  payload.launcher.assign(launcher.begin(), launcher.end());
+  payload.notices.assign(notices.begin(), notices.end());
+  return payload;
+}
+
+std::string runtime_readme_text() {
+  return "Need for Speed: Hot Pursuit 2 (PlayStation 2, NTSC-U) - PC build made by HotPursuit2PC\r\n"
+         "========================================================================================\r\n"
+         "\r\n"
+         "START THE GAME:  HotPursuit2.exe  (in this folder)\r\n"
+         "\r\n"
+         "WHAT THIS BUILD IS\r\n"
+         "  This is an EMULATOR-BACKED build. The original PlayStation 2 game code from your own\r\n"
+         "  disc runs inside the open-source Play! emulator core, which is built into\r\n"
+         "  HotPursuit2.exe. It is the PS2 game (handling, AI, cameras, menus), but it is NOT a\r\n"
+         "  native Windows port. The native port is the project's later goal.\r\n"
+         "  The game files are read from ..\\rom and are never modified. No BIOS file is needed.\r\n"
+         "\r\n"
+         "CONTROLS\r\n"
+         "  Xbox-style controller          PS2 button      Keyboard\r\n"
+         "  A / B / X / Y                  Cross / Circle / Square / Triangle    X / C / Z / S\r\n"
+         "  D-pad, left stick              D-pad, left stick                     arrow keys\r\n"
+         "  LB / RB, LT / RT               L1 / R1, L2 / R2                      Q / W, 1 / 2\r\n"
+         "  Start / Back                   Start / Select                        Enter / Backspace\r\n"
+         "  Alt+Enter or F11 switches between window and full screen.\r\n"
+         "\r\n"
+         "OPTIONS (add them after HotPursuit2.exe, e.g. in a shortcut)\r\n"
+         "  --fullscreen        start in full screen\r\n"
+         "  --res <1..8>        internal resolution multiplier (default 2 = 1280x896)\r\n"
+         "  --size <W>x<H>      window size (default 1280x896)\r\n"
+         "  --mute              no sound\r\n"
+         "\r\n"
+         "FRAME RATE\r\n"
+         "  The picture is refreshed at the console's 60 Hz and the game runs at its original\r\n"
+         "  speed. The game itself draws menus at 60 frames per second and races at 30; that is\r\n"
+         "  how the game paces itself, not a limit of this build or of your PC.\r\n"
+         "\r\n"
+         "WHERE THINGS ARE\r\n"
+         "  data\\               created on first start: settings, launcher.log\r\n"
+         "  data\\vfs\\mc0\\       the PlayStation 2 memory card (your saved games)\r\n"
+         "  ..\\rom\\             your game files (or a pointer to them)\r\n"
+         "  THIRD-PARTY-NOTICES.txt   licenses of the software inside HotPursuit2.exe\r\n"
+         "\r\n"
+         "IF SOMETHING GOES WRONG\r\n"
+         "  Look at data\\launcher.log. If the game files are reported as damaged, run the\r\n"
+         "  HotPursuit2PC converter again on this game folder; it repairs what is missing.\r\n";
+}
+
 // ------------------------------------------------------------------ small enums
 
 std::string_view to_string(Mode m) { return m == Mode::Portable ? "portable" : "installed"; }
@@ -281,8 +347,15 @@ GameFolderStatus inspect_game_folder(const fs::path& game_dir, const RomProfile&
   StageStatus validate{"validate", "Check the ROM"};
   StageStatus rom{"rom", "Store the ROM"};
   StageStatus unpack{"unpack", "Unpack the game assets"};
-  StageStatus build{"build", "Build the runnable game", StageState::NotAvailable,
-                    "not in this version (arrives with Milestone 1)"};
+  StageStatus build{"build", "Install the runnable game"};
+  const fs::path launcher = layout.build() / from_utf8(kLauncherFileName);
+  if (st.is_game_folder && fs::is_regular_file(launcher, ec)) {
+    build.state = StageState::Done;
+    build.detail = "build/HotPursuit2.exe (emulator-backed build)";
+  } else if (embedded_resource(L"HP2_LAUNCHER").empty()) {
+    build.state = StageState::NotAvailable;
+    build.detail = "this converter was built without the game runtime";
+  }
 
   if (st.is_game_folder) {
     if (cfg.has("stage.validate")) {
@@ -584,10 +657,48 @@ ConvertResult convert(const ConvertRequest& request, const ConvertEvents& events
     cfg.set("updated", timestamp());
     cfg.save(layout.state_file());
 
-    // ---- 6. build -------------------------------------------------------------------------
+    // ---- 6. build: install the launcher -------------------------------------------------
     stage = "build";
-    log.line("The runnable game (stage 'build') is not produced by this converter version - "
-             "it arrives with Milestone 1.");
+    const RuntimePayload runtime = request.runtime ? *request.runtime : load_embedded_runtime();
+    if (!runtime.available()) {
+      log.line("This converter was built without the game runtime, so the runnable game was not "
+               "installed (stage 'build' skipped).");
+      cfg.set("stage.build", "unavailable (converter built without the runtime)");
+    } else {
+      fs::create_directories(layout.build(), ec);
+      if (ec) fail("cannot create folder '{}': {}", to_utf8(layout.build()), ec.message());
+      const std::string readme = runtime_readme_text();
+      const auto as_bytes = [](const std::string& s) {
+        return ByteView(reinterpret_cast<const std::uint8_t*>(s.data()), s.size());
+      };
+      // Our own generated files: an older version is kept aside, never silently lost.
+      const auto install = [&](std::string_view name, ByteView content) {
+        const fs::path target = layout.build() / from_utf8(name);
+        if (fs::exists(target, ec)) {
+          bool same = fs::is_regular_file(target, ec) && fs::file_size(target, ec) == content.size();
+          if (same) same = sha256_of_path(target, {}) == Sha256::hex_of(content);
+          if (same) return false;
+          const fs::path aside = move_aside(target);
+          log.line(std::format("'build/{}' differed from this converter's version; the old file was "
+                               "kept as '{}'.",
+                               name, to_utf8(aside.filename())));
+        }
+        OutputFile out(target);
+        out.write(content);
+        out.commit();
+        return true;
+      };
+      const bool wrote_launcher = install(kLauncherFileName, runtime.launcher);
+      install("THIRD-PARTY-NOTICES.txt", as_bytes(runtime.notices));
+      install("README.txt", as_bytes(readme));
+      log.line(std::format("Runnable game {}: '{}'.", wrote_launcher ? "installed" : "already in place",
+                           to_utf8(layout.build() / from_utf8(kLauncherFileName))));
+      log.line("Note: this is an EMULATOR-BACKED build (the PS2 game code runs inside the Play! core "
+               "built into the launcher). It is not a native port. See build/README.txt.");
+      cfg.set("stage.build", std::format("done {} (emulator-backed launcher)", timestamp()));
+    }
+    cfg.set("updated", timestamp());
+    cfg.save(layout.state_file());
     log.line("Done.");
     result.ok = true;
   } catch (const Cancelled&) {

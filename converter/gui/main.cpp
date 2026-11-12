@@ -267,12 +267,19 @@ void on_done(ConvertResult* r) {
   if (r->ok) {
     SendMessageW(g.progress, PBM_SETPOS, 1000, 0);
     SetWindowTextW(g.progress_text, L"Finished.");
-    if (!g.auto_test)
-      MessageBoxW(g.wnd,
-                  L"Conversion finished: the ROM is stored and the game assets are unpacked in the game folder.\n\n"
-                  L"Note: this converter version does not yet produce the runnable game. "
-                  L"That step arrives with Milestone 1.",
-                  L"HotPursuit2PC", MB_OK | MB_ICONINFORMATION);
+    if (!g.auto_test) {
+      const fs::path launcher = r->status.root / L"build" / L"HotPursuit2.exe";
+      std::error_code ec;
+      std::wstring msg = L"Conversion finished.\n\n";
+      if (fs::is_regular_file(launcher, ec))
+        msg += L"Start the game with:\n" + launcher.wstring() +
+               L"\n\nThis is an emulator-backed build: the PS2 game runs inside the Play! core built into that "
+               L"program. It is not a native port yet. Details are in README.txt next to it.";
+      else
+        msg += L"The ROM is stored and the game assets are unpacked, but this converter was built without the "
+               L"game runtime, so no runnable game was installed.";
+      MessageBoxW(g.wnd, msg.c_str(), L"HotPursuit2PC", MB_OK | MB_ICONINFORMATION);
+    }
   } else {
     SetWindowTextW(g.progress_text, r->cancelled ? L"Cancelled." : L"Failed.");
     std::wstring msg = crlf(widen(r->error));

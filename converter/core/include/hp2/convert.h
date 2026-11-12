@@ -18,7 +18,8 @@ inline constexpr std::string_view kStateFileName = "hp2pc.cfg";
 //   hp2pc.cfg   settings + stage state (marks the folder as ours)
 //   rom/        copy of the ROM, or rom-reference.tsv pointing at it
 //   assets/     unpacked Z fileset + manifest.tsv
-//   build/      the runnable game (Milestone 1; not produced by v0)
+//   build/      the runnable game: HotPursuit2.exe, README.txt, notices,
+//               and (created by the game) data/ with settings and memory cards
 //   logs/       one log per conversion run
 struct GameLayout {
   fs::path root;
@@ -92,6 +93,26 @@ std::optional<fs::path> find_game_folder(const fs::path& base_dir);
 // reserved characters. Returns an explanation if it is not acceptable.
 std::optional<std::string> why_bad_folder_name(std::string_view name);
 
+// --------------------------------------------------------------------- runtime
+
+// What the "build" stage installs into <game>/build so that the game runs
+// without the converter (brief §3.4). Milestone 1: an EMULATOR-BACKED
+// launcher (ADR 0001/0005) - the README it writes says so.
+struct RuntimePayload {
+  Bytes launcher;        // HotPursuit2.exe
+  std::string notices;   // THIRD-PARTY-NOTICES.txt
+  bool available() const { return !launcher.empty(); }
+};
+
+inline constexpr std::string_view kLauncherFileName = "HotPursuit2.exe";
+
+// The payload embedded in the running converter executable, or an empty
+// payload if this converter was built without the engine.
+RuntimePayload load_embedded_runtime();
+
+// The text of <game>/build/README.txt.
+std::string runtime_readme_text();
+
 // --------------------------------------------------------------------- convert
 
 struct ConvertRequest {
@@ -102,6 +123,7 @@ struct ConvertRequest {
   bool full_check = false;           // hash the large ROM files before starting
   bool repair = false;               // move mismatching files aside and redo them
   bool unpack_assets = true;
+  std::optional<RuntimePayload> runtime;  // default: load_embedded_runtime()
 };
 
 struct ConvertEvents {
@@ -119,9 +141,9 @@ struct ConvertResult {
   GameFolderStatus status;    // state of the game folder after the run
 };
 
-// Runs validate -> rom -> unpack. Safe to call again on the same folder: work
-// that is already complete is detected and kept. Never throws; failures are
-// reported in the result and written to the log.
+// Runs validate -> rom -> unpack -> build. Safe to call again on the same
+// folder: work that is already complete is detected and kept. Never throws;
+// failures are reported in the result and written to the log.
 ConvertResult convert(const ConvertRequest& request, const ConvertEvents& events = {},
                       const RomProfile& profile = RomProfile::slus20362());
 

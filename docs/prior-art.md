@@ -6,7 +6,11 @@ Checked 2026-11-11 (phase P0). Verdicts:
 - **reference-only** — may be read for format/behaviour knowledge; no code or data copied.
 - **not used** — looked at, nothing taken.
 
-Nothing third-party is in the tree yet.
+**In use since phase P4b:** the Play! emulator core and the libraries it
+bundles, linked statically into `HotPursuit2.exe` (see "Third-party software
+in the launcher" below). Their source is *not* in this repository;
+`tools/fetch-play.ps1` downloads the pinned revision. No third-party code or
+data is in the tree itself.
 
 ## Asset formats
 
@@ -21,11 +25,40 @@ Nothing third-party is in the tree yet.
 
 | Source | License | Verdict | What was confirmed | What remains UNVERIFIED |
 |---|---|---|---|---|
-| [jpd002/Play-](https://github.com/jpd002/Play-) | **BSD 2-Clause** (`License.txt`, © 2006-2026 Jean-Philip Desjardins) | **reuse-ok** (candidate M1 core, ADR 0001 path C1) | HLE: "Using an external BIOS file is not necessary or possible". Boots disc images and ELFs. CMake + Visual Studio build; Qt needed only for its own UI; a `build_retro` (libretro core) target exists. | Compatibility with **SLUS-20362** specifically. Exact build dependencies of the headless/libretro target. Supported image formats beyond what the README lists. |
+| [jpd002/Play-](https://github.com/jpd002/Play-) | **BSD 2-Clause** (`License.txt`, © 2006-2026 Jean-Philip Desjardins) | **reuse-ok — in use** (M1 core, ADR 0001 path C1, ADR 0005). Pinned: `1f27232772e484bfb79364b751b84f41f4c87481` (2026-10-24). Fetched with the owner's approval on 2026-11-12. Source unmodified. | HLE: "Using an external BIOS file is not necessary or possible". Its core libraries build with MSVC without Qt and link statically. **Runs SLUS-20362** from the owner's files: boot, menus, race, pause, memory-card save and load (`docs/evidence/m1-acceptance.md`). | Everything listed under "does not cover" in the evidence file (other modes, long sessions, other PCs). |
 | [Play-Compatibility #400](https://github.com/jpd002/Play-Compatibility/issues/400) | — | evidence | **SLES-50731** (PAL HP2): labels `state-playable` + `issue-mipmapping`, last tested 2024-04-26 on commit `07c1898`: "Fully playable with good performance", texture flicker between mip levels on some tracks. History: loadable (2018) → ingame (2022) → playable (2024). | NTSC-U behaviour; whether the mip issue is fixed in current builds. |
 | [PCSX2](https://github.com/PCSX2/pcsx2) | GPL-3.0+ (from prior knowledge; not re-fetched this session → treat as UNVERIFIED until checked at use) | **reference-only** for now (fallback path C2) | Search snippets of the PCSX2 wiki: game is flagged CPU- and GPU-intensive, a widescreen patch exists, old "Busted screen" and sun-ray bugs are listed as fixed. | The live wiki page returned HTTP 403, so the current compatibility rating is unverified. PCSX2 requires a BIOS dumped from the user's own console — content outside the game dump (C1), a user decision if ever needed. |
 | [ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp) | GPL-3.0 | **reference-only** | "PlayStation 2 Static Recompiler (Experimental)". README limitations: "Performance is very bad for VU and GS", "Hardware emulation is partial and many paths are stubbed". Emits C++ (needs a C++20 compiler at conversion time). No tested-games list. | Any commercial game booting. Not a basis for M1; revisit when planning stage N1/N2 (ADR 0001). |
 | [Arntzen-Software/parallel-gs](https://github.com/Arntzen-Software/parallel-gs) | LGPL-3.0+ ("dual-licensing may be possible") | **reference-only** for now (M2 candidate) | Vulkan compute-shader GS emulation, 2x–16x SSAA, standalone tools + experimental PCSX2 integration; "early days". | No documented embedding API; external contributions not accepted. LGPL needs dynamic linking or relinkable objects. |
+
+## Third-party software in the launcher (`HotPursuit2.exe`)
+
+Exactly the static libraries that the link step uses (checked in the build
+tree). Each license text is copied from the fetched source into
+`THIRD-PARTY-NOTICES.txt`, which the converter writes next to the launcher;
+the build fails if one of the license files is missing.
+
+| Component | Where it comes from | License | License file used |
+|---|---|---|---|
+| Play! core (`PlayCore`, `app_shared`, `gsh_opengl`) | jpd002/Play- @ `1f27232` | BSD 2-Clause | `License.txt` |
+| Play! Framework (`Framework`, `Framework_Http`, `Framework_OpenGl`) | jpd002/Play--Framework @ `587f278` | BSD 2-Clause | `deps/Framework/License.txt` |
+| Play! CodeGen (JIT) | jpd002/Play--CodeGen @ `a5009f7` | BSD 2-Clause | `deps/CodeGen/License.txt` |
+| libchdr | jpd002/libchdr @ `284e38b` (fork of rtissera/libchdr) | BSD 3-Clause | `deps/libchdr/LICENSE.txt` |
+| LZMA SDK 24.05 (inside libchdr) | bundled in libchdr | public domain | `deps/libchdr/deps/lzma-24.05/LICENSE` |
+| Zstandard | facebook/zstd @ `f8745da` | BSD (dual BSD/GPLv2; used under BSD) | `deps/Dependencies/zstd/LICENSE` |
+| zlib | madler/zlib @ `5a82f71` | zlib license | `deps/Dependencies/zlib/LICENSE` |
+| xxHash | Cyan4973/xxHash @ `e626a72` | BSD 2-Clause | `deps/Dependencies/xxHash/LICENSE` |
+| bzip2 1.0.6 | bundled in Play-Dependencies @ `8a5f6b1` | bzip2 license (BSD-style) | `deps/Dependencies/bzip2-1.0.6/LICENSE` |
+| GLEW 2.0.0 | bundled in Play-Dependencies | Modified BSD / MIT | `deps/Dependencies/glew-2.0.0/LICENSE.txt` |
+
+All are permissive and compatible with shipping a binary under our MIT
+license plus notices. Not fetched and not linked: Nuanceur (Vulkan only),
+AltKit, SDWebImage (iOS), ghc_filesystem, nlohmann_json (used only by Play!'s UI code).
+
+Other sources consulted in P4b: a web search summary of GameSpot's 2002 PS2
+review (frame rate remark; the page itself returned HTTP 403, so the wording
+is second-hand) and silentsblog.com's mod page for this game (no frame-rate
+information; nothing taken).
 
 ## Decisions that follow
 

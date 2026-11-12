@@ -37,14 +37,75 @@ target_include_directories(hp2core
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(hp2core PUBLIC hp2assets)
 
+# --- runtime payload: the launcher travels inside the converter ---------------------
+# The converter is a single .exe (C6), so the game launcher and the license
+# notices of what it is built from are embedded as resources and written
+# into <game>/build by the "build" stage. Without the engine (no Play!
+# source fetched) the converter still builds; that stage is then unavailable.
+set(HP2_PAYLOAD_RC "")
+if(TARGET hp2-launcher)
+  set(payload_dir "${CMAKE_CURRENT_BINARY_DIR}/payload")
+  file(MAKE_DIRECTORY "${payload_dir}")
+
+  set(notices "HotPursuit2.exe (the launcher written by the HotPursuit2PC converter) contains the\n")
+  string(APPEND notices "following third-party software. HotPursuit2PC's own code is MIT-licensed.\n")
+  string(APPEND notices "No game code or game data is part of this program.\n")
+  foreach(item
+      "Play! PS2 emulator core|https://github.com/jpd002/Play-|License.txt"
+      "Play! Framework|https://github.com/jpd002/Play--Framework|deps/Framework/License.txt"
+      "Play! CodeGen|https://github.com/jpd002/Play--CodeGen|deps/CodeGen/License.txt"
+      "libchdr|https://github.com/rtissera/libchdr|deps/libchdr/LICENSE.txt"
+      "LZMA SDK (inside libchdr)|https://www.7-zip.org/sdk.html|deps/libchdr/deps/lzma-24.05/LICENSE"
+      "Zstandard|https://github.com/facebook/zstd|deps/Dependencies/zstd/LICENSE"
+      "zlib|https://zlib.net|deps/Dependencies/zlib/LICENSE"
+      "xxHash|https://github.com/Cyan4973/xxHash|deps/Dependencies/xxHash/LICENSE"
+      "bzip2|https://sourceware.org/bzip2/|deps/Dependencies/bzip2-1.0.6/LICENSE"
+      "GLEW|https://glew.sourceforge.net|deps/Dependencies/glew-2.0.0/LICENSE.txt")
+    string(REPLACE "|" ";" parts "${item}")
+    list(GET parts 0 name)
+    list(GET parts 1 url)
+    list(GET parts 2 rel)
+    if(NOT EXISTS "${HP2_PLAY_DIR}/${rel}")
+      message(FATAL_ERROR "License file for ${name} not found: ${HP2_PLAY_DIR}/${rel}")
+    endif()
+    file(READ "${HP2_PLAY_DIR}/${rel}" text)
+    string(APPEND notices "\n================================================================================\n")
+    string(APPEND notices "${name}\n${url}\n")
+    string(APPEND notices "================================================================================\n\n${text}\n")
+  endforeach()
+  file(CONFIGURE OUTPUT "${payload_dir}/THIRD-PARTY-NOTICES.txt" CONTENT "${notices}" @ONLY NEWLINE_STYLE CRLF)
+
+  add_custom_command(
+    OUTPUT "${payload_dir}/HotPursuit2.exe"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:hp2-launcher> "${payload_dir}/HotPursuit2.exe"
+    DEPENDS hp2-launcher
+    COMMENT "Staging the launcher for embedding into the converter")
+  set(HP2_PAYLOAD_RC "${payload_dir}/payload.rc")
+  file(CONFIGURE OUTPUT "${HP2_PAYLOAD_RC}" CONTENT
+"// Generated - the game runtime carried by the converter.
+HP2_LAUNCHER RCDATA \"${payload_dir}/HotPursuit2.exe\"
+HP2_NOTICES  RCDATA \"${payload_dir}/THIRD-PARTY-NOTICES.txt\"
+" @ONLY)
+  set_source_files_properties("${HP2_PAYLOAD_RC}" PROPERTIES
+    OBJECT_DEPENDS "${payload_dir}/HotPursuit2.exe;${payload_dir}/THIRD-PARTY-NOTICES.txt")
+  add_custom_target(hp2-payload DEPENDS "${payload_dir}/HotPursuit2.exe")
+  message(STATUS "converter: the launcher will be embedded (stage 'build' available)")
+else()
+  message(STATUS "converter: no launcher to embed (stage 'build' unavailable in this build)")
+endif()
+
 # --- CLI: hp2pc-cli.exe -----------------------------------------------------------
-add_executable(hp2pc-cli cli/main.cpp)
+add_executable(hp2pc-cli cli/main.cpp ${HP2_PAYLOAD_RC})
 target_link_libraries(hp2pc-cli PRIVATE hp2core)
 
 # --- GUI: HotPursuit2PC.exe ---------------------------------------------------------
-add_executable(hp2pc-gui WIN32 gui/main.cpp gui/app.manifest)
+add_executable(hp2pc-gui WIN32 gui/main.cpp gui/app.manifest ${HP2_PAYLOAD_RC})
 set_target_properties(hp2pc-gui PROPERTIES OUTPUT_NAME HotPursuit2PC)
 target_link_libraries(hp2pc-gui PRIVATE hp2core comctl32 ole32 shell32 user32 gdi32)
+if(TARGET hp2-payload)
+  add_dependencies(hp2pc-cli hp2-payload)
+  add_dependencies(hp2pc-gui hp2-payload)
+endif()
 
 # --- tests -----------------------------------------------------------------------
 if(BUILD_TESTING)

@@ -12,7 +12,7 @@ jobs:
   build-test:
     name: Build + test (Windows x64)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +24,10 @@ jobs:
           }
           if ($bad) { Write-Error "Forbidden files are tracked:`n$($bad -join "`n")"; exit 1 }
           Write-Host "OK: no game data tracked."
+
+      - name: Fetch the pinned Play! core (BSD-2, not part of this repository)
+        shell: pwsh
+        run: pwsh tools/fetch-play.ps1
 
       - name: Configure
         shell: pwsh
@@ -42,6 +46,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hotpursuit2pc-windows-x64
+          # The converter carries the launcher inside it; no game data is involved.
           path: |
-            build/**/Release/*.exe
+            build/converter/Release/HotPursuit2PC.exe
+            build/converter/Release/hp2pc-cli.exe
           if-no-files-found: error

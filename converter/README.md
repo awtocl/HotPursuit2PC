@@ -10,10 +10,12 @@ without the converter. GUI framework decision: [ADR 0003](../docs/adr/0003-gui-f
 | `core/` — `hp2core` library: `check_rom`, `inspect_game_folder`, `convert` | — | v0 done |
 | `cli/` — headless front-end | `hp2pc-cli.exe` | v0 done |
 | `gui/` — Win32 front-end | `HotPursuit2PC.exe` | v0 done |
-| Stage `build` (the runnable game) | `game/build/` | **not implemented** — Milestone 1 (phase P4) |
+| Stage `build` (the runnable game) | `game/build/HotPursuit2.exe` | done — **emulator-backed** launcher (see `engine/`), embedded in the converter |
 
-Both executables are static (≈ 0.7 MB each, Release) and depend only on DLLs
-that ship with Windows.
+Both executables are static (≈ 4.3 MB each, Release, including the 3.5 MB
+launcher they carry) and depend only on DLLs that ship with Windows. Built
+without the engine (no Play! source fetched) they are ≈ 0.7 MB and the
+`build` stage reports itself as unavailable.
 
 ## What v0 does
 
@@ -27,6 +29,12 @@ that ship with Windows.
 2. **Store the ROM**: copied into `game/rom/` and verified by SHA-256 while
    copying (portable and default), or referenced in place (installed mode only).
 3. **Unpack the assets** into `game/assets/` (see `assets-pipeline/`).
+4. **Install the runnable game** into `game/build/`: `HotPursuit2.exe`,
+   `README.txt` (says plainly that the build is emulator-backed, lists
+   controls and options) and `THIRD-PARTY-NOTICES.txt`. The launcher reads
+   `game/rom` directly as a virtual disc and keeps its settings and memory
+   cards in `game/build/data/`. A re-run keeps identical files; a launcher
+   that differs from the converter's version is moved aside, never lost.
 
 ## The game folder (C6)
 
@@ -38,7 +46,7 @@ that ship with Windows.
     hp2pc.cfg              settings + stage state; marks the folder as ours
     rom/                   ROM copy, or rom-reference.tsv
     assets/                unpacked Z fileset + manifest.tsv
-    build/                 the runnable game (Milestone 1)
+    build/                 the runnable game: HotPursuit2.exe, README.txt, notices, data/ (settings, memory cards)
     logs/                  convert-YYYYMMDD-HHMMSS.log, one per run
 ```
 
@@ -71,10 +79,10 @@ hp2pc-cli version
 ```
 
 `image` rebuilds an ISO 9660 disc image from the validated ROM folder
-(`core/include/hp2/iso.h`) — the form any PS2 runtime boots. It is a separate
-command for now; `convert` will call it once the Milestone 1 runtime is chosen.
-Verified with an independent reader (7-Zip): 27 files, all SHA-256 identical
-to the ROM. Not yet verified: the game booting from it.
+(`core/include/hp2/iso.h`). `convert` does not need it — the launcher serves
+the same layout from the ROM folder without writing an image — but it is
+handy for running the dump elsewhere. Verified with an independent reader
+(7-Zip): 27 files, all SHA-256 identical to the ROM; and the game boots from it.
 
 Exit codes: 0 ok, 1 failed, 2 bad usage, 3 ROM folder not usable, 4 cancelled (Ctrl+C).
 

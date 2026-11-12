@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 project(HotPursuit2PC
   VERSION 0.1.0
   DESCRIPTION "Converter that turns a user's own NFS Hot Pursuit 2 (PS2, NTSC-U) dump into a PC build"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)   # C: only for third-party libraries pulled in by engine/
 
 if(NOT WIN32)
   message(FATAL_ERROR "HotPursuit2PC targets Windows 10/11 x64 only (brief: target platform).")
@@ -34,8 +34,8 @@ include(CTest)   # defines BUILD_TESTING (ON by default) and enables testing
 
 add_subdirectory(tests/harness)
 add_subdirectory(assets-pipeline)
+add_subdirectory(engine)      # before converter/: the converter embeds the launcher when it exists
 add_subdirectory(converter)
-add_subdirectory(engine)
 if(BUILD_TESTING)
   add_subdirectory(tests)
 endif()

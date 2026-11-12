@@ -286,7 +286,7 @@ TEST(convert_portable_creates_the_whole_layout_inside_one_folder) {
   CHECK(stages_seen["unpack"] > 0);
   CHECK(contains(lines, "ROM stored: 6 file(s) copied and verified"));
   CHECK(contains(lines, "Assets unpacked: 4 file(s) written"));
-  CHECK(contains(lines, "not produced by this converter version"));
+  CHECK(contains(lines, "built without the game runtime"));  // the test executable carries no launcher
 
   // state
   const KeyValueFile cfg = KeyValueFile::load(game / "hp2pc.cfg");
@@ -451,6 +451,67 @@ TEST(convert_never_overwrites_a_mismatching_rom_copy_silently) {
   CHECK(testkit::read_bytes(victim) == pattern(4000, 11));
   CHECK(testkit::read_bytes(game / "rom" / "SLUS_203.62.mismatch-1") == bytes_of("tampered"));
   CHECK(r.status.last_error.empty());
+}
+
+TEST(build_stage_installs_the_runtime_and_says_what_it_is) {
+  FakeDisc d;
+  const fs::path game = d.tmp.path() / "game";
+  ConvertRequest req = d.request(game);
+  RuntimePayload runtime;
+  runtime.launcher = pattern(5000, 77);  // stands in for HotPursuit2.exe
+  runtime.notices = "licenses of third-party software\r\n";
+  req.runtime = runtime;
+
+  std::vector<std::string> lines;
+  ConvertEvents ev;
+  ev.log = [&](std::string_view l) { lines.emplace_back(l); };
+  ConvertResult r = convert(req, ev, d.profile);
+  CHECK(r.ok);
+  CHECK(testkit::read_bytes(game / "build" / "HotPursuit2.exe") == runtime.launcher);
+  CHECK(testkit::read_bytes(game / "build" / "THIRD-PARTY-NOTICES.txt") == bytes_of(runtime.notices));
+  const Bytes readme_raw = testkit::read_bytes(game / "build" / "README.txt");
+  const std::string readme(readme_raw.begin(), readme_raw.end());
+  CHECK(readme == runtime_readme_text());
+  // Honest labelling (ADR 0001): the build must say it is emulator-backed and not native.
+  CHECK(readme.find("EMULATOR-BACKED") != std::string::npos);
+  CHECK(readme.find("NOT a") != std::string::npos);
+  CHECK(contains(lines, "Runnable game installed"));
+  CHECK(contains(lines, "EMULATOR-BACKED build"));
+  CHECK(r.status.stages[3].state == StageState::Done);
+  CHECK(KeyValueFile::load(game / "hp2pc.cfg").get("stage.build").starts_with("done"));
+  for (const auto& de : fs::recursive_directory_iterator(game / "build")) CHECK(de.path().extension() != ".part");
+
+  // Re-run: nothing rewritten.
+  const auto stamp = fs::last_write_time(game / "build" / "HotPursuit2.exe");
+  lines.clear();
+  r = convert(req, ev, d.profile);
+  CHECK(r.ok);
+  CHECK(contains(lines, "Runnable game already in place"));
+  CHECK(fs::last_write_time(game / "build" / "HotPursuit2.exe") == stamp);
+
+  // A newer converter brings a different launcher: the old one is kept aside, not lost.
+  runtime.launcher = pattern(6000, 78);
+  req.runtime = runtime;
+  lines.clear();
+  r = convert(req, ev, d.profile);
+  CHECK(r.ok);
+  CHECK(testkit::read_bytes(game / "build" / "HotPursuit2.exe") == runtime.launcher);
+  CHECK(testkit::read_bytes(game / "build" / "HotPursuit2.exe.mismatch-1") == pattern(5000, 77));
+  CHECK(contains(lines, "the old file was kept as"));
+
+  // Things the game writes later (its data folder) are left alone by a re-run.
+  testkit::write_bytes(game / "build" / "data" / "vfs" / "mc0" / "save.bin", pattern(64, 5));
+  r = convert(req, ev, d.profile);
+  CHECK(r.ok);
+  CHECK(testkit::read_bytes(game / "build" / "data" / "vfs" / "mc0" / "save.bin") == pattern(64, 5));
+
+  // A converter without a runtime still converts, and says so.
+  ConvertRequest bare = d.request(d.tmp.path() / "bare");
+  lines.clear();
+  r = convert(bare, ev, d.profile);
+  CHECK(r.ok);
+  CHECK(!fs::exists(bare.game_dir / "build" / "HotPursuit2.exe"));
+  CHECK(r.status.stages[3].state == StageState::NotAvailable);
 }
 
 TEST(portable_folder_is_relocatable_and_works_without_the_original_rom) {
