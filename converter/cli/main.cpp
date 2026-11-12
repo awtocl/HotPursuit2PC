@@ -14,6 +14,7 @@
 #include <string>
 
 #include "hp2/convert.h"
+#include "hp2/iso.h"
 
 using namespace hp2;
 
@@ -60,6 +61,10 @@ int usage(bool error) {
       "  hp2pc-cli status [--name <folder> | --game <dir>]\n"
       "      Show what is already done in a game folder and what a new run would do.\n"
       "\n"
+      "  hp2pc-cli image --rom <rom_dir> --out <file.iso>\n"
+      "      Rebuild an ISO 9660 disc image from the validated ROM folder (the form a\n"
+      "      PS2 runtime boots). The image is about 3 GB; an existing file is never replaced.\n"
+      "\n"
       "  hp2pc-cli version\n"
       "\n"
       "The ROM folder is only read, never modified. Everything the converter writes\n"
@@ -81,6 +86,40 @@ int cmd_validate(const fs::path& rom, bool full) {
   if (last >= 0) std::fputs("\r              \r", stderr);
   std::fputs(r.summary().c_str(), stdout);
   return r.ok() ? 0 : 3;
+}
+
+int cmd_image(const fs::path& rom, const fs::path& out) {
+  const RomReport r = check_rom(rom);
+  if (!r.ok()) {
+    std::fputs(r.summary().c_str(), stdout);
+    return 3;
+  }
+  // C2: nothing is ever written into the ROM folder.
+  std::error_code ec;
+  const fs::path root = fs::weakly_canonical(r.root, ec);
+  const fs::path target = fs::weakly_canonical(fs::absolute(out, ec), ec);
+  const std::wstring a = root.generic_wstring() + L"/", b = target.generic_wstring();
+  if (b.size() >= a.size() && _wcsnicmp(a.c_str(), b.c_str(), a.size()) == 0) {
+    std::fputs("error: the image would be written inside the ROM folder, which is never modified. "
+               "Choose another location.\n",
+               stderr);
+    return 1;
+  }
+  const IsoLayout layout = iso_layout_for_rom(r.root);
+  std::printf("Writing %s (%llu bytes, %zu files) ...\n", to_utf8(out).c_str(),
+              static_cast<unsigned long long>(layout.total_bytes()), layout.files().size());
+  int last = -1;
+  write_iso(layout, out, [&](const Progress& p) {
+    if (g_cancel) fail("cancelled - the partial image was removed");
+    const int pct = p.total ? static_cast<int>(p.done * 100 / p.total) : 0;
+    if (pct != last) {
+      last = pct;
+      std::fprintf(stderr, "\r  image %3d%%  %-40.40s", pct, std::string(p.item).c_str());
+    }
+  });
+  std::fputs("\n", stderr);
+  std::puts("Done.");
+  return 0;
 }
 
 int cmd_status(const fs::path& game_dir) {
@@ -154,6 +193,18 @@ int wmain(int argc, wchar_t** argv) {
       }
       if (rom.empty()) return usage(true);
       return cmd_validate(rom, full);
+    }
+
+    if (cmd == L"image") {
+      fs::path rom, out;
+      for (int i = 2; i < argc; ++i) {
+        const std::wstring a = argv[i];
+        if (a == L"--rom" && i + 1 < argc) rom = argv[++i];
+        else if (a == L"--out" && i + 1 < argc) out = argv[++i];
+        else return usage(true);
+      }
+      if (rom.empty() || out.empty()) return usage(true);
+      return cmd_image(rom, out);
     }
 
     if (cmd == L"status" || cmd == L"convert") {

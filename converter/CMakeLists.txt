@@ -28,8 +28,10 @@ message(STATUS "hp2core: reference manifest with ${hp2_rom_count} disc files com
 add_library(hp2core STATIC
   core/src/rom.cpp
   core/src/convert.cpp
+  core/src/iso.cpp
   core/include/hp2/rom.h
-  core/include/hp2/convert.h)
+  core/include/hp2/convert.h
+  core/include/hp2/iso.h)
 target_include_directories(hp2core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/core/include
   PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -48,6 +50,7 @@ target_link_libraries(hp2pc-gui PRIVATE hp2core comctl32 ole32 shell32 user32 gd
 if(BUILD_TESTING)
   hp2_add_test(test_core SOURCES tests/test_core.cpp LIBS hp2core)
   hp2_add_test(test_core_dump SOURCES tests/test_core_dump.cpp LIBS hp2core)
+  hp2_add_test(test_iso SOURCES tests/test_iso.cpp LIBS hp2core)
   # The GUI can check itself without anyone clicking: creates the window,
   # verifies its controls and exits (ADR 0003 §3).
   add_test(NAME gui_selftest COMMAND hp2pc-gui --selftest)

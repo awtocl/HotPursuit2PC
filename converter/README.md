@@ -66,8 +66,15 @@ hp2pc-cli validate <rom_dir> [--full]
 hp2pc-cli convert  --rom <rom_dir> [--name <folder> | --install-dir <dir>]
                    [--rom-storage copy|reference] [--full-check] [--repair] [--no-assets]
 hp2pc-cli status   [--name <folder> | --game <dir>]
+hp2pc-cli image    --rom <rom_dir> --out <file.iso>
 hp2pc-cli version
 ```
+
+`image` rebuilds an ISO 9660 disc image from the validated ROM folder
+(`core/include/hp2/iso.h`) — the form any PS2 runtime boots. It is a separate
+command for now; `convert` will call it once the Milestone 1 runtime is chosen.
+Verified with an independent reader (7-Zip): 27 files, all SHA-256 identical
+to the ROM. Not yet verified: the game booting from it.
 
 Exit codes: 0 ok, 1 failed, 2 bad usage, 3 ROM folder not usable, 4 cancelled (Ctrl+C).
 
@@ -77,6 +84,8 @@ Exit codes: 0 ok, 1 failed, 2 bad usage, 3 ROM folder not usable, 4 cancelled (C
   rules, layout, resume, cancel, repair, relocation.
 - `test_core_dump` — real dump (skipped when absent): quick and full check,
   root correction, refusal to write into the ROM folder.
+- `test_iso` — disc images from synthetic files: byte-exact read-back, determinism,
+  descriptor fields, multi-sector directories, rejected names/sizes, damaged images.
 - `gui_selftest` — window and controls exist, mode switching enables the right inputs.
 - `gui_convert_dump` — drives the real window through a real conversion of the
   dump (reference mode, no asset unpacking) and checks log, progress and

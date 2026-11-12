@@ -6,6 +6,7 @@
 #include <map>
 
 #include "hp2/convert.h"
+#include "hp2/iso.h"
 
 using namespace hp2;
 
@@ -67,6 +68,23 @@ TEST(dump_is_found_from_neighbouring_folders) {
   const RomReport from_parent = check_rom(dump.parent_path());
   CHECK(from_parent.ok());
   CHECK(fs::equivalent(from_parent.root, dump));
+}
+
+TEST(dump_disc_image_layout_holds_all_27_files) {
+  // Plans the image only (writing 3 GB is left to the manual evidence run).
+  const fs::path dump = need_dump();
+  const IsoLayout layout = iso_layout_for_rom(dump);
+  CHECK_EQ(layout.files().size(), static_cast<std::size_t>(27));
+  std::uint64_t sectors = layout.metadata().size() / 2048;
+  std::uint32_t expected_next = static_cast<std::uint32_t>(sectors);
+  for (const IsoLayout::FileExtent& f : layout.files()) {
+    CHECK_EQ(f.sector, expected_next);  // files are packed back to back
+    CHECK_EQ(f.size, RomProfile::slus20362().find(f.iso_path)->size);
+    expected_next += static_cast<std::uint32_t>((f.size + 2047) / 2048);
+  }
+  CHECK_EQ(layout.total_sectors(), expected_next);
+  CHECK(layout.total_bytes() > RomProfile::slus20362().total_size());
+  CHECK(layout.total_bytes() < RomProfile::slus20362().total_size() + (1u << 20));  // < 1 MiB overhead
 }
 
 TEST(dump_convert_refuses_to_write_into_the_rom_folder) {

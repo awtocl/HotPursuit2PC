@@ -3,7 +3,7 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-12 — end of phase **P3 Converter v0**. **P4 is blocked on owner decisions Q1/Q2** (see Open questions).
+**Last update:** 2026-11-12 — end of phase **P4a Disc image packaging**. **P4b (the runtime) is blocked on owner decision Q1** (see Open questions). Gate report: `docs/gate-reports/2026-11-12-P4-blocker.md`.
 
 ## Where we are
 
@@ -12,8 +12,9 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 | P0 Recon | **done** | commit `2f150c6`; `docs/dump-analysis.md`, `docs/prior-art.md`, ADR 0001, ADR 0002 |
 | P1 Scaffold | **done** | commit `fe8ab16`; `pwsh tools/build.ps1` → `selftest` passes (Ninja/dev preset) and the CI command sequence passes locally with the Visual Studio generator. **Not verified:** the GitHub Actions run itself (nothing pushed yet). |
 | P2 Unpack & Inventory | **done** | commit `0751cc8`; ADR 0004; `assets-pipeline/` (`hp2assets` library + `hp2assets.exe`); `test_assets` (synthetic) and `test_dump` (real dump) pass; full unpack 402 files / 3,098,727,312 bytes, resume and `--verify` clean; inventory in `docs/dump-analysis.md` §5; C++ inventory equals an independent Python re-hash for all 405 records. |
-| P3 Converter v0 | **done** | this commit; ADR 0003; `converter/` (`hp2core`, `hp2pc-cli.exe`, `HotPursuit2PC.exe`); 8 CTest tests pass (dev + release presets); end-to-end run on the real dump from a clean folder: 27 ROM files copied + SHA-256 verified, 402 assets unpacked, 4.5 s; re-run rewrote nothing; ROM folder unchanged (sizes + timestamps); only `game/` next to the exes; GUI checked by screenshot and by a headless test that drives the real window through a conversion. **Not done in v0:** stage `build` (the runnable game). |
-| P4 M1 Build | **blocked** | needs owner go-ahead to fetch third-party source (Q1) — see Open questions |
+| P3 Converter v0 | **done** | commit `758ffc8`; ADR 0003; `converter/` (`hp2core`, `hp2pc-cli.exe`, `HotPursuit2PC.exe`); 8 CTest tests pass (dev + release presets); end-to-end run on the real dump from a clean folder: 27 ROM files copied + SHA-256 verified, 402 assets unpacked, 4.5 s; re-run rewrote nothing; ROM folder unchanged (sizes + timestamps); only `game/` next to the exes; GUI checked by screenshot and by a headless test that drives the real window through a conversion. **Not done in v0:** stage `build` (the runnable game). |
+| P4a Disc image packaging | **done** | this commit. P4 was split (brief §8: split a phase rather than merge/skip) because the runtime half needs an owner decision. `hp2/iso.h`: ISO 9660 level 1 builder + reader; `hp2pc-cli image`; `test_iso` (9 CTest tests pass in total). Real dump → 3,120,594,944-byte image; **7-Zip (independent reader) lists 27 files / 3 folders and its extraction matches the ROM manifest's SHA-256 for all 27 files.** UNVERIFIED: that the game boots from a rebuilt image (original sector positions are unknown; the game is expected to locate files by name). |
+| P4b M1 runtime | **blocked** | needs owner go-ahead to fetch third-party source (Q1) — see Open questions |
 | P5 M1 Evidence + Gate Report | pending | — |
 
 ## Decisions (ADRs)
@@ -96,11 +97,22 @@ Build output and compiler temp files stay in `.cache/` (git-ignored). CI
 - Evidence run left a complete converted folder at `.cache/p3-run/game/` (6.2 GB, git-ignored; the owner may remove it).
 - Dev switches of the GUI: `--selftest`, `--selftest-convert <rom> <game>`, `--screenshot <bmp>`.
 
-## Next steps (P4 — Milestone 1 build) — needs Q1 answered first
+## What P4a added
+
+- `converter/core/include/hp2/iso.h`: `IsoLayout::build` (deterministic ECMA-119 level 1 layout: PVD, terminator, L/M path tables,
+  directory extents, files packed back to back), `iso_layout_for_rom` (exactly the manifest's files), `write_iso` (`.part` + rename,
+  never overwrites, detects sources that changed), `read_iso_directory` (bounds-checked reader used for verification).
+- `hp2pc-cli image --rom <rom_dir> --out <file.iso>` (validates first; refuses a target inside the ROM folder).
+- Not wired into `convert` yet on purpose: whether the runtime needs a physical `.iso` in `game/build/` or can be fed the same
+  layout virtually depends on the core chosen in P4b.
+- Scratch from evidence runs (git-ignored, ~15 GB in total, safe for the owner to remove):
+  `.cache/unpack-full/`, `.cache/p3-run/`, `.cache/p4a/`.
+
+## Next steps (P4b — Milestone 1 runtime) — needs Q1 answered first
 
 1. Go/no-go test: does the Play! core run SLUS-20362 to gameplay at a stable 60 fps? (compatibility is UNVERIFIED for NTSC-U).
-   Needs: fetch Play! source + submodules from GitHub (BSD-2), build its core/libretro target with MSVC, boot the disc.
-   The disc must be presented as an image: write an ISO9660 builder in `converter/core` (stage `package`: `game/rom/` → `game/build/disc.iso`).
+   Needs: fetch Play! source + submodules from GitHub (BSD-2) into `.cache/third_party/`, build its core/libretro target with MSVC,
+   boot `hp2.iso` (built by `hp2pc-cli image`).
 2. ADR 0005 (rendering & audio) for the launcher: window, graphics API, audio device, XInput → pad.
 3. `engine/`: launcher hosting the core; converter stage `build` copies launcher + runtime into `game/build/`, writes per-game config.
 4. If Play! fails the bar: fallback C2 (PCSX2 as external process) — needs Q2 (owner's own BIOS dump).
