@@ -115,8 +115,12 @@ class Solver:
         self.names = {}                         # hash -> (NAME, tier, how)
         self.rejected = []                      # (hash, name, tier, how, why)
         self.pairs = {}                         # (PREFIX, SUFFIX) -> tier
+        self.pair_group = {}                    # (PREFIX, SUFFIX) -> sibling group or None
+        self.pending = collections.defaultdict(dict)   # (group, token) -> {hash: cand}
         self.table = {}
         self.tried = collections.Counter()      # tier -> candidates tested
+        self.magic_count = collections.Counter(
+            heads[r[0]][:4] for r in {(x[2], x[3]): x for x in recs if x[3]}.values())
 
     # ---- content validation -------------------------------------------
     def magic(self, h):
@@ -136,35 +140,51 @@ class Solver:
         return m
 
     def validate(self, h, name):
-        """Return None if plausible, else a reason string."""
+        """-> (reason or None, strong).  `strong` means the content/sibling
+        evidence is independent enough that a chance hash match is implausible."""
         head, size = self.magic(h), self.size(h)
-        ext = name.rsplit(".", 1)[1] if "." in name else ""
-        stem_hash = None
+        stem, _, ext = name.rpartition(".")
+
+        def sib(other_ext):
+            return nfs_hash(f"{stem}.{other_ext}")
+
         if size == 0:
-            return None
+            return None, False
         if ext == "LZC" and head[:4] != b"COMP":
-            return "LZC without COMP magic"
+            return "LZC without COMP magic", False
         if ext != "LZC" and head[:4] == b"COMP":
-            return "COMP data under non-LZC name"
+            return "COMP data under non-LZC name", False
         if ext == "AVI" and head[:4] != b"RIFF":
-            return "AVI without RIFF magic"
+            return "AVI without RIFF magic", False
         if ext != "AVI" and head[:4] == b"RIFF":
-            return "RIFF data under non-AVI name"
+            return "RIFF data under non-AVI name", False
         if ext == "MSH":
             if struct.unpack_from("<I", head, 0)[0] != size:
-                return "MSH whose first u32 is not its own size"
-            stem_hash = nfs_hash(name[:-1] + "B")
+                return "MSH whose first u32 is not its own size", False
+            if sib("MSB") not in self.wanted:
+                return "MSH without its MSB sibling", False
+            return None, True
         if ext == "MSB":
-            stem_hash = nfs_hash(name[:-1] + "H")
-        if stem_hash is not None and stem_hash not in self.wanted:
-            return "MSH/MSB without its sibling"
+            s = sib("MSH")
+            if s not in self.wanted:
+                return "MSB without its MSH sibling", False
+            if struct.unpack_from("<I", self.magic(s), 0)[0] != self.size(s):
+                return "MSB whose MSH sibling is not a bank header", False
+            return None, True
+        if ext == "LZC":       # a second, independent hash hit on the raw twin
+            return None, sib("BIN") in self.wanted or sib("BUN") in self.wanted
+        if ext in ("BIN", "BUN"):
+            s = sib("LZC")
+            return None, s in self.wanted and self.magic(s)[:4] == b"COMP"
         known = self.ext_magics().get(ext)
-        if known and ext not in ("BIN", "BUN", "MSB", "PCK") and head[:4] not in known:
-            return f"magic {head[:4].hex()} unlike other .{ext} files"
-        return None
+        if known:
+            if head[:4] not in known:
+                return f"magic {head[:4].hex()} unlike other .{ext} files", False
+            return None, self.magic_count[head[:4]] <= 4   # rare magic = strong
+        return None, False
 
     # ---- candidates ------------------------------------------------------
-    def offer(self, s, tier, how):
+    def offer(self, s, tier, how, group=None):
         self.tried[tier] += 1
         h = nfs_hash(s)
         if h not in self.wanted:
@@ -173,17 +193,43 @@ class Solver:
         cur = self.names.get(h)
         if cur and (cur[0] == name or cur[1] <= tier):
             return False
-        why = self.validate(h, name) if tier != "A" else None
-        if why:
-            self.rejected.append((h, name, tier, how, why))
-            return False
+        if tier != "A":
+            why, strong = self.validate(h, name)
+            if why:
+                self.rejected.append((h, name, tier, how, why))
+                return False
+            if tier in "CD" and not strong:
+                # Not accepted on its own.  Numbered guesses may still be
+                # confirmed later by siblings of the same pattern.
+                if group is not None:
+                    self.pending[group][h] = (name, tier, how)
+                else:
+                    self.rejected.append((h, name, tier, how, "no independent confirmation"))
+                return False
         self.names[h] = (name, tier, how)
         return True
 
-    def add_pair(self, prefix, suffix, tier):
+    def confirm_groups(self, minimum=2):
+        """Accept pending numbered candidates when >= `minimum` different
+        files fit one pattern (same directory, token and extension)."""
+        n = 0
+        for group, members in sorted(self.pending.items()):
+            members = {h: v for h, v in members.items() if h not in self.names}
+            if len(members) >= minimum:
+                for h, (name, tier, how) in members.items():
+                    self.names[h] = (name, tier, how + f" [{len(members)} siblings]")
+                    n += 1
+            else:
+                for h, (name, tier, how) in members.items():
+                    self.rejected.append((h, name, tier, how, "lone numbered guess"))
+        self.pending.clear()
+        return n
+
+    def add_pair(self, prefix, suffix, tier, group=None):
         p = (prefix.upper(), suffix.upper())
         if p not in self.pairs or tier < self.pairs[p]:
             self.pairs[p] = tier
+            self.pair_group[p] = group
 
     def rebuild(self):
         self.table = collections.defaultdict(list)
@@ -209,8 +255,10 @@ class Solver:
         n = 0
         if hits:
             for prefix, suffix, tier in hits:
+                g = self.pair_group.get((prefix, suffix))
                 n += self.offer(prefix + tok + suffix, tier,
-                                f"{src}:{prefix}*{suffix}")
+                                f"{src}:{prefix}*{suffix}",
+                                group=(g, tok.upper()) if g else None)
         return n
 
 
@@ -220,6 +268,8 @@ def main():
     ap.add_argument("--out", default=os.path.join(".cache", "recon"))
     ap.add_argument("--deep", action="store_true",
                     help="also mine strings from the files inside ZZDATA")
+    ap.add_argument("--export-names", metavar="FILE",
+                    help="write the recovered name table (data file for the C++ library)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     zdir = os.path.join(a.rom, "NFSHP2", "ZDIR.BIN")
@@ -361,9 +411,9 @@ def main():
                 S.add_pair(d, e, "C")
         before = len(S.names), sum(1 for v in S.names.values() if v[1] == "B")
         S.rebuild()
-        for t in elf_tok:
+        for t in sorted(elf_tok):
             S.try_token(t, "elf-token")
-        for t in data_tok:
+        for t in sorted(data_tok):
             S.try_token(t, "data-token")
         nB = sum(1 for v in S.names.values() if v[1] == "B")
         nC = sum(1 for v in S.names.values() if v[1] == "C")
@@ -378,12 +428,14 @@ def main():
         for e in sorted(exts) + [".TXT"]:
             S.add_pair(d, e, "D")
             for n in (11, 12, 21, 22, 32):
-                S.add_pair(d, f"{n}{e}", "D")
+                S.add_pair(d, f"{n}{e}", "D", group=("numbered", d, e))
     S.rebuild()
     nd0 = len(S.names)
-    for t in bare_stems | elf_tok | data_tok:
+    for t in sorted(bare_stems | elf_tok | data_tok):
         S.try_token(t, "stem")
-    P(f"tier D (probable; bare stems {len(bare_stems)}): +{len(S.names) - nd0}")
+    S.confirm_groups()
+    P(f"tier D (bare stems {len(bare_stems)}; numbered guesses need >=2 siblings): "
+      f"+{len(S.names) - nd0}")
     nb_pairs = sum(1 for t in S.pairs.values() if t == "B")
     nc_pairs = len(S.pairs) - nb_pairs
     ntok = len(elf_tok) + len(data_tok)
@@ -410,6 +462,18 @@ def main():
         for idx, h, sec, size in recs:
             if h not in S.names:
                 f.write(f"{idx}\t{h:08X}\t{sec}\t{size}\t{heads[idx].hex()}\n")
+    if a.export_names:
+        with open(a.export_names, "w", newline="\n") as f:
+            f.write(
+                "# File names of the Z fileset of Need for Speed: Hot Pursuit 2 (PS2, NTSC-U,\n"
+                "# SLUS-20362 v1.00), recovered from the owner's dump by tools/recon/zrecon.py.\n"
+                "# No third-party list was used (docs/prior-art.md). Format: HASH<TAB>TIER<TAB>NAME\n"
+                "# HASH = name hash stored in ZDIR.BIN; TIER = confidence, docs/dump-analysis.md section 4:\n"
+                "#   A literal path in the dump / numeric template   B ELF %s template + token\n"
+                "#   C directory + token + extension, content-checked   D pattern confirmed by siblings\n"
+                "# Regenerate: python -B tools/recon/zrecon.py <rom_dir> --deep --export-names <this file>\n")
+            for h, (n, tier, _how) in sorted(S.names.items(), key=lambda kv: kv[1][0]):
+                f.write(f"{h:08X}\t{tier}\t{n}\n")
     text = "\n".join(rep)
     with open(os.path.join(a.out, "report.txt"), "w") as f:
         f.write(text + "\n")

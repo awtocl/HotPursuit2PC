@@ -3,16 +3,16 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-11 — end of phase **P1 Scaffold**.
+**Last update:** 2026-11-12 — end of phase **P2 Unpack & Inventory**.
 
 ## Where we are
 
 | Phase | State | Evidence |
 |---|---|---|
 | P0 Recon | **done** | commit `2f150c6`; `docs/dump-analysis.md`, `docs/prior-art.md`, ADR 0001, ADR 0002 |
-| P1 Scaffold | **done** | this commit; `pwsh tools/build.ps1` → `selftest` passes (Ninja/dev preset) and the CI command sequence passes locally with the Visual Studio generator. **Not verified:** the GitHub Actions run itself (nothing pushed yet). |
-| P2 Unpack & Inventory | next | format knowledge already verified in P0 (dump-analysis §3–4) |
-| P3 Converter v0 | pending | — |
+| P1 Scaffold | **done** | commit `fe8ab16`; `pwsh tools/build.ps1` → `selftest` passes (Ninja/dev preset) and the CI command sequence passes locally with the Visual Studio generator. **Not verified:** the GitHub Actions run itself (nothing pushed yet). |
+| P2 Unpack & Inventory | **done** | this commit; ADR 0004; `assets-pipeline/` (`hp2assets` library + `hp2assets.exe`); `test_assets` (synthetic) and `test_dump` (real dump) pass; full unpack 402 files / 3,098,727,312 bytes, resume and `--verify` clean; inventory in `docs/dump-analysis.md` §5; C++ inventory equals an independent Python re-hash for all 405 records. |
+| P3 Converter v0 | next | — |
 | P4 M1 Build | pending | needs owner go-ahead to fetch third-party source (see Open questions) |
 | P5 M1 Evidence + Gate Report | pending | — |
 
@@ -23,7 +23,7 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 | [0001](adr/0001-architecture.md) | Architecture | Target = static recompilation + native runtime (A′). **M1 ships emulator-backed (Path C1: embedded Play! core, BSD-2, no BIOS), labelled as not native.** Path B rejected for game logic. |
 | [0002](adr/0002-language-stack.md) | Language stack | C++20 / MSVC / CMake+Ninja for everything shipped; Python (stdlib) for dev-only recon scripts. |
 | 0003 | GUI framework | to write in P3 (leaning: plain Win32, same core as the CLI) |
-| 0004 | Asset pipeline | to write in P2 |
+| [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names come from a table recovered from the dump (compiled in); unpack = exact 1:1 extents + manifest with SHA-256; resumable, never overwrites silently; ROM opened read-only. |
 | 0005 | Rendering & audio | to write in P4 |
 
 ## What P0 established (all byte-verified, see `docs/dump-analysis.md`)
@@ -34,6 +34,18 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 - `.LZC` = `COMP` header + LZSS (u16 flag words, 4-bit length + 12-bit distance); decoder verified byte-exact on all 11 LZC/BUN pairs on the disc.
 - **362 of 402** file names recovered from the dump itself (ELF strings/templates + strings inside data). No third-party name list is used. 40 files stay unnamed (31 unreferenced replays, 4 movies, 5 misc).
 - SHA-256 manifest of the dump: `tests/fixtures/slus20362_rom_manifest.tsv`.
+
+## What P2 added
+
+- `hp2assets` (C++): `name_hash`, `parse_zdir` + `check_zdir_layout`, `lzc_decompress`, `NameTable::builtin()` (362 names),
+  `ZFileset::open/read`, `classify_file`, `write_inventory_tsv`, `unpack` (writes `<name>.part` then renames; existing
+  right-size files are kept; wrong ones are an error unless `repair`, which moves them aside as `.mismatch-N`).
+- Tool: `.cache/build/dev/assets-pipeline/hp2assets.exe` — `info`, `inventory`, `unpack`, `lzc`, `hash`.
+- Fixtures: `tests/fixtures/slus20362_zfileset_inventory.tsv` (405 records with SHA-256).
+- Name-recovery lesson (dump-analysis §4): a 32-bit hash match is not proof. Tier C/D names now need independent
+  confirmation; a chance collision (`CARS\F50\NU8.BIN` over `SOUND\ALPINE.MSB`) was caught and fixed in this phase.
+- Performance on the dev PC: SHA-256 inventory of 3.1 GB ≈ 2 s; full unpack ≈ 2–3 s (warm file cache).
+- Unpacked copy from the evidence run: `.cache/unpack-full/` (git-ignored, 3.1 GB — safe to remove by the owner).
 
 ## Environment facts (development PC)
 
@@ -72,10 +84,11 @@ Build output and compiler temp files stay in `.cache/` (git-ignored). CI
 (`.github/workflows/ci.yml`) runs: tracked-file guard → configure (`-A x64 -DHP2_WERROR=ON`)
 → build Release → `ctest --no-tests=error`. Tests that need the dump exit 77 = skipped when it is absent.
 
-## Next steps (P2)
+## Next steps (P3)
 
-1. ADR 0004 (asset pipeline).
-2. `assets-pipeline/`: C++ library `hp2assets` — name hash, ZDIR parser + layout validation, LZC decoder, name table (from `tools/recon/zrecon.py` output), unpacker with manifest, inventory.
-3. Tests: synthetic fixtures (always) + the owner's dump (skipped when absent); cross-check against the Python reference.
-4. Full asset inventory into `docs/dump-analysis.md` §5 + `docs/asset-inventory.tsv`.
-5. Commit `P2 Unpack & Inventory: …`, update this file.
+1. ADR 0003 (GUI framework).
+2. `converter/core`: ROM validation against `tests/fixtures/slus20362_rom_manifest.tsv` (compiled in) with clear, actionable errors;
+   `game/` folder layout (C6), portable/installed modes, settings + state file, stage runner (`validate → rom → unpack`), resume, logs.
+3. `converter/cli` (`hp2pc-cli.exe`) and `converter/gui` (`HotPursuit2PC.exe`, stub per ADR 0003) on the same core.
+4. Tests: synthetic ROM folders (always) + the owner's dump (skipped when absent).
+5. Commit `P3 Converter v0: …`, update this file.
