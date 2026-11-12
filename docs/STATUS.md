@@ -3,8 +3,9 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-12 — end of phase **P4b M1 runtime**. The game runs:
-`game\build\HotPursuit2.exe` (emulator-backed, labelled as such). Next: P5 (evidence + Milestone 1 Gate Report).
+**Last update:** 2026-11-12 — end of phase **P5 M1 evidence**. **MILESTONE 1 GATE: waiting for the owner to try the game.**
+The game runs: `game\build\HotPursuit2.exe` (emulator-backed, labelled as such).
+Gate report: `docs/gate-reports/2026-11-12-M1.md`. Do not start Milestone 2 before the owner's answer.
 
 ## Where we are
 
@@ -15,8 +16,9 @@ file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 | P2 Unpack & Inventory | **done** | commit `0751cc8`; ADR 0004; `hp2assets`; full unpack 402 files / 3,098,727,312 bytes; inventory in `docs/dump-analysis.md` §5; C++ = independent Python re-hash for all 405 records. |
 | P3 Converter v0 | **done** | commit `758ffc8`; ADR 0003; `hp2core`, `hp2pc-cli.exe`, `HotPursuit2PC.exe`; end-to-end on the real dump; resume; ROM untouched. |
 | P4a Disc image packaging | **done** | commit `9f64f48`; ISO 9660 builder/reader, `hp2pc-cli image`; 7-Zip confirms 27 files, all SHA-256 identical. |
-| P4b M1 runtime | **done** | this commit; owner approved fetching Play! (Q1). ADR 0005. `engine/` launcher on the Play! core (pinned `1f27232`, unmodified), virtual disc from `game/rom`, converter stage `build` (launcher embedded in the converter). 10 CTest tests pass in dev and release, including Play!'s JIT test suite. The game boots to menus and races from the converter-made folder. |
-| P5 M1 Evidence + Gate Report | next | acceptance runs already exist under `.cache/m1-run/`; to be written up |
+| P4b M1 runtime | **done** | commit `aa10b4f`; owner approved fetching Play! (Q1). ADR 0005. `engine/` launcher on the Play! core (pinned `1f27232`, unmodified), virtual disc from `game/rom`, converter stage `build` (launcher embedded in the converter). 10 CTest tests pass in dev and release, including Play!'s JIT test suite. The game boots to menus and races from the converter-made folder. |
+| P5 M1 Evidence + Gate Report | **done** | this commit; `docs/evidence/m1-acceptance.md`; `docs/gate-reports/2026-11-12-M1.md`. Acceptance session: 155 s, exit code 0, console refresh 59–61 Hz outside loading, pause menu, memory-card save and load. `tools/fetch-play.ps1` verified from scratch. **Not verified:** played by a person; clean machine; other GPUs; long sessions; CI run. |
+| **Milestone 1 gate** | **waiting for the owner** | Q3, Q6, Q7, Q8 below |
 
 ## Decisions (ADRs)
 
@@ -57,7 +59,7 @@ Dump and formats (all byte-verified, `docs/dump-analysis.md`):
 - 362 of 402 names recovered from the dump itself; tier C/D names need independent confirmation (a chance collision was caught in P2).
 - ROM manifest: `converter/data/slus20362_rom_manifest.tsv` (27 files, 3,120,519,117 bytes).
 
-Runtime (P4b, `docs/evidence/` is written in P5):
+Runtime (P4b/P5, `docs/evidence/m1-acceptance.md`):
 
 - Play! `1f27232` runs SLUS-20362 from the owner's files: memory-card check, intro movie, title, menus, Quick Race, pause menu, Save/Load (creates `BASLUS-20362HP2` on the virtual memory card; next start loads it).
 - The game finds files **by name**: a rebuilt image / the virtual disc with different sector positions works.
@@ -72,7 +74,7 @@ Runtime (P4b, `docs/evidence/` is written in P5):
 - Windows 11, MSVC 14.44 (VS Build Tools 2022 17.14) + Windows SDK 10.0.26100, bundled CMake 3.31 + Ninja (not on PATH; `tools/build.ps1` loads `vcvars64.bat`).
 - Repo: branch `main` tracking `origin/main` (`https://github.com/awtocl/HotPursuit2PC`). **Nothing has been pushed.**
 - ROM (read-only, git-ignored): `ROM/Need for Speed - Hot Pursuit 2 (USA)/`.
-- Third-party source (git-ignored): `.cache/third_party/Play-` (pinned, must stay unmodified).
+- Third-party source (git-ignored): `.cache/third_party/Play-` (pinned, must stay unmodified). `.cache/third_party/Play-fetchtest` is a second, identical copy made to test the fetch script (removable).
 - Scratch from evidence runs (git-ignored, ~25 GB, the owner may remove any of it):
   `.cache/unpack-full/`, `.cache/p3-run/`, `.cache/p4a/`, `.cache/p4b*/`, `.cache/m1-run/` (the last one holds the Milestone 1 example folder and acceptance evidence).
 
@@ -100,7 +102,7 @@ Runtime (P4b, `docs/evidence/` is written in P5):
 
 ## Next steps
 
-1. **P5:** write up the acceptance evidence (`docs/evidence/m1-acceptance.md`) and the Milestone 1 Gate Report; commit; stop for the owner to try the game.
+1. **Wait for the owner's verdict on Milestone 1** (they play `.cache\m1-run\game\build\HotPursuit2.exe`). If fidelity is off, that comes first.
 2. After sign-off — **Milestone 2**, each item with its own ADR, opt-in where it changes the original:
    anti-aliasing/upscaling first (brief: "DLAA first"; realistic options with this core: higher internal resolution,
    SSAA, post-process AA; a true DLAA needs motion vectors the PS2 pipeline does not provide), then resolution/aspect
