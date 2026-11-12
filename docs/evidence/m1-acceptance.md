@@ -67,6 +67,44 @@ Log: `.cache/m1-run/acceptance/launcher.log`; screenshots `frame_000950 … fram
 `test_core`, `test_core_dump`, `test_iso`, `gui_selftest`, `gui_convert_dump`,
 `cli_usage`, `selftest`.
 
+## 4a. Addendum — the owner's trial and what per-frame measurement showed (2026-11-12)
+
+**The owner played the build and did not accept it**: unstable frame time with a lot of stutter (videos, menus
+and races), stutter when moving between menus, the glow of brake lights and tyre smoke drawn as translucent
+squares, sound problems, all while CPU and GPU load stayed under 20 %.
+
+The owner's session left a clean log (2 min 28 s, exit code 0, 59–61 Hz in most seconds). **The acceptance
+measurements in §3 were per-second averages and could not see the problem.** The launcher now records the instant
+of every emulated refresh and every presented image (`--frametimes`), analysed by `tools/frametimes.py`.
+Same scripted session each time (1280×896, ×2, muted), windows: menus 25–43 s, race 52–75 s.
+
+Presentation intervals (the time between two images reaching the screen):
+
+| Run (`.cache/…`) | Menus | Race |
+|---|---|---|
+| `diag-base` — as shipped at the gate (core's limiter, present when the work ends) | spread over 13–19 ms and 32–36 ms; **66 % more than 25 % off the median**; p99 138 ms | spread over 27–38 ms (sd 8.3 ms); p99 52 ms; max 182 ms |
+| `diag-pacer` — own pacer, images on the 60 Hz grid | 17 ms ×299, 33 ms ×222, 50 ms ×35 | 33.3 ms ×627; **17 ms ×28 and 50 ms ×17** (images one refresh late) |
+| `diag-pacer2` — same, presentation half a period after the grid | 17 ms ×297, 33 ms ×220, 50 ms ×32 | 33.3 ms ×643 (94 %); 17 ms ×20; 50 ms ×7; six longer (67–200 ms) |
+
+Emulated refresh intervals in the race: as shipped, median 14.95 ms with 81 % of intervals more than 25 % off
+(the limiter alternated ≈ 13 / 20 ms); with the pacer, median 16.67 ms and p95 16.68–16.92 ms.
+
+What this says:
+
+1. The constant jitter was pacing, and is fixed by the launcher's pacer.
+2. The remaining late images are CPU cost: the game does the work of a 30 fps frame inside one refresh, and
+   emulating that refresh takes about 13 ms on one thread of the core's JIT, sometimes more than 16.7 ms. The
+   "2.5–5× headroom" stated earlier averaged busy and idle refreshes and was misleading; the busy refresh has
+   about 1.25×. This matches the owner's observation of low overall CPU/GPU load.
+3. Longer gaps (100–200 ms) outside loading are first-use compilation of code and shaders.
+4. Smoke and brake-light glow are reproduced as flat translucent polygons
+   (`.cache/diag-pacer2/shots/frame_003000.png`, `frame_004050.png`). Cause not identified. The core's OpenGL
+   renderer has no mip-level support and its compatibility tracker lists a mip-mapping issue for this game, but
+   that this is the cause is **UNVERIFIED**.
+5. The sound problem is not characterised yet (the measurement runs were muted).
+
+Consequence: ADR 0006 — the recompiled build becomes the product; this build becomes the reference.
+
 ## 5. What this evidence does not cover
 
 - No human has played it: feel of the handling, audio quality by ear, and

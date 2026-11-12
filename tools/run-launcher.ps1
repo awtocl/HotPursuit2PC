@@ -22,6 +22,7 @@ param(
   [string]$Script = '',
   [string]$Size = '640x448',
   [int]$Res = 1,
+  [string[]]$Extra = @(),
   [switch]$Mute,
   [switch]$Unlimited,
   [switch]$KeepData,
@@ -54,6 +55,8 @@ $source = if ($Rom) { @('--rom', "`"$((Resolve-Path -LiteralPath $Rom).Path)`"")
 $a = $source + @('--data', "`"$data`"", '--shots', "`"$shots`"", '--shot-every', $ShotEvery,
        '--frames', $Frames, '--size', $Size, '--res', $Res)
 if ($Script) { $a += @('--script', $Script) }
+$a += @('--frametimes', "`"$(Join-Path $run 'frametimes.csv')`"")
+if ($Extra) { $a += $Extra }
 if ($Mute) { $a += '--mute' }
 if ($Unlimited) { $a += '--unlimited' }
 if (-not $TimeoutSeconds) { $TimeoutSeconds = [int]($Frames / 60 * 3 + 60) }

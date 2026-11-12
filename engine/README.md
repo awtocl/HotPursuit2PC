@@ -3,11 +3,16 @@
 What runs the game. Decisions: [ADR 0001](../docs/adr/0001-architecture.md)
 (staging) and [ADR 0005](../docs/adr/0005-rendering-audio.md) (this launcher).
 
-| Stage | What runs the game code | Label | Status |
-|---|---|---|---|
-| **M1** | the Play! PS2 core (BSD 2-Clause) linked into our launcher | **emulator-backed (Path C)** — not native | **done** |
-| N1 | game code translated ahead-of-time at conversion | hybrid | not started |
-| N2 | translated code on our own runtime (GS, audio, input, kernel services) | native (Path A′) | not started |
+The owner tried the emulator-backed build and did not accept it (stutter,
+rendering defects). Per [ADR 0006](../docs/adr/0006-recompilation-main-line.md)
+it is now the **reference build**; the product is the recompiled one.
+
+| Stage | What runs the game code | Status |
+|---|---|---|
+| Reference (was "M1") | the Play! PS2 core (BSD 2-Clause) linked into our launcher — **emulator-backed, not native** | works; known problems below |
+| R0 | same, with our frame pacer and per-frame measurement | **done** |
+| R1 | game code translated ahead of time by the converter | next |
+| R2–R4 | host services, own renderer, native audio | not started |
 
 ## What is here
 
@@ -42,8 +47,26 @@ pwsh tools/run-launcher.ps1 -RunName try -Rom ".cache\m1-run\game\rom" -Frames 3
      -Script "800:start,1100:start,1400:start,1700:cross,2000:cross,2300:cross,2600:cross,2900:cross:600"
 ```
 
-## Known limits (Milestone 1)
+## Measuring frame pacing
 
+Per-second averages hide stutter. The launcher can record every emulated
+refresh and every presented image:
+
+```powershell
+pwsh tools/run-launcher.ps1 -RunName pace -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Size 1280x896 -Res 2 `
+     -Script "800:start,1100:start,1400:start,1700:cross,2000:cross,2300:cross,2600:cross,2900:cross:1600"
+python -B tools/frametimes.py .cache\pace\frametimes.csv --from 52000 --to 75000 --label race
+```
+
+`-Extra '--core-limiter'` reproduces the pacing the build had before the
+pacer. Numbers so far: `docs/evidence/m1-acceptance.md` §4a.
+
+## Known problems of the reference build
+
+- Heavy frames cost about 13 ms on one thread of the core's JIT and sometimes
+  miss the 16.7 ms refresh; code and shaders compile on first use (hitches).
+- Tyre smoke and brake-light glow are drawn as flat translucent polygons
+  (cause in the core's OpenGL renderer not identified).
 - Races are drawn at 30 frames per second by the game itself; menus at 60 (ADR 0005 §6).
 - Digital buttons only (no DualShock 2 button pressure), no rumble, one controller.
 - No in-game settings UI, no save states exposed, no widescreen: Milestone 2.

@@ -20,7 +20,10 @@
 //   --shot-every <n>      ... every n frames (default 600)
 //   --script <spec>       timed pad input: "<frame>:<button>[:<frames held>],..."
 //                         buttons: up down left right start select cross circle square triangle l1 l2 r1 r2
-//   --unlimited           disable the 60 fps limiter (measures emulation headroom; never the default, C7)
+//   --unlimited           no frame pacing at all (measures emulation speed; never the default, C7)
+//   --core-limiter        use the core's own frame limiter instead of our pacer (comparison only)
+//   --frametimes <csv>    record the instant of every emulated refresh and every presented image
+//                         (analyse with tools/frametimes.py)
 #include <windows.h>
 
 #include <dbghelp.h>
@@ -70,6 +73,132 @@ namespace
 		fputc('\n', g_log);
 		fflush(g_log);
 	}
+
+	// Frame-time recorder (--frametimes <csv>): the exact moment of every
+	// emulated vertical blank ('V') and every presented image ('P').
+	// Per-second averages hide stutter; this does not.
+	struct FrameTimeRecorder
+	{
+		bool enabled = false;
+		std::mutex mutex;
+		std::vector<std::pair<char, int64_t>> events;  // kind, QueryPerformanceCounter ticks
+		void Mark(char kind)
+		{
+			if(!enabled) return;
+			LARGE_INTEGER now;
+			QueryPerformanceCounter(&now);
+			std::lock_guard<std::mutex> lock(mutex);
+			events.emplace_back(kind, now.QuadPart);
+		}
+		void Save(const fs::path& path)
+		{
+			if(!enabled || events.empty()) return;
+			LARGE_INTEGER frequency;
+			QueryPerformanceFrequency(&frequency);
+			if(FILE* file = _wfopen(path.c_str(), L"w"))
+			{
+				fprintf(file, "kind,ms\n");
+				const int64_t origin = events.front().second;
+				for(const auto& event : events)
+					fprintf(file, "%c,%.3f\n", event.first, (event.second - origin) * 1000.0 / frequency.QuadPart);
+				fclose(file);
+			}
+		}
+	};
+	FrameTimeRecorder g_frameTimes;
+
+	// Frame pacer. A console shows a new image at a fixed instant every
+	// refresh, however long the frame took to compute. The core's own limiter
+	// instead sleeps by "average work time of the last 4 frames" and presents
+	// whenever a frame's work happens to finish, which measured as +-3..5 ms
+	// of jitter on every frame. Here both the end of each emulated frame (VM
+	// thread) and each presentation (GS thread) are held to one absolute time
+	// grid of exactly 1/60 s (the rate the core's audio clock assumes).
+	class FramePacer
+	{
+	public:
+		void Start(double hz)
+		{
+			LARGE_INTEGER frequency;
+			QueryPerformanceFrequency(&frequency);
+			m_ticksPerSecond = frequency.QuadPart;
+			m_period = static_cast<int64_t>(frequency.QuadPart / hz + 0.5);
+			m_anchor.store(Now());
+			m_enabled = true;
+		}
+		bool Enabled() const
+		{
+			return m_enabled;
+		}
+		// VM thread, once per emulated frame.
+		void WaitFrameEnd()
+		{
+			if(!m_enabled) return;
+			static thread_local HANDLE timer = CreateTimer();
+			const int64_t now = Now();
+			int64_t deadline = m_nextFrameEnd;
+			if(deadline == 0 || now - deadline > 4 * m_period)
+			{
+				// First frame, or far behind after a load/hitch: restart the grid here
+				// instead of racing to catch up.
+				deadline = now;
+				m_anchor.store(now);
+			}
+			WaitUntil(deadline, timer);
+			m_nextFrameEnd = deadline + m_period;
+		}
+		// GS thread, immediately before the buffer swap: hold the image until the
+		// next presentation point, so presentations are exactly one (or two, ...)
+		// periods apart. Presentation points sit half a period after the frame-end
+		// grid: the game does a 30 fps frame's work inside one refresh, and that
+		// busy refresh sometimes takes a few ms more than 1/60 s to emulate. With
+		// the half-period slack such a frame is still shown on time instead of a
+		// whole refresh late (measured: 50 ms + 17 ms pairs). Cost: up to 8 ms of
+		// added display latency.
+		void WaitPresent()
+		{
+			if(!m_enabled) return;
+			static thread_local HANDLE timer = CreateTimer();
+			const int64_t first = m_anchor.load() + m_period / 2;
+			const int64_t now = Now();
+			const int64_t periods = now <= first ? 0 : (now - first + m_period - 1) / m_period;
+			WaitUntil(first + periods * m_period, timer);
+		}
+
+	private:
+		static int64_t Now()
+		{
+			LARGE_INTEGER now;
+			QueryPerformanceCounter(&now);
+			return now.QuadPart;
+		}
+		static HANDLE CreateTimer()
+		{
+			// High-resolution timers exist since Windows 10 1803; fall back to a normal one.
+			HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+			return timer ? timer : CreateWaitableTimerW(nullptr, TRUE, nullptr);
+		}
+		void WaitUntil(int64_t deadline, HANDLE timer) const
+		{
+			const int64_t spin = m_ticksPerSecond / 2000;  // finish the last 0.5 ms by spinning
+			int64_t remaining = deadline - Now();
+			if(timer && remaining > spin)
+			{
+				LARGE_INTEGER due;
+				due.QuadPart = -((remaining - spin) * 10000000 / m_ticksPerSecond);  // 100 ns units, relative
+				if(due.QuadPart < 0 && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+					WaitForSingleObject(timer, 100);
+			}
+			while(Now() < deadline) YieldProcessor();
+		}
+
+		bool m_enabled = false;
+		int64_t m_ticksPerSecond = 1;
+		int64_t m_period = 1;
+		int64_t m_nextFrameEnd = 0;       // VM thread only
+		std::atomic<int64_t> m_anchor{0};  // origin of the grid, shared with the GS thread
+	};
+	FramePacer g_pacer;
 
 	fs::path ExeDir()
 	{
@@ -212,7 +341,9 @@ namespace
 		void PresentBackbuffer() override
 		{
 			if(m_shotRequested.exchange(false)) SaveBackbuffer();
+			g_pacer.WaitPresent();
 			SwapBuffers(m_dc);
+			g_frameTimes.Mark('P');
 			++g_presentedFrames;
 		}
 
@@ -349,11 +480,13 @@ namespace
 		fs::path rom;   // ROM folder -> virtual disc (the normal way)
 		fs::path disc;  // or a disc image file (development)
 		fs::path shots;
+		fs::path frameTimes;  // CSV of every vblank and present (development)
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
 		bool mute = false;
 		bool unlimited = false;
+		bool coreLimiter = false;  // use the core's frame limiter instead of our pacer (comparison only)
 		uint32_t frames = 0;
 		uint32_t shotEvery = 600;
 		struct ScriptEvent
@@ -418,9 +551,16 @@ namespace
 			{
 				if(swscanf_s(argv[++i], L"%dx%d", &options.width, &options.height) != 2) ok = false;
 			}
+			else if(a == L"--frametimes" && hasValue)
+			{
+				options.frameTimes = argv[++i];
+				g_frameTimes.enabled = true;
+				g_frameTimes.events.reserve(1 << 18);
+			}
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
 			else if(a == L"--unlimited") options.unlimited = true;
+			else if(a == L"--core-limiter") options.coreLimiter = true;
 			else ok = false;
 			if(!ok) error = L"Unknown or malformed option: " + a;
 		}
@@ -638,8 +778,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		// With the virtual disc the path stays empty: the core must not open a file of its own.
 		config.SetPreferencePath(PREF_PS2_CDROM0_PATH, options.disc);
 		config.SetPreferenceInteger(PREF_CGSH_OPENGL_RESOLUTION_FACTOR, options.resolutionFactor);
-		config.SetPreferenceBoolean(PREF_PS2_LIMIT_FRAMERATE, !options.unlimited);  // 60 fps baseline (C7)
+		// 60 Hz baseline (C7). By default our pacer does it; --core-limiter keeps
+		// the core's own limiter instead (for comparison); --unlimited uses neither.
+		const bool ownPacer = !options.unlimited && !options.coreLimiter;
+		config.SetPreferenceBoolean(PREF_PS2_LIMIT_FRAMERATE, !options.unlimited && options.coreLimiter);
 		g_vm->ReloadFrameRateLimit();
+		if(ownPacer) g_pacer.Start(60.0);
 
 		if(!options.mute) g_vm->CreateSoundHandler(&CSH_Hp2Sound::Factory);
 		g_vm->CreatePadHandler(CPH_Generic::GetFactoryFunction());
@@ -647,7 +791,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->CreateGSHandler(CGSH_OpenGL_Hp2::GetFactoryFunction(window));
 		Log("step: GS handler created");
 		UpdatePresentation(window);
-		auto frameConnection = g_vm->OnNewFrame.Connect([]() { ++g_vmFrames; });
+		auto frameConnection = g_vm->OnNewFrame.Connect([]() {
+			g_pacer.WaitFrameEnd();  // on the VM thread: this is what holds the game to 60 Hz
+			++g_vmFrames;
+			g_frameTimes.Mark('V');
+		});
 
 		g_vm->Pause();
 		g_vm->Reset();
@@ -664,9 +812,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->m_ee->m_os->BootFromCDROM();
 		Log("step: boot from disc requested");
 		g_vm->Resume();
-		Log("Booted from %ls (resolution x%d, limiter %s, sound %s)",
+		Log("Booted from %ls (resolution x%d, pacing: %s, sound %s)",
 		    g_disc ? options.rom.c_str() : options.disc.c_str(), options.resolutionFactor,
-		    options.unlimited ? "off" : "60 fps", options.mute ? "off" : "on");
+		    options.unlimited ? "none" : (options.coreLimiter ? "core limiter" : "own 60 Hz grid"),
+		    options.mute ? "off" : "on");
 
 		// ---- main loop -----------------------------------------------------------------
 		auto* pad = static_cast<CPH_Generic*>(g_vm->GetPadHandler());
@@ -731,6 +880,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
 		g_vm->Pause();
 		frameConnection.reset();
+		g_frameTimes.Save(options.frameTimes);
 		g_vm->DestroyPadHandler();
 		g_vm->DestroyGSHandler();
 		g_vm->DestroySoundHandler();
