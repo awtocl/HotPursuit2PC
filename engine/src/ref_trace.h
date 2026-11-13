@@ -22,8 +22,10 @@ namespace hp2ref
 	// liftList (optional): translate the listed functions of `elf` and compare
 	// them with the reference core at run time (lift_check.h). Returns an error
 	// message, or an empty string.
+	// runTranslated: run the listed functions translated instead of comparing them.
 	std::string TraceInstall(CPS2VM& vm, const std::filesystem::path& dir, bool countBlocks,
-	                         const std::filesystem::path& liftList, const std::filesystem::path& elf);
+	                         const std::filesystem::path& liftList, const std::filesystem::path& elf,
+	                         bool runTranslated);
 	bool TraceEnabled();
 
 	// VM thread, in the new-frame handler: before and after the pacing wait.

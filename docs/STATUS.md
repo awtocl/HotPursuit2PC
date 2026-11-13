@@ -3,7 +3,11 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-13 — phase **R1b-spike (translator spike)**. The owner allowed LLVM (Q10, 2026-11-12); the
+**Last update:** 2026-11-13 — phase **R1b-1 (game running on translated code)**: 3,692 functions (99.8 % of executed
+game instructions) translated; the scripted session runs on them; 0 differences in 1,156 compared calls; menu
+game-program time 14.3 → 5.6 ms per busy refresh, reference-core compilation 29,935 → 6,649 blocks. Next: VU0
+macro mode, then VU1 microprograms, then the converter stage that compiles once and stores the code.
+Previous: phase **R1b-spike (translator spike)**. The owner allowed LLVM (Q10, 2026-11-12); the
 spike passed: translated game functions match the reference core exactly (0 differences in 1,864 real calls) and
 run 4.1x faster; ADR 0007 accepted. Next: the whole-program translator (R1b proper).
 **The owner played the Milestone 1 build and did NOT accept it** (stutter, smoke/brake-light glow drawn as translucent
@@ -40,7 +44,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | P6 M1 trial follow-up (stage R0 of ADR 0006) | **done** | commit `e5d927d`; launcher frame pacer (absolute 60 Hz grid, presentation half a period later), `--frametimes` recorder + `tools/frametimes.py`; race presentations 94 % at exactly 33.3 ms (were spread over 27–38 ms); remaining late frames traced to the core's JIT cost; smoke/glow defect reproduced, cause not identified; ADR 0006; README rewritten for GitHub with legal and AI-assistance disclosures (owner's request). |
 | **R1a recompiler analysis** | **done** | this commit; `recomp/` (ELF reader, R5900 decoder, function discovery, `hp2recomp.exe`); launcher `--trace` + `profile` build preset + `tools/profile.py`, `tools/recon/vucheck.py`; `docs/recomp-analysis.md`: 431,681 words all decode, 10,146 functions, 193 switches, **0 of 29,860 executed blocks start anywhere unpredicted**, code not modified at run time, all executed VU1 microcode is in `.vutext`; time shares of a busy race refresh measured; **pacer defect in 60 fps content found and fixed** (evidence §4b); ADR 0007 proposed; 12 CTest tests pass in dev and release. |
 | **R1b-spike translator spike** | **done** | this commit; LLVM 23.1.5 fetched (pinned SHA-256) and built in `.cache`; `recomp/src/lift.cpp` (leaf functions → LLVM → x64); `--trace-counts` fixed (epilogue), `hp2recomp hot` / `lift`; launcher `--lift-check` (profile build); 97 of the 400 hottest functions translated in 0.57 s; 81 compared on 1,864 calls: **0 differences**; **4.1x** faster; 16 trapped on the scratchpad; ADR 0007 accepted; 14 CTest tests pass in dev and release. The VU1 microprogram part of the spike was not done (next). |
-| **R1b translator** | **next** | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
+| **R1b-1 calls, hand-over, re-entry, run mode** | **done** | this commit; whole functions with calls, hand-over to the reference core at any uncovered instruction, re-entry at 38,624 places, scratchpad and hardware slow path, time slice and waiting loops; launcher `--run-translated`; `docs/recomp-analysis.md` §10 |
+| **R1b translator (rest)** | **next** | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
 
 ## Decisions (ADRs)
 

@@ -163,7 +163,7 @@ What this means for you:
 | Running the game | **Works, with problems.** Boots, plays movies, menus, races, pause, and saves to / loads from a virtual PS2 memory card. Emulator-backed. |
 | GUI and CLI | Done. Same operations in both. |
 | Recompiler, analysis half | Done. Every one of the 431,681 instruction words of the game program decodes; 10,146 functions and 193 switch tables are found without symbols; in a traced session every one of the 29,860 code blocks the embedded core executed starts where the analysis predicted. |
-| Recompiler, translator | **Prototype.** Simple game functions (those that call no others) are translated through LLVM to x64. Checked against the embedded core on 1,864 real calls while the game runs: identical results, 4.1 times faster. Not yet used to play. |
+| Recompiler, translator | **In progress.** 3,692 game functions (99.8 % of what the game executes in a test session) are translated through LLVM to x64; the test session runs on them inside a measurement build, with the embedded core still handling what is not translated yet (the PS2's vector units, a few instructions). Identical results to the core on every compared call. Menu hitches drop sharply; races not yet faster overall, because the vector units are not translated yet. Not in the build players use. |
 | Automated tests | 14 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
 
 ## Known problems

@@ -1,12 +1,15 @@
 // See lift_check.h. Compiled only in builds with HP2_LIFT_CHECK (LLVM present).
 #include "lift_check.h"
 
+#include <chrono>
 #include <fstream>
 #include <memory>
 #include <sstream>
 
 #include "hp2/io.h"
 #include "hp2/lift.h"
+
+static_assert(sizeof(hp2ref::LiftRuntime) == sizeof(hp2::Runtime));
 
 namespace hp2ref
 {
@@ -26,6 +29,7 @@ namespace hp2ref
 	{
 		try
 		{
+			const auto t0 = std::chrono::steady_clock::now();
 			auto elf = hp2::ElfImage::parse(hp2::read_whole_file(elfPath, 64ull << 20));
 			auto discovery = hp2::discover(elf);
 			g_prepared = std::make_unique<Prepared>(Prepared{std::move(elf), std::move(discovery), nullptr});
@@ -35,9 +39,14 @@ namespace hp2ref
 			l.gpr_stride = layout.gprStride;
 			l.hi = layout.hi;
 			l.lo = layout.lo;
+			l.hi1 = layout.hi1;
+			l.lo1 = layout.lo1;
 			l.fpr = layout.fpr;
 			l.fcsr = layout.fcsr;
 			l.fpacc = layout.fpacc;
+			l.vf = layout.vf;
+			l.cycle_quota = layout.cycleQuota;
+			l.has_exception = layout.hasException;
 			g_prepared->translator =
 			    std::make_unique<hp2::Translator>(g_prepared->elf, g_prepared->discovery, l, ramSize);
 
@@ -47,18 +56,30 @@ namespace hp2ref
 				error = "cannot open the function list " + hp2::to_utf8(list);
 				return false;
 			}
-			std::string line;
+			std::string line, refused;
+			size_t listed = 0;
 			while(std::getline(in, line))
 			{
 				if(const auto hash = line.find('#'); hash != std::string::npos) line.erase(hash);
 				std::istringstream fields(line);
 				std::string word;
 				if(!(fields >> word)) continue;
+				++listed;
 				const uint32_t address = static_cast<uint32_t>(std::stoul(word, nullptr, 16));
 				if(auto why = g_prepared->translator->add_function(address))
-					report += std::format("{:08X}\tnot translated: {}\n", address, *why);
+					refused += std::format("{:08X}\tnot translated: {}\n", address, *why);
 			}
+			const auto t1 = std::chrono::steady_clock::now();
 			g_prepared->translator->compile();
+			const auto t2 = std::chrono::steady_clock::now();
+			const auto& stats = g_prepared->translator->stats();
+			report = std::format("# {} functions listed, {} translated ({} instructions, {} direct calls, {} hand-over "
+			                     "places, {} re-entry places); translation {:.1f} s, optimisation and compilation {:.1f} s\n",
+			                     listed, g_prepared->translator->size(), stats.instructions, stats.calls, stats.stops,
+			                     g_prepared->translator->entries(),
+			                     std::chrono::duration<double>(t1 - t0).count(),
+			                     std::chrono::duration<double>(t2 - t1).count()) +
+			         refused;
 			return true;
 		}
 		catch(const std::exception& e)
@@ -73,5 +94,11 @@ namespace hp2ref
 	{
 		if(!g_prepared || !g_prepared->translator) return nullptr;
 		return reinterpret_cast<LiftedCode>(g_prepared->translator->lookup(address));
+	}
+
+	LiftedCode LiftCheckLookupEntry(uint32_t address)
+	{
+		if(!g_prepared || !g_prepared->translator) return nullptr;
+		return reinterpret_cast<LiftedCode>(g_prepared->translator->lookup_entry(address));
 	}
 }

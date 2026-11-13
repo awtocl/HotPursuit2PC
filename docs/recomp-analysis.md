@@ -201,6 +201,63 @@ scratchpad at `0x70000000`) and left through the spike's trap: the scratchpad ha
 counting session the compared functions would take 842 ms in the reference core and 206 ms translated (4.1x); per
 function from about 1.1x (FPU-heavy, clamping dominates) to over 20x (loops). Caveats in ADR 0007.
 
+## 10. R1b, first stage: the game running translated code (2026-11-13)
+
+**Translator.** `recomp/src/lift.cpp` now translates whole functions, not only leaves:
+
+- direct calls between translated functions are host calls; after each call the caller checks that execution came
+  back where a normal return would, and otherwise hands over (this is how a hand-over deep in a call chain reaches
+  the reference core); calls through pointers and unrecognised indirect jumps go through a generated dispatcher;
+- whatever the translator does not cover is left to the reference core at that exact instruction ("hand-over"), so
+  any function can be translated except one whose very first instruction would hand over;
+- translated code can be **re-entered in the middle**, at every place where a straight run of code begins and it
+  makes progress (38,624 such places in the 3,692 functions below), so after the reference core ran a single
+  uncovered instruction, execution comes straight back to translated code;
+- memory: main memory and the scratchpad directly, everything else (hardware registers, VU memory) through the
+  reference core's own memory map; a hardware write that raises an interrupt hands over at the next instruction;
+- loops count against the time slice; waiting loops, recognised with the reference core's own rule, are left to it
+  (it skips the rest of the slice there instead of spinning);
+- newly covered: second multiply unit (`mult1`, `div1`, `madd`...), unaligned loads and stores, `pmulth`, VU0
+  register moves (`lqc2`, `sqc2`, `qmfc2`, `qmtc2`), `cache` / `sync` / `pref`.
+
+**Coverage** (`hp2recomp lift`, counting run `.cache/r1-counts2`): 3,692 of the 3,698 functions executed in the
+session are translated (99.8 % of executed game instructions; the 6 others start with `mfc0` / `cfc2`). In them,
+730 places hand over; in the 400 hottest, 149, mostly VU0 macro instructions (`vsub` 40, `vmul` 21, `vmulbc` 10,
+`vmove` 9, ...). Translating and compiling the 3,692 functions at -O2 takes 134-224 s on this PC (single thread).
+
+**Comparison** (`--lift-check`, `.cache/r1b-check`, 399 hottest functions, now including functions that call
+others): **0 differences** in 1,156 compared calls of 197 functions (registers, HI/LO and HI1/LO1, FPU, VU0
+registers, main memory and scratchpad). Calls that handed over before returning are not compared (1,196).
+
+**Running the game on translated code** (`--run-translated`, the same scripted session, measurement build).
+The session completes normally (menus, Quick Race, race; screenshots in `.cache/r1b-runall3/shots`). Quick Race
+picks a different car and track than in the reference runs (the game chooses them at random, and the timing is
+different); the race is therefore **not the same race**, and race totals are not directly comparable.
+
+| Measure | Reference (`r1-trace3`) | Translated (`r1b-runall3`) |
+|---|---|---|
+| Calls into translated code | - | 70.5 million |
+| Blocks the reference core compiled during the session | 29,935 | **6,649** |
+| Menus: game program (EE) per busy refresh | 14.29 ms | **5.62 ms** |
+| Menus: refreshes over 16.7 ms / worst | 64 / 554 ms | **17 / 176 ms** |
+| Race: game program (EE) per busy refresh | 6.14 ms | **4.27 ms** |
+| Race: whole VM thread per busy refresh | 13.27 ms | 13.21 ms (other track: VU 5.13 vs 4.13, VIF+GIF 3.12 vs 2.24) |
+| Race: refreshes over 16.7 ms | 59 | 138 (other track) |
+
+Steps on the way (same session): with only the 400 hottest functions and no re-entry the game program's time did
+not change (6.12 ms); with all functions but no re-entry 4.65 ms and 20,359 blocks compiled; with re-entry 4.34 ms
+and 6,869; with the waiting-loop rule 4.27 ms and 6,649.
+
+**What this says.** Translation works on the real game at full coverage, and it removes most of the reference
+core's compilation (the menu hitches drop accordingly). In the race the game program now takes a third of the busy
+refresh; the vector unit (VU1 microcode) and the data path to it (VIF, GIF) take the other two thirds and are
+untouched so far. The ADR 0007 target (EE + VU at most 3 ms) is far: the next gains are VU0 macro mode (the hottest
+function, 7 % of executed instructions, is VU0 geometry) and then VU1.
+
+**Not verified.** Correctness of the running game beyond what the screenshots and the normal end of the session
+show (the comparison mode covers calls that return; run mode adds hand-over, re-entry and real hardware access,
+which are only exercised, not compared); a same-track race comparison; sound (muted).
+
 ## 8. Reproduce
 
 ```powershell

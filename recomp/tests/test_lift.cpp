@@ -83,8 +83,11 @@ std::vector<std::uint32_t> program() {
       /* 10006C */ 0x0C000000u | (kSum >> 2), nop, 0x0C000000u | (kDiv >> 2), nop,
       /* 10007C */ 0x0C000000u | (kFp >> 2), nop, 0x0C000000u | (kQuad >> 2), nop,
       /* 10008C */ 0x0C000000u | (kLoad >> 2), nop, jr(ra), nop,
+      // a function that starts with a system call: nothing to translate
+      /* 10009C */ 0x0000000Cu, jr(ra), nop,
   };
 }
+constexpr std::uint32_t kCaller = 0x10006C, kSys = 0x10009C;
 
 void put16(Bytes& b, std::size_t off, std::uint16_t v) {
   b[off] = static_cast<std::uint8_t>(v);
@@ -123,9 +126,12 @@ Bytes make_elf(const std::vector<std::uint32_t>& text, std::uint32_t entry) {
 struct State {
   std::uint32_t pc, pad[3];
   std::uint64_t gpr[32][2];
-  std::uint64_t hi, lo;
+  std::uint64_t hi, lo, hi1, lo1;
   std::uint32_t fpr[32];
   std::uint32_t fcsr, acc;
+  std::uint64_t vf[32][2];
+  std::int32_t quota;
+  std::uint32_t exception;
 };
 
 StateLayout layout() {
@@ -135,32 +141,61 @@ StateLayout layout() {
   l.gpr_stride = 16;
   l.hi = offsetof(State, hi);
   l.lo = offsetof(State, lo);
+  l.hi1 = offsetof(State, hi1);
+  l.lo1 = offsetof(State, lo1);
   l.fpr = offsetof(State, fpr);
   l.fcsr = offsetof(State, fcsr);
   l.fpacc = offsetof(State, acc);
+  l.vf = offsetof(State, vf);
+  l.cycle_quota = offsetof(State, quota);
+  l.has_exception = offsetof(State, exception);
   return l;
 }
 
 constexpr std::uint32_t kRam = 1 << 16;
 
+// Slow path: records the accesses; a write to 0x10000000 raises an "exception".
+struct SlowLog {
+  int reads = 0, writes = 0;
+  std::uint32_t last_address = 0;
+  std::uint64_t last_value = 0;
+};
+SlowLog g_slow;
+
+std::uint64_t slow_read(std::uint8_t*, std::uint32_t address, std::uint32_t) {
+  ++g_slow.reads;
+  g_slow.last_address = address;
+  return 0x1234;
+}
+void slow_write(std::uint8_t* state, std::uint32_t address, std::uint64_t value, std::uint32_t) {
+  ++g_slow.writes;
+  g_slow.last_address = address;
+  g_slow.last_value = value;
+  if (address == 0x10000000) reinterpret_cast<State*>(state)->exception = 1;
+}
+const Runtime kRuntime{&slow_read, &slow_write};
+
 struct Fixture {
-  ElfImage elf = ElfImage::parse(make_elf(program(), 0x10006C));
+  ElfImage elf = ElfImage::parse(make_elf(program(), kCaller));
   Discovery d = discover(elf);
   Translator t{elf, d, layout(), kRam};
   std::vector<std::uint8_t> ram = std::vector<std::uint8_t>(kRam, 0);
-  std::optional<std::string> caller_refused;
+  std::vector<std::uint8_t> spr = std::vector<std::uint8_t>(kScratchpadSize, 0);
+  std::optional<std::string> sys_refused;
   Fixture() {
-    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad}) {
+    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad, kCaller}) {
       const auto why = t.add_function(f);
-      if (why) std::printf("    could not lift %08X: %s\n", f, why->c_str());
+      if (why) std::printf("    could not translate %08X: %s\n", f, why->c_str());
     }
-    caller_refused = t.add_function(0x10006C);
+    sys_refused = t.add_function(kSys);
     if (std::getenv("HP2_DUMP_IR")) std::fprintf(stderr, "%s", t.ir().c_str());
     t.compile();
   }
   State call(std::uint32_t f, State s) {
     s.gpr[ra][0] = 0x00100090;
-    t.lookup(f)(reinterpret_cast<std::uint8_t*>(&s), ram.data());
+    s.pc = f;
+    s.quota = 1 << 20;
+    t.lookup(f)(reinterpret_cast<std::uint8_t*>(&s), ram.data(), spr.data(), &kRuntime);
     return s;
   }
 };
@@ -180,12 +215,12 @@ std::uint32_t bits(float f) {
 
 TEST(lift_all_test_functions) {
   Fixture& f = fixture();
-  CHECK_EQ(f.t.size(), static_cast<std::size_t>(5));
-  for (std::uint32_t fn : {kSum, kDiv, kFp, kQuad, kLoad}) CHECK(f.t.lookup(fn) != nullptr);
-  // The caller is not a leaf function; nothing can be added after compile().
-  REQUIRE(f.caller_refused.has_value());
-  std::printf("    caller refused: %s\n", f.caller_refused->c_str());
-  CHECK(f.caller_refused->find("call at") != std::string::npos);
+  CHECK_EQ(f.t.size(), static_cast<std::size_t>(6));
+  for (std::uint32_t fn : {kSum, kDiv, kFp, kQuad, kLoad, kCaller}) CHECK(f.t.lookup(fn) != nullptr);
+  // A function whose first instruction has to be left to the reference core makes no progress: refused.
+  REQUIRE(f.sys_refused.has_value());
+  CHECK(f.sys_refused->find("first instruction") != std::string::npos);
+  // Nothing can be added after compile().
   CHECK(f.t.add_function(kSum).has_value());
 }
 
@@ -258,7 +293,7 @@ TEST(lift_128_bit_load_and_store) {
   CHECK(std::memcmp(&f.ram[0x2000], &f.ram[0x2010], 16) == 0);
 }
 
-TEST(lift_traps_outside_main_memory) {
+TEST(lift_memory_regions) {
   Fixture& f = fixture();
   State s{};
   s.gpr[a0][0] = 0x3000;
@@ -269,9 +304,89 @@ TEST(lift_traps_outside_main_memory) {
   s.gpr[a0][0] = 0x20003000;  // uncached mirror of main memory
   r = f.call(kLoad, s);
   CHECK_EQ(r.gpr[v0][0], 0x5Aull);
-  s.gpr[a0][0] = 0x70000000;  // scratchpad: not modelled by the spike
+  const std::uint32_t pad = 0x77;
+  std::memcpy(&f.spr[0x10], &pad, 4);
+  s.gpr[a0][0] = 0x70000010;  // scratchpad
   r = f.call(kLoad, s);
-  CHECK_EQ(r.pc, kTrapPc);
+  CHECK_EQ(r.gpr[v0][0], 0x77ull);
+  const int before = g_slow.reads;
+  s.gpr[a0][0] = 0x10003000;  // hardware registers: the runtime's slow path
+  r = f.call(kLoad, s);
+  CHECK_EQ(g_slow.reads, before + 1);
+  CHECK_EQ(g_slow.last_address, 0x10003000u);
+  CHECK_EQ(r.gpr[v0][0], 0x1234ull);
+  CHECK_EQ(r.pc, 0x00100090u);
+}
+
+TEST(lift_calls_between_translated_functions) {
+  Fixture& f = fixture();
+  const std::uint32_t words[2] = {500, 0xABCD};
+  std::memcpy(&f.ram[0x4000], words, 8);
+  State s{};
+  s.gpr[a0][0] = 0x4000;
+  s.gpr[a1][0] = 1;
+  // kCaller calls kSum, kDiv, kFp, kQuad and kLoad in turn, then returns.
+  State r = f.call(kCaller, s);
+  // The test caller does not save ra, so its final "jr ra" goes to the link of its last call.
+  CHECK_EQ(r.pc, 0x00100094u);
+  CHECK_EQ(r.gpr[a0][0], 0x4004ull);   // advanced by kSum
+  CHECK_EQ(r.gpr[v0][0], 0xABCDull);   // kLoad, last: the word at a0
+  CHECK_EQ(r.gpr[ra][0], 0x00100094ull);  // the link of the last call
+}
+
+TEST(lift_entry_in_the_middle_of_a_function) {
+  // kSum's loop head (0x10000C) starts a straight run: translated code can be
+  // entered there with the state as the reference core left it.
+  Fixture& f = fixture();
+  REQUIRE(f.t.lookup_entry(0x10000C) != nullptr);
+  CHECK(f.t.lookup_entry(0x10000C) == f.t.lookup(kSum));
+  CHECK(f.t.lookup_entry(0x100010) == nullptr);  // not where a straight run begins
+  CHECK(f.t.entries() > 0);
+  const std::uint32_t words[3] = {7, 8, 9};
+  std::memcpy(&f.ram[0x5000], words, 12);
+  State s{};
+  s.gpr[a0][0] = 0x5000;
+  s.gpr[a1][0] = 3;
+  s.gpr[v0][0] = 100;  // as if the reference core had run the first instruction (v0 = 0) differently
+  s.gpr[ra][0] = 0x00100090;
+  s.pc = 0x10000C;
+  s.quota = 1 << 20;
+  f.t.lookup_entry(0x10000C)(reinterpret_cast<std::uint8_t*>(&s), f.ram.data(), f.spr.data(), &kRuntime);
+  CHECK_EQ(s.pc, 0x00100090u);
+  CHECK_EQ(s.gpr[v0][0], 124ull);  // 100 + 7 + 8 + 9: the entry skipped "v0 = 0"
+}
+
+TEST(lift_loops_give_up_their_time_slice) {
+  // With a small quota, the loop in kSum stops at its head; entering there again finishes the work.
+  Fixture& f = fixture();
+  std::vector<std::uint32_t> words(50, 1);
+  std::memcpy(&f.ram[0x6000], words.data(), 200);
+  State s{};
+  s.gpr[a0][0] = 0x6000;
+  s.gpr[a1][0] = 50;
+  s.gpr[ra][0] = 0x00100090;
+  s.pc = kSum;
+  s.quota = 30;
+  f.t.lookup(kSum)(reinterpret_cast<std::uint8_t*>(&s), f.ram.data(), f.spr.data(), &kRuntime);
+  CHECK_EQ(s.pc, 0x10000Cu);  // stopped at the loop head
+  CHECK(s.gpr[v0][0] < 50ull);
+  int rounds = 0;
+  while (s.pc != 0x00100090u && rounds++ < 100) {
+    s.quota = 30;
+    f.t.lookup_entry(s.pc)(reinterpret_cast<std::uint8_t*>(&s), f.ram.data(), f.spr.data(), &kRuntime);
+  }
+  CHECK_EQ(s.gpr[v0][0], 50ull);
+}
+
+TEST(lift_stops_when_a_callee_was_not_translated) {
+  // kSys could not be translated; a caller that calls it must stop there,
+  // with the state current, for the reference core to continue.
+  Fixture& f = fixture();
+  State s{};
+  s.pc = kSys;
+  s.quota = 100;
+  // Calling the untranslated function through the dispatcher: nothing runs, pc stays.
+  CHECK(f.t.lookup(kSys) == nullptr);
 }
 
 MINITEST_MAIN()

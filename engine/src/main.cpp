@@ -29,6 +29,8 @@
 //   --trace-counts        with --trace: also count how often each block runs (slower, counting runs only)
 //   --lift-check <list>   with --trace: translate the listed game functions (translator spike) and
 //                         compare them with the reference core while the game runs (builds with LLVM only)
+//   --run-translated <list>  with --trace: translate the listed game functions and run them instead of the
+//                         reference core (builds with LLVM only)
 #include <windows.h>
 
 #include <dbghelp.h>
@@ -497,6 +499,7 @@ namespace
 		fs::path trace;       // folder for reference measurements (development, ref_trace.h)
 		bool traceCounts = false;  // with --trace: count how often each block of game code runs
 		fs::path liftCheck;        // with --trace: list of functions to translate and compare (lift_check.h)
+		fs::path runTranslated;    // with --trace: list of functions to translate and run instead of the core
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -576,6 +579,7 @@ namespace
 			else if(a == L"--trace" && hasValue) options.trace = argv[++i];
 			else if(a == L"--trace-counts") options.traceCounts = true;
 			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
+			else if(a == L"--run-translated" && hasValue) options.runTranslated = argv[++i];
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
 			else if(a == L"--unlimited") options.unlimited = true;
@@ -821,8 +825,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->Pause();
 		if(!options.trace.empty())
 		{
-			const std::string traceError = hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, options.liftCheck,
-			                                                    options.rom / L"SLUS_203.62");
+			const bool run = !options.runTranslated.empty();
+			const std::string traceError =
+			    hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, run ? options.runTranslated : options.liftCheck,
+			                         options.rom / L"SLUS_203.62", run);
 			if(!traceError.empty()) throw std::runtime_error("--lift-check: " + traceError);
 			Log("step: reference tracing installed");
 		}

@@ -15,4 +15,9 @@ namespace hp2ref
 	{
 		return nullptr;
 	}
+
+	LiftedCode LiftCheckLookupEntry(uint32_t)
+	{
+		return nullptr;
+	}
 }

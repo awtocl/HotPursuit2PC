@@ -574,7 +574,12 @@ int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t to
   layout.fpr = layout.lo + 8;
   layout.fcsr = layout.fpr + 128;
   layout.fpacc = layout.fcsr + 4;
-  Translator t(elf, d, layout, 0x02000000);
+  layout.hi1 = layout.fpacc + 4;
+  layout.lo1 = layout.hi1 + 8;
+  layout.vf = layout.lo1 + 8;
+  layout.cycle_quota = layout.vf + 32 * 16;
+  layout.has_exception = layout.cycle_quota + 4;
+  Translator t(elf, d, layout, 0x04000000);
   std::map<std::string, std::pair<std::size_t, std::uint64_t>> reasons;  // kind -> functions, instructions
   std::uint64_t lifted_share = 0;
   std::string list = "# hottest game functions the translator spike can translate (hp2recomp lift)\n";
@@ -585,7 +590,7 @@ int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t to
     const auto why = t.add_function(start);
     if (!why) {
       lifted_share += n;
-      list += std::format("{:08X}  # {:.2f}% of executed game instructions\n", start, share);
+      list += std::format("{:08X}  # {:.3f}% of executed game instructions\n", start, share);
     } else {
       std::string kind = *why;
       if (const auto colon = kind.find(": "); kind.starts_with("instruction at") && colon != std::string::npos)
@@ -605,6 +610,13 @@ int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t to
                            "in the session\n", t.size(), std::min(top, order.size()),
                            100.0 * static_cast<double>(lifted_share) / static_cast<double>(total));
   std::cout << std::format("optimising and compiling them to x64 took {:.2f} s\n", seconds);
+  std::cout << std::format("translated instructions: {}; direct calls: {}; places that hand over to the reference core: {}\n",
+                           t.stats().instructions, t.stats().calls, t.stats().stops);
+  std::vector<std::pair<std::size_t, std::string>> stops;
+  for (const auto& [why, n] : t.stop_reasons()) stops.emplace_back(n, why);
+  std::sort(stops.rbegin(), stops.rend());
+  std::cout << "hand-over places by reason (first 20):\n";
+  for (std::size_t i = 0; i < stops.size() && i < 20; ++i) std::cout << std::format("  {:>6}  {}\n", stops[i].first, stops[i].second);
   std::vector<std::pair<std::uint64_t, std::string>> by_weight;
   for (const auto& [kind, r] : reasons) by_weight.emplace_back(r.second, kind);
   std::sort(by_weight.rbegin(), by_weight.rend());
