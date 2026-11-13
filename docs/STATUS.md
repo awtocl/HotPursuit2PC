@@ -3,8 +3,9 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-12 — phase **R1a (recompiler analysis)**. **Waiting for an owner decision: Q10 (may LLVM
-be downloaded and built?).**
+**Last update:** 2026-11-13 — phase **R1b-spike (translator spike)**. The owner allowed LLVM (Q10, 2026-11-12); the
+spike passed: translated game functions match the reference core exactly (0 differences in 1,864 real calls) and
+run 4.1x faster; ADR 0007 accepted. Next: the whole-program translator (R1b proper).
 **The owner played the Milestone 1 build and did NOT accept it** (stutter, smoke/brake-light glow drawn as translucent
 squares, sound problems; wants "much closer to a recompilation than to an emulator trimmed for the game", clearly
 better than PCSX2). Direction changed by [ADR 0006](adr/0006-recompilation-main-line.md): **the product is now a
@@ -38,7 +39,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **Milestone 1 gate** | **not accepted by the owner (2026-11-12)** | owner's report + per-frame measurements: `docs/evidence/m1-acceptance.md` §4a |
 | P6 M1 trial follow-up (stage R0 of ADR 0006) | **done** | commit `e5d927d`; launcher frame pacer (absolute 60 Hz grid, presentation half a period later), `--frametimes` recorder + `tools/frametimes.py`; race presentations 94 % at exactly 33.3 ms (were spread over 27–38 ms); remaining late frames traced to the core's JIT cost; smoke/glow defect reproduced, cause not identified; ADR 0006; README rewritten for GitHub with legal and AI-assistance disclosures (owner's request). |
 | **R1a recompiler analysis** | **done** | this commit; `recomp/` (ELF reader, R5900 decoder, function discovery, `hp2recomp.exe`); launcher `--trace` + `profile` build preset + `tools/profile.py`, `tools/recon/vucheck.py`; `docs/recomp-analysis.md`: 431,681 words all decode, 10,146 functions, 193 switches, **0 of 29,860 executed blocks start anywhere unpredicted**, code not modified at run time, all executed VU1 microcode is in `.vutext`; time shares of a busy race refresh measured; **pacer defect in 60 fps content found and fixed** (evidence §4b); ADR 0007 proposed; 12 CTest tests pass in dev and release. |
-| **R1b translator** | **blocked on Q10** | LLVM fetch + build → spike on ~20 hot functions and one microprogram (ADR 0007 Decision 5) → whole-program translation, lock-step against the reference |
+| **R1b-spike translator spike** | **done** | this commit; LLVM 23.1.5 fetched (pinned SHA-256) and built in `.cache`; `recomp/src/lift.cpp` (leaf functions → LLVM → x64); `--trace-counts` fixed (epilogue), `hp2recomp hot` / `lift`; launcher `--lift-check` (profile build); 97 of the 400 hottest functions translated in 0.57 s; 81 compared on 1,864 calls: **0 differences**; **4.1x** faster; 16 trapped on the scratchpad; ADR 0007 accepted; 14 CTest tests pass in dev and release. The VU1 microprogram part of the spike was not done (next). |
+| **R1b translator** | **next** | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
 
 ## Decisions (ADRs)
 
@@ -49,7 +51,7 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | [0003](adr/0003-gui-framework.md) | GUI framework | Plain Win32 + Common Controls 6; all logic in `hp2core`; GUI and CLI are thin front-ends. |
 | [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names from a table recovered from the dump; unpack = exact 1:1 extents + manifest with SHA-256; resumable; ROM read-only. |
 | [0006](adr/0006-recompilation-main-line.md) | Direction after the M1 trial | **Static recompilation + purpose-built runtime is the product (stages R0–R4); the Play!-based launcher is the reference oracle and fallback.** No game code is ever distributed: translation happens in the converter on the user's machine. |
-| [0007](adr/0007-code-generator.md) | Code generator, translation model, scope of R1 | **Proposed, waits for Q10:** LLVM embedded in the converter (x86 back end only); one host function per game function, re-enterable at resume points, running on the reference machine model with fallback; R1 covers the game program **and** VU1 microcode; acceptance restated (EE + VU ≤ 3 ms per busy refresh, nothing compiled while playing; "3×" moves to R3). Fallback if LLVM is refused: own x64 emitter. |
+| [0007](adr/0007-code-generator.md) | Code generator, translation model, scope of R1 | **Accepted 2026-11-13 (spike: 0 differences, 4.1x):** LLVM embedded in the converter (x86 back end only); one host function per game function, re-enterable at resume points, running on the reference machine model with fallback; R1 covers the game program **and** VU1 microcode; acceptance restated (EE + VU ≤ 3 ms per busy refresh, nothing compiled while playing; "3×" moves to R3). Fallback if LLVM is refused: own x64 emitter. |
 | [0005](adr/0005-rendering-audio.md) | Launcher (now: reference build) | Play! core libraries linked statically (source unmodified); its OpenGL renderer on our WGL context; WaveOut audio; XInput + keyboard; virtual disc from the ROM folder; all data in `game/build/data`; core's 60 Hz limiter on. **Races are drawn at 30 fps by the game itself, menus at 60** (measured; unverified on a console). |
 
 ## What exists now (how to use it)
@@ -124,7 +126,8 @@ Recompiler analysis (R1a, `docs/recomp-analysis.md`):
 - C1–C8 from the brief. ROM is read-only. No destructive git, **no push without asking**.
 - Owner's working rules: announce every command; never delete project files (archive them instead); no installing software; ask before downloads.
   Standing permissions: (2026-11-11) detect/use installed dev tools, build inside the project folder with caches in `.cache\`, local-only git; (2026-11-12) fetch the Play! source and its submodules from GitHub into `.cache/third_party/`.
-  Anything else from the network needs a new question (LLVM: Q10).
+  (2026-11-12) download and build LLVM into `.cache/third_party/` (Q10).
+  Anything else from the network needs a new question.
 - Publishing rule (owner, 2026-11-12): see requirement 3 at the top. Until then: local commits only.
 - Never commit game data or screenshots of the game (CI guard + CONTRIBUTING).
 - Running the launcher opens a window and (unless `--mute`) plays sound on the owner's PC: say so before running it.
@@ -141,20 +144,23 @@ Recompiler analysis (R1a, `docs/recomp-analysis.md`):
 | Q6 | Does the owner remember races at 30 or 60 fps on the console? Does handling/speed feel right? | R3 | still open — the owner has not said |
 | Q7 | Audio: the owner reported sound problems but not which (crackle, cuts, sync, pitch?). A pacer defect that made the game clock advance in bursts in videos/menus was fixed in R1a — is it still there? | R0/R4 | **ask the owner; then measure un-muted** |
 | Q9 | Does the pacer (P6 + the R1a fix) remove the constant judder for the owner? Which monitor refresh rate / VRR? | R0 | owner to re-try `.cache\m1-run\game\build\HotPursuit2.exe` |
-| **Q10** | **May LLVM be downloaded (≈ 150 MB of source, estimate) and built once inside `.cache/` (several GB, 20–40 min, estimates) as the recompiler's code generator (ADR 0007)? If not: own x64 emitter, lower expected gain.** | R1b | **yes — blocks R1b** |
+| Q10 | ~~May LLVM be downloaded and built?~~ — **answered yes (2026-11-12)**; 171 MB download, 1.9 GB build tree, 527 MB installed | — | — |
 | Q11 | Do other modes upload vector-unit microcode that is not in `.vutext`? Do other modes execute code the analysis treats as unreferenced/orphan? | R1b | no — answered by tracing more sessions |
 | Q8 | Does the game use DualShock 2 button pressure (throttle/brake)? Not emulated by the pad handler. | M1 sign-off / M2 | observation by the owner |
 
 ## Next steps
 
-1. **Owner answers Q10.**
+1. **Done 2026-11-13:** Q10 answered, LLVM fetched and built, spike passed (`docs/recomp-analysis.md` §9). What was
+   planned for it:
    - Yes → `tools/fetch-llvm.ps1` (pinned release, license read and recorded in `docs/prior-art.md` first), build
      into `.cache/third_party/`, then the spike of ADR 0007 Decision 5: translate ~20 hot functions and one
      microprogram, run them through the tracing executor in lock-step with the core's JIT, time them in isolation.
      Hot functions are not known yet: the trace lists what ran, not how often — add execution counters to the
      tracing executor first (a call from each block's prologue, measurement builds only).
    - No → design the own-emitter fallback (ADR 0007 option B) and rewrite the ADR.
-2. Independent of the generator, and useful either way: an interpreter for the R5900 on top of `hp2/r5900.h`
+2. **Next (R1b proper), in this order:** calls between translated functions with the resume-point model of ADR 0007
+   (the largest blocker: 51.5 % of executed instructions sit in functions that call others); the scratchpad;
+   VU0 macro mode; the remaining instructions; then one VU1 microprogram through the same comparison. Also useful: an interpreter for the R5900 on top of `hp2/r5900.h`
    (the semantic ground truth the translator is tested against, checked itself in lock-step with the core);
    tracing of calls through pointers and of returns (the block list has no order, so "every return goes back to
    its call site" is not yet proven); more traced sessions (other modes, Q11).

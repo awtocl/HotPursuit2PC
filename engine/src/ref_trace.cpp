@@ -5,6 +5,7 @@
 
 #include <intrin.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -14,8 +15,12 @@
 #include "PS2VM.h"
 #include "Profiler.h"
 #include "Ps2Const.h"
+#include "ee/EeBasicBlock.h"
 #include "ee/EeExecutor.h"
 #include "ee/VuExecutor.h"
+#include "string_format.h"
+
+#include "lift_check.h"
 
 namespace hp2ref
 {
@@ -38,6 +43,213 @@ namespace hp2ref
 		// that has none (and again after the block was invalidated). Recording
 		// here therefore lists exactly the code that ran, complete even when
 		// blocks are thrown away later.
+		// Execution counters (--trace-counts): how often each block runs, to find
+		// the code that matters. Each block gets a call to CountBlock in its
+		// epilogue (the prologue is skipped when a block loops on itself). This
+		// run mode builds the blocks itself instead of through the core's block
+		// cache, so the core's write protection of code pages and its per-game
+		// block hints are not active: use it for measuring only.
+		bool g_countBlocks = false;
+		std::vector<uint64_t> g_blockCounts;  // same indexing as g_blocks
+
+		void CountBlock(uint32 index)
+		{
+			++g_blockCounts[index];
+		}
+
+		// ---- translator spike (--lift-check) ----------------------------------------------
+		// At the entry of a translated function, the translated code runs on a
+		// copy of the processor state and of main memory; the reference core then
+		// runs the same call; when it comes back (first block at the return
+		// address with the same stack pointer) both results are compared.
+		// Later calls of the reference are only timed, entry to return.
+		constexpr uint32_t kRamSize = 0x02000000;  // main memory as the translator sees it
+		constexpr uint32_t kTrapPc = 1;            // hp2::kTrapPc
+		constexpr int kVerifyCalls = 24;           // compared calls per function
+		constexpr int kTimeCalls = 400;            // timed calls of the reference per function
+		constexpr int kLiftedRepeats = 64;         // the translated code is timed by re-running it
+
+		bool g_liftCheck = false;
+		std::vector<uint8_t> g_liftEntry;  // per block index: begins a translated function
+		uint8_t* g_ram = nullptr;
+		std::vector<uint8_t> g_ramEntry, g_ramLifted;
+
+		struct LiftStats
+		{
+			int verified = 0, stateMismatch = 0, liftedOnlyWrites = 0, referenceOnlyChanges = 0, traps = 0;
+			int timed = 0;
+			std::vector<uint64_t> referenceTicks, liftedTicks;
+			std::string firstMismatch;
+		};
+		std::map<uint32_t, LiftStats> g_liftStats;
+
+		struct Pending
+		{
+			bool active = false, verify = false;
+			uint32_t function = 0, returnAddress = 0, stack = 0;
+			uint64_t start = 0;
+			MIPSSTATE lifted;
+		};
+		Pending g_pending;
+
+		std::string DescribeStateDifference(const MIPSSTATE& ref, const MIPSSTATE& lifted)
+		{
+			if(ref.nPC != lifted.nPC) return string_format("pc %08X vs %08X", ref.nPC, lifted.nPC);
+			for(int r = 0; r < 32; r++)
+				for(int w = 0; w < 4; w++)
+					if(ref.nGPR[r].nV[w] != lifted.nGPR[r].nV[w])
+						return string_format("r%d word %d: %08X vs %08X", r, w, ref.nGPR[r].nV[w], lifted.nGPR[r].nV[w]);
+			for(int w = 0; w < 2; w++)
+			{
+				if(ref.nHI[w] != lifted.nHI[w]) return string_format("hi word %d: %08X vs %08X", w, ref.nHI[w], lifted.nHI[w]);
+				if(ref.nLO[w] != lifted.nLO[w]) return string_format("lo word %d: %08X vs %08X", w, ref.nLO[w], lifted.nLO[w]);
+			}
+			for(int r = 0; r < 32; r++)
+				if(ref.nCOP1[r] != lifted.nCOP1[r]) return string_format("f%d: %08X vs %08X", r, ref.nCOP1[r], lifted.nCOP1[r]);
+			if(ref.nCOP1A != lifted.nCOP1A) return string_format("fpu acc: %08X vs %08X", ref.nCOP1A, lifted.nCOP1A);
+			if(ref.nFCSR != lifted.nFCSR) return string_format("fcsr: %08X vs %08X", ref.nFCSR, lifted.nFCSR);
+			return {};
+		}
+
+		void FinishPending(CMIPS* context)
+		{
+			const uint64_t ticks = __rdtsc() - g_pending.start;
+			LiftStats& stats = g_liftStats[g_pending.function];
+			g_pending.active = false;
+			if(!g_pending.verify)
+			{
+				stats.referenceTicks.push_back(ticks);
+				return;
+			}
+			stats.verified++;
+			const std::string difference = DescribeStateDifference(context->m_State, g_pending.lifted);
+			if(!difference.empty())
+			{
+				stats.stateMismatch++;
+				if(stats.firstMismatch.empty()) stats.firstMismatch = difference;
+			}
+			// Memory, a page at a time: bytes the translated code wrote differently
+			// from the reference, and bytes the reference changed that it did not.
+			// The second kind can also come from elsewhere (DMA, an interrupt) while
+			// the reference was running the call.
+			bool liftedOnly = false, referenceOnly = false;
+			for(uint32_t page = 0; page < kRamSize; page += 4096)
+			{
+				if(memcmp(g_ram + page, g_ramLifted.data() + page, 4096) == 0) continue;
+				for(uint32_t i = page; i < page + 4096; i++)
+				{
+					if(g_ram[i] == g_ramLifted[i]) continue;
+					if(g_ramLifted[i] != g_ramEntry[i])
+						liftedOnly = true;
+					else
+						referenceOnly = true;
+				}
+			}
+			if(liftedOnly)
+			{
+				stats.liftedOnlyWrites++;
+				if(stats.firstMismatch.empty()) stats.firstMismatch = "memory written differently";
+			}
+			if(referenceOnly) stats.referenceOnlyChanges++;
+		}
+
+		void StartPending(CMIPS* context, uint32_t function)
+		{
+			LiftStats& stats = g_liftStats[function];
+			auto code = LiftCheckLookup(function);
+			if(!code) return;
+			Pending& p = g_pending;
+			p.function = function;
+			p.returnAddress = context->m_State.nGPR[CMIPS::RA].nV0;
+			p.stack = context->m_State.nGPR[CMIPS::SP].nV0;
+			if(stats.verified + stats.traps < kVerifyCalls)
+			{
+				memcpy(g_ramEntry.data(), g_ram, kRamSize);
+				memcpy(g_ramLifted.data(), g_ram, kRamSize);
+				p.lifted = context->m_State;
+				code(reinterpret_cast<uint8_t*>(&p.lifted), g_ramLifted.data());
+				if(p.lifted.nPC == kTrapPc)
+				{
+					stats.traps++;
+					return;
+				}
+				// Time the translated code on this call's inputs (memory as left by the
+				// first run): one timed burst of kLiftedRepeats calls, each on its own
+				// copy of the entry state, because the time-stamp counter is too coarse
+				// for a single short call. Stored in thousandths of a tick per call.
+				{
+					static std::vector<MIPSSTATE> scratch(kLiftedRepeats);
+					for(auto& s : scratch) s = context->m_State;
+					const uint64_t t0 = __rdtsc();
+					for(auto& s : scratch) code(reinterpret_cast<uint8_t*>(&s), g_ramLifted.data());
+					stats.liftedTicks.push_back((__rdtsc() - t0) * 1000 / kLiftedRepeats);
+				}
+				// Run once more from the entry state, so that g_ramLifted holds the result of one call.
+				memcpy(g_ramLifted.data(), g_ramEntry.data(), kRamSize);
+				p.lifted = context->m_State;
+				code(reinterpret_cast<uint8_t*>(&p.lifted), g_ramLifted.data());
+				p.verify = true;
+			}
+			else if(stats.timed < kTimeCalls)
+			{
+				stats.timed++;
+				p.verify = false;
+			}
+			else
+			{
+				return;
+			}
+			p.active = true;
+			p.start = __rdtsc();
+		}
+
+		// Prologue of every block in --lift-check mode.
+		void BlockEntry(CMIPS* context, uint32 index)
+		{
+			if(g_pending.active)
+			{
+				const uint32_t begin = g_blocks[index].begin;
+				if(begin == g_pending.returnAddress && context->m_State.nGPR[CMIPS::SP].nV0 == g_pending.stack)
+					FinishPending(context);
+				return;
+			}
+			if(g_liftEntry[index]) StartPending(context, g_blocks[index].begin);
+		}
+
+		class CCountingEeBasicBlock : public CEeBasicBlock
+		{
+		public:
+			CCountingEeBasicBlock(CMIPS& context, uint32 begin, uint32 end, BLOCK_CATEGORY category, uint32 index)
+			    : CEeBasicBlock(context, begin, end, category)
+			    , m_index(index)
+			{
+			}
+
+		protected:
+			void CompileProlog(CMipsJitter* jitter) override
+			{
+				if(g_liftCheck)
+				{
+					jitter->PushCtx();
+					jitter->PushCst(m_index);
+					jitter->Call(reinterpret_cast<void*>(&BlockEntry), 2, Jitter::CJitter::RETURN_VALUE_NONE);
+				}
+				CEeBasicBlock::CompileProlog(jitter);
+			}
+			void CompileEpilog(CMipsJitter* jitter, bool loopsOnItself) override
+			{
+				if(g_countBlocks)
+				{
+					jitter->PushCst(m_index);
+					jitter->Call(reinterpret_cast<void*>(&CountBlock), 1, Jitter::CJitter::RETURN_VALUE_NONE);
+				}
+				CEeBasicBlock::CompileEpilog(jitter, loopsOnItself);
+			}
+
+		private:
+			uint32 m_index;
+		};
+
 		class CTracingEeExecutor : public CEeExecutor
 		{
 		public:
@@ -46,7 +258,13 @@ namespace hp2ref
 			BasicBlockPtr BlockFactory(CMIPS& context, uint32 start, uint32 end) override
 			{
 				g_blocks.push_back({start, end, g_frame.load(std::memory_order_relaxed)});
-				return CEeExecutor::BlockFactory(context, start, end);
+				if(!g_countBlocks && !g_liftCheck) return CEeExecutor::BlockFactory(context, start, end);
+				g_blockCounts.push_back(0);
+				g_liftEntry.push_back(g_liftCheck && LiftCheckLookup(start) != nullptr);
+				auto block = std::make_shared<CCountingEeBasicBlock>(context, start, end, m_blockCategory,
+				                                                     static_cast<uint32>(g_blocks.size() - 1));
+				block->Compile();
+				return block;
 			}
 		};
 
@@ -128,12 +346,38 @@ namespace hp2ref
 		return g_enabled;
 	}
 
-	void TraceInstall(CPS2VM& vm, const fs::path& dir)
+	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
+	                         const fs::path& elf)
 	{
 		std::error_code ec;
 		fs::create_directories(dir, ec);
 		g_dir = dir;
+		g_countBlocks = countBlocks;
+		if(!liftList.empty())
+		{
+			LiftLayout layout;
+			layout.pc = offsetof(MIPSSTATE, nPC);
+			layout.gpr = offsetof(MIPSSTATE, nGPR);
+			layout.gprStride = sizeof(uint128);
+			layout.hi = offsetof(MIPSSTATE, nHI);
+			layout.lo = offsetof(MIPSSTATE, nLO);
+			layout.fpr = offsetof(MIPSSTATE, nCOP1);
+			layout.fcsr = offsetof(MIPSSTATE, nFCSR);
+			layout.fpacc = offsetof(MIPSSTATE, nCOP1A);
+			std::string error, report;
+			if(!LiftCheckPrepare(elf, liftList, layout, kRamSize, error, report)) return error;
+			if(FILE* file = _wfopen((dir / L"lift-not-translated.tsv").c_str(), L"w"))
+			{
+				fputs(report.c_str(), file);
+				fclose(file);
+			}
+			g_liftCheck = true;
+			g_ram = vm.m_ee->m_ram;
+			g_ramEntry.resize(kRamSize);
+			g_ramLifted.resize(kRamSize);
+		}
 		g_blocks.reserve(1 << 18);
+		g_blockCounts.reserve(1 << 18);  // never reallocated while compiled code holds indices into it
 		g_samples.reserve(1 << 16);
 		g_zoneTimes.reserve(1 << 20);
 
@@ -152,6 +396,7 @@ namespace hp2ref
 		g_startQpc = Qpc();
 		g_startTsc = __rdtsc();
 		g_enabled = true;
+		return {};
 	}
 
 	void TraceVmFrameWorkDone(uint32_t frame)
@@ -216,8 +461,17 @@ namespace hp2ref
 
 		if(FILE* file = _wfopen((g_dir / L"blocks.tsv").c_str(), L"w"))
 		{
-			fprintf(file, "# every EE block the reference core compiled: begin, end (address of the last instruction), frame\n");
-			for(const auto& block : g_blocks) fprintf(file, "%08X\t%08X\t%u\n", block.begin, block.end, block.frame);
+			fprintf(file, "# every EE block the reference core compiled: begin, end (address of the last instruction), frame%s\n",
+			        g_countBlocks ? ", times executed" : "");
+			for(size_t i = 0; i < g_blocks.size(); i++)
+			{
+				const auto& block = g_blocks[i];
+				if(g_countBlocks)
+					fprintf(file, "%08X\t%08X\t%u\t%llu\n", block.begin, block.end, block.frame,
+					        static_cast<unsigned long long>(g_blockCounts[i]));
+				else
+					fprintf(file, "%08X\t%08X\t%u\n", block.begin, block.end, block.frame);
+			}
 			fclose(file);
 		}
 
@@ -249,6 +503,27 @@ namespace hp2ref
 				fputc('\n', file);
 			}
 			fclose(file);
+		}
+
+		if(g_liftCheck)
+		{
+			auto median = [](std::vector<uint64_t> v) -> double {
+				if(v.empty()) return 0;
+				std::sort(v.begin(), v.end());
+				return static_cast<double>(v[v.size() / 2]);
+			};
+			const double cyclesPerNs = cyclesPerMs / 1e6;
+			if(FILE* file = _wfopen((g_dir / L"lift-check.tsv").c_str(), L"w"))
+			{
+				fprintf(file, "function\tverified\tstate_mismatch\tmemory_mismatch\treference_only_memory_changes\ttraps"
+				              "\treference_calls_timed\treference_median_ns\ttranslated_median_ns\tfirst_mismatch\n");
+				for(const auto& [function, stats] : g_liftStats)
+					fprintf(file, "%08X\t%d\t%d\t%d\t%d\t%d\t%zu\t%.1f\t%.1f\t%s\n", function, stats.verified,
+					        stats.stateMismatch, stats.liftedOnlyWrites, stats.referenceOnlyChanges, stats.traps,
+					        stats.referenceTicks.size(), median(stats.referenceTicks) / cyclesPerNs,
+					        median(stats.liftedTicks) / 1000.0 / cyclesPerNs, stats.firstMismatch.c_str());
+				fclose(file);
+			}
 		}
 
 		SaveBytes(g_dir / L"vu1-micro.bin", vm.m_ee->m_microMem1, PS2::MICROMEM1SIZE);

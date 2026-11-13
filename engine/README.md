@@ -79,6 +79,10 @@ pwsh tools/run-launcher.ps1 -RunName trace -Preset profile -Rom ".cache\m1-run\g
 python -B tools/profile.py .cache\trace\trace\profile.csv --from-frame 3120 --to-frame 4500 --label race
 ```
 
+`--trace-counts` also counts how often each block runs; `--lift-check <list>` (profile build only: it links
+LLVM) translates the listed functions and compares them with the core on every real call
+(`lift-check.tsv`). From inside PowerShell: `-Extra @('--lift-check', '.cache\r1-lift-list.txt')`.
+
 Analysis and results: `recomp/README.md`, `docs/recomp-analysis.md`.
 
 ## Known problems of the reference build

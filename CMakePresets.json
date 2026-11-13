@@ -29,7 +29,8 @@
       "binaryDir": "${sourceDir}/.cache/build/profile",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "HP2_PLAY_PROFILE": "ON"
+        "HP2_PLAY_PROFILE": "ON",
+        "HP2_LIFT_CHECK": "ON"
       }
     }
   ],

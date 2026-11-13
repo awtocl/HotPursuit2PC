@@ -10,6 +10,7 @@
 // opened read-only; nothing is ever written next to it.
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -19,6 +20,9 @@
 
 #include "hp2/discover.h"
 #include "hp2/io.h"
+#ifdef HP2_HAVE_LLVM
+#include "hp2/lift.h"
+#endif
 
 using namespace hp2;
 using r5900::Flow;
@@ -431,12 +435,199 @@ int cmd_check_trace(const fs::path& elf_path, const fs::path& trace_dir) {
   return (undecodable || not_leader || not_reached || at_orphan) ? 1 : 0;
 }
 
+// ---- hot -----------------------------------------------------------------------------------
+
+// Which functions execute the most instructions (needs a trace recorded with --trace-counts).
+int cmd_hot(const fs::path& elf_path, const fs::path& trace_dir, std::size_t top) {
+  const ElfImage elf = load_elf(elf_path);
+  const Discovery d = discover(elf);
+  std::ifstream in(trace_dir / "blocks.tsv");
+  if (!in) fail("cannot open '{}'", to_utf8(trace_dir / "blocks.tsv"));
+
+  struct Heat {
+    std::uint64_t instructions = 0, entries = 0;
+    std::size_t blocks = 0;
+  };
+  std::map<std::uint32_t, Heat> heat;  // by function start
+  std::array<std::uint64_t, r5900::kOpCount> dynamic{};
+  std::uint64_t total = 0, outside = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::istringstream fields(line);
+    std::string b, e;
+    unsigned frame = 0;
+    std::uint64_t count = 0;
+    if (!(fields >> b >> e >> frame >> count))
+      fail("'{}' has no execution counts: record the trace with --trace-counts", to_utf8(trace_dir / "blocks.tsv"));
+    const std::uint32_t begin = parse_address(b), end = parse_address(e);
+    const std::uint64_t executed = count * ((end - begin) / 4 + 1);
+    total += executed;
+    const Function* f = d.function_at(begin);
+    if (!f) {
+      outside += executed;
+      continue;
+    }
+    Heat& h = heat[f->start];
+    h.instructions += executed;
+    ++h.blocks;
+    if (begin == f->start) h.entries += count;
+    for (std::uint32_t pc = begin; pc <= end && d.in_text(pc); pc += 4)
+      dynamic[static_cast<std::size_t>(d.insns[d.index_of(pc)].op)] += count;
+  }
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> order;
+  for (const auto& [start, h] : heat) order.emplace_back(h.instructions, start);
+  std::sort(order.rbegin(), order.rend());
+
+  std::cout << std::format("instructions executed in the session: {} ({:.1f}% outside the game's code section)\n", total,
+                           100.0 * static_cast<double>(outside) / static_cast<double>(total ? total : 1));
+  std::cout << std::format("functions executed: {}\n", order.size());
+  std::uint64_t running = 0;
+  std::size_t for50 = 0, for90 = 0, for99 = 0;
+  for (std::size_t i = 0; i < order.size(); ++i) {
+    running += order[i].first;
+    const double share = static_cast<double>(running) / static_cast<double>(total - outside);
+    if (!for50 && share >= 0.50) for50 = i + 1;
+    if (!for90 && share >= 0.90) for90 = i + 1;
+    if (!for99 && share >= 0.99) for99 = i + 1;
+  }
+  std::cout << std::format("functions that account for 50% / 90% / 99% of the game code executed: {} / {} / {}\n", for50,
+                           for90, for99);
+  std::cout << "   start      size  share   cumul.  entered      what it uses\n";
+  running = 0;
+  for (std::size_t i = 0; i < order.size() && i < top; ++i) {
+    const Function* f = d.function_at(order[i].second);
+    const Heat& h = heat[order[i].second];
+    running += h.instructions;
+    bool fpu = false, vu = false, mmi = false, calls = false, pointer_calls = false, sys = false;
+    for (std::uint32_t pc = f->start; pc < f->end; pc += 4) {
+      const Insn& insn = d.insns[d.index_of(pc)];
+      const std::uint32_t opcode = insn.raw >> 26;
+      fpu |= opcode == 0x11 || insn.op == Op::LWC1 || insn.op == Op::SWC1;
+      vu |= opcode == 0x12 || insn.op == Op::LQC2 || insn.op == Op::SQC2;
+      mmi |= opcode == 0x1C || insn.op == Op::LQ || insn.op == Op::SQ;
+      calls |= insn.flow == Flow::Call;
+      pointer_calls |= insn.flow == Flow::CallReg;
+      sys |= insn.flow == Flow::Syscall;
+    }
+    std::string uses;
+    if (fpu) uses += "fpu ";
+    if (vu) uses += "vu0 ";
+    if (mmi) uses += "128-bit ";
+    if (calls) uses += "calls ";
+    if (pointer_calls) uses += "pointer-calls ";
+    if (f->indirect_jumps) uses += "switch ";
+    if (sys) uses += "syscall ";
+    std::cout << std::format("  {:08X} {:>6} {:>5.1f}%  {:>5.1f}%  {:>10}  {}\n", f->start, f->instructions,
+                             100.0 * static_cast<double>(h.instructions) / static_cast<double>(total - outside),
+                             100.0 * static_cast<double>(running) / static_cast<double>(total - outside), h.entries, uses);
+  }
+  std::vector<std::pair<std::uint64_t, std::size_t>> ops;
+  for (std::size_t i = 1; i < dynamic.size(); ++i)
+    if (dynamic[i]) ops.emplace_back(dynamic[i], i);
+  std::sort(ops.rbegin(), ops.rend());
+  std::cout << "most executed instructions (share of all executed):\n ";
+  for (std::size_t i = 0; i < ops.size() && i < 24; ++i)
+    std::cout << std::format(" {} {:.1f}%", r5900::mnemonic(static_cast<Op>(ops[i].second)),
+                             100.0 * static_cast<double>(ops[i].first) / static_cast<double>(total - outside));
+  std::cout << '\n';
+  return 0;
+}
+
+#ifdef HP2_HAVE_LLVM
+// ---- lift ----------------------------------------------------------------------------------
+
+// Tries to translate the `top` hottest functions (trace recorded with
+// --trace-counts), says why the others cannot be, and writes the list of
+// translated ones (input of the launcher's --lift-check).
+int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t top, const fs::path& out) {
+  const ElfImage elf = load_elf(elf_path);
+  const Discovery d = discover(elf);
+  std::ifstream in(trace_dir / "blocks.tsv");
+  if (!in) fail("cannot open '{}'", to_utf8(trace_dir / "blocks.tsv"));
+  std::map<std::uint32_t, std::uint64_t> heat;
+  std::uint64_t total = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::istringstream fields(line);
+    std::string b, e;
+    unsigned frame = 0;
+    std::uint64_t count = 0;
+    if (!(fields >> b >> e >> frame >> count)) fail("the trace has no execution counts (use --trace-counts)");
+    const std::uint32_t begin = parse_address(b), end = parse_address(e);
+    const std::uint64_t executed = count * ((end - begin) / 4 + 1);
+    if (const Function* f = d.function_at(begin)) {
+      heat[f->start] += executed;
+      total += executed;
+    }
+  }
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> order;
+  for (const auto& [start, n] : heat) order.emplace_back(n, start);
+  std::sort(order.rbegin(), order.rend());
+
+  StateLayout layout;  // any layout will do for this report
+  layout.pc = 0;
+  layout.gpr = 16;
+  layout.hi = 16 + 32 * 16;
+  layout.lo = layout.hi + 8;
+  layout.fpr = layout.lo + 8;
+  layout.fcsr = layout.fpr + 128;
+  layout.fpacc = layout.fcsr + 4;
+  Translator t(elf, d, layout, 0x02000000);
+  std::map<std::string, std::pair<std::size_t, std::uint64_t>> reasons;  // kind -> functions, instructions
+  std::uint64_t lifted_share = 0;
+  std::string list = "# hottest game functions the translator spike can translate (hp2recomp lift)\n";
+  std::cout << "   start   share  result\n";
+  for (std::size_t i = 0; i < order.size() && i < top; ++i) {
+    const auto [n, start] = order[i];
+    const double share = 100.0 * static_cast<double>(n) / static_cast<double>(total);
+    const auto why = t.add_function(start);
+    if (!why) {
+      lifted_share += n;
+      list += std::format("{:08X}  # {:.2f}% of executed game instructions\n", start, share);
+    } else {
+      std::string kind = *why;
+      if (const auto colon = kind.find(": "); kind.starts_with("instruction at") && colon != std::string::npos)
+        kind = "instruction " + kind.substr(colon + 2, kind.find(' ', colon + 2) - colon - 2);
+      else if (const auto at = kind.find(" at "); at != std::string::npos)
+        kind = kind.substr(0, at);
+      auto& r = reasons[kind];
+      ++r.first;
+      r.second += n;
+    }
+    if (i < 40) std::cout << std::format("  {:08X} {:>5.2f}%  {}\n", start, share, why ? *why : "translated");
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  t.compile();
+  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::cout << std::format("\ntranslated {} of the {} hottest functions; they execute {:.1f}% of the game's instructions "
+                           "in the session\n", t.size(), std::min(top, order.size()),
+                           100.0 * static_cast<double>(lifted_share) / static_cast<double>(total));
+  std::cout << std::format("optimising and compiling them to x64 took {:.2f} s\n", seconds);
+  std::vector<std::pair<std::uint64_t, std::string>> by_weight;
+  for (const auto& [kind, r] : reasons) by_weight.emplace_back(r.second, kind);
+  std::sort(by_weight.rbegin(), by_weight.rend());
+  std::cout << "not translated, by reason (functions, share of executed instructions):\n";
+  for (const auto& [n, kind] : by_weight)
+    std::cout << std::format("  {:>4}  {:>5.1f}%  {}\n", reasons[kind].first,
+                             100.0 * static_cast<double>(n) / static_cast<double>(total), kind);
+  if (!out.empty()) {
+    write_file_replacing(out, ByteView(reinterpret_cast<const std::uint8_t*>(list.data()), list.size()));
+    std::cout << "wrote " << to_utf8(out) << '\n';
+  }
+  return 0;
+}
+#endif
+
 void usage() {
   std::cout << "hp2recomp - stage R1 developer tool (static recompilation)\n"
                "  hp2recomp info <elf>\n"
                "  hp2recomp functions <elf> [--out <tsv>]\n"
                "  hp2recomp disasm <elf> <hex address> [count]\n"
-               "  hp2recomp check-trace <elf> <trace dir>\n";
+               "  hp2recomp check-trace <elf> <trace dir>\n"
+               "  hp2recomp hot <elf> <trace dir> [how many]     (trace recorded with --trace-counts)\n"
+               "  hp2recomp lift <elf> <trace dir> <how many> [--out <list>]   (builds with LLVM)\n";
 }
 
 }  // namespace
@@ -456,6 +647,12 @@ int wmain(int argc, wchar_t** argv) {
       return cmd_disasm(a[1], parse_address(narrow(a[2])),
                         a.size() == 4 ? static_cast<std::uint32_t>(std::stoul(a[3])) : 32);
     if (a[0] == L"check-trace" && a.size() == 3) return cmd_check_trace(a[1], a[2]);
+    if (a[0] == L"hot" && (a.size() == 3 || a.size() == 4))
+      return cmd_hot(a[1], a[2], a.size() == 4 ? std::stoul(a[3]) : 30);
+#ifdef HP2_HAVE_LLVM
+    if (a[0] == L"lift" && (a.size() == 4 || (a.size() == 6 && a[4] == L"--out")))
+      return cmd_lift(a[1], a[2], std::stoul(a[3]), a.size() == 6 ? fs::path(a[5]) : fs::path());
+#endif
     usage();
     return 2;
   } catch (const std::exception& e) {

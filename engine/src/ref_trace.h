@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 class CPS2VM;
 
@@ -17,7 +18,12 @@ namespace hp2ref
 	// Call once, with the virtual machine created and paused, before it is reset.
 	// Replaces the core's EE executor by a subclass that records every block it
 	// compiles (the same seam the recompiled code will use).
-	void TraceInstall(CPS2VM& vm, const std::filesystem::path& dir);
+	// countBlocks: also count how often each block runs (slower; see ref_trace.cpp).
+	// liftList (optional): translate the listed functions of `elf` and compare
+	// them with the reference core at run time (lift_check.h). Returns an error
+	// message, or an empty string.
+	std::string TraceInstall(CPS2VM& vm, const std::filesystem::path& dir, bool countBlocks,
+	                         const std::filesystem::path& liftList, const std::filesystem::path& elf);
 	bool TraceEnabled();
 
 	// VM thread, in the new-frame handler: before and after the pacing wait.

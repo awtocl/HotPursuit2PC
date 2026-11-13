@@ -179,6 +179,28 @@ uploaded against what was translated and fall back to the reference path if it e
   instructions); interrupts and thread switches, which the reference core delivers only between blocks.
 - Scope of R1 becomes: the game program **and** the VU1 microprograms. Acceptance numbers are restated in ADR 0007.
 
+## 9. Translator spike (2026-11-13, ADR 0007 Decision 5)
+
+**Execution counts.** The tracing executor can count how often each block runs (`--trace-counts`; the count is
+taken in the block's epilogue, because a block that loops on itself skips its prologue — a first version counted in
+the prologue and undercounted tight loops, e.g. 4 instead of 2,888 runs of a start-up loop). `hp2recomp hot`
+(`.cache/r1-counts2`): 7.6 billion game instructions in the 82 s session; **12 functions account for half of them,
+125 for 90 %, 569 for 99 %**. The hottest (7.9 %) is a 141-instruction function entered 11,852 times; the second
+(7.0 %, 7.8 million calls) is a 73-instruction function using VU0 macro instructions. Most executed instructions:
+`addiu` 11.2 %, `sll` 11.1 %, `lw` 6.6 %, `addu` 5.1 %, `sw` 4.7 %, `mul.s` 3.3 %.
+
+**Translation.** `hp2recomp lift` translates leaf functions to LLVM IR, optimises them (-O2, host CPU) and compiles
+them to x64 in memory: 97 of the 400 hottest functions (13.1 % of executed instructions) in 0.57 s. The others need
+calls (51.5 % of executed instructions), VU0 macro mode (11.6 %), `pmulth` / `mult1`-family instructions (12 %),
+indirect jumps (3.6 %) or branches out of the function (2.7 %) — all R1b work.
+
+**Comparison with the reference core** (`--lift-check`, `.cache/r1-lift2`, `tools/recon/liftsummary.py`): 81
+functions compared on 1,864 real calls (24 per function) with **0 differences** in registers, HI/LO, FPU registers,
+FPU accumulator and condition flag, or main memory. 16 functions always touched memory outside main RAM (the
+scratchpad at `0x70000000`) and left through the spike's trap: the scratchpad has to be modelled in R1b. Over the
+counting session the compared functions would take 842 ms in the reference core and 206 ms translated (4.1x); per
+function from about 1.1x (FPU-heavy, clamping dominates) to over 20x (loops). Caveats in ADR 0007.
+
 ## 8. Reproduce
 
 ```powershell
@@ -193,7 +215,15 @@ $elf = "ROM\Need for Speed - Hot Pursuit 2 (USA)\SLUS_203.62"
 .cache\build\dev\recomp\hp2recomp.exe check-trace $elf .cache\r1-trace3\trace        # exit code 0 = all checks pass
 python -B tools/profile.py .cache\r1-trace3\trace\profile.csv --from-frame 3120 --to-frame 4500 --label race
 python -B tools/recon/vucheck.py $elf .cache/r1-trace3/trace
+# translator spike (needs LLVM: tools/fetch-llvm.ps1, tools/build-llvm.ps1)
+pwsh tools/run-launcher.ps1 -RunName r1-counts2 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Trace -Extra '--trace-counts' -Script "<as above>"
+.cache\build\dev\recomp\hp2recomp.exe hot $elf .cache\r1-counts2\trace 25
+.cache\build\dev\recomp\hp2recomp.exe lift $elf .cache\r1-counts2\trace 400 --out .cache\r1-lift-list.txt
+& .\tools\run-launcher.ps1 -RunName r1-lift2 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Trace -Extra @('--lift-check', '.cache\r1-lift-list.txt') -Script "<as above>"
+.cache\build\dev\recomp\hp2recomp.exe functions $elf --out .cache\r1-lift\functions.tsv
+python -B tools/recon/liftsummary.py .cache/r1-lift2/trace/lift-check.tsv .cache/r1-counts2/trace/blocks.tsv .cache/r1-lift/functions.tsv
 ```
+(`-Extra` with two values must be passed from inside PowerShell, as shown; through `pwsh -File` the list arrives as one argument.)
 
 The trace folder contains data derived from the game (a copy of its memory, its code addresses, its microcode)
 and is never committed.

@@ -10,15 +10,54 @@ add_library(hp2recomp STATIC
   include/hp2/r5900.h
   include/hp2/discover.h)
 target_include_directories(hp2recomp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# The tool is called hp2recomp.exe; its import library would clash with hp2recomp.lib.
+set_target_properties(hp2recomp PROPERTIES OUTPUT_NAME hp2recomp_core)
 target_link_libraries(hp2recomp PUBLIC hp2_build_flags hp2assets)
+
+# --- LLVM (the code generator, ADR 0007) -----------------------------------------
+# Not in this repository: tools/fetch-llvm.ps1 + tools/build-llvm.ps1 put it
+# into .cache/third_party/. Without it the translator is simply not built.
+set(HP2_LLVM_DIR "${PROJECT_SOURCE_DIR}/.cache/third_party/llvm-23.1.5-install" CACHE PATH
+    "LLVM install tree (built by tools/build-llvm.ps1)")
+find_package(LLVM CONFIG PATHS "${HP2_LLVM_DIR}/lib/cmake/llvm" NO_DEFAULT_PATH QUIET)
+if(LLVM_FOUND)
+  message(STATUS "recomp: LLVM ${LLVM_PACKAGE_VERSION} found in ${HP2_LLVM_DIR} - the translator is built")
+  llvm_map_components_to_libnames(HP2_LLVM_LIBS core orcjit native passes)
+  add_library(hp2_llvm INTERFACE)
+  target_include_directories(hp2_llvm SYSTEM INTERFACE ${LLVM_INCLUDE_DIRS})
+  target_compile_definitions(hp2_llvm INTERFACE ${LLVM_DEFINITIONS_LIST} NOMINMAX)
+  target_link_libraries(hp2_llvm INTERFACE ${HP2_LLVM_LIBS})
+  if(MSVC)
+    # LLVM's headers are not written for /W4; keep our warning level for our
+    # own code and silence what comes out of their templates.
+    target_compile_options(hp2_llvm INTERFACE /external:templates- /wd4244 /wd4267 /wd4146 /wd4245 /wd4624 /wd4702)
+  endif()
+else()
+  message(STATUS "recomp: LLVM not found in ${HP2_LLVM_DIR} - the translator is NOT built "
+                 "(run: pwsh tools/fetch-llvm.ps1; pwsh tools/build-llvm.ps1)")
+endif()
+
+# --- translator (needs LLVM) ---------------------------------------------------
+if(LLVM_FOUND)
+  add_library(hp2lift STATIC src/lift.cpp include/hp2/lift.h)
+  target_link_libraries(hp2lift PUBLIC hp2recomp PRIVATE hp2_llvm)
+endif()
 
 # --- developer tool -----------------------------------------------------------
 add_executable(hp2recomp-tool tool/main.cpp)
 set_target_properties(hp2recomp-tool PROPERTIES OUTPUT_NAME hp2recomp)
 target_link_libraries(hp2recomp-tool PRIVATE hp2recomp)
+if(LLVM_FOUND)
+  target_link_libraries(hp2recomp-tool PRIVATE hp2lift)
+  target_compile_definitions(hp2recomp-tool PRIVATE HP2_HAVE_LLVM=1)
+endif()
 
 # --- tests ----------------------------------------------------------------------
 if(BUILD_TESTING)
   hp2_add_test(test_recomp SOURCES tests/test_recomp.cpp LIBS hp2recomp)
   hp2_add_test(test_recomp_dump SOURCES tests/test_recomp_dump.cpp LIBS hp2recomp)
+  if(LLVM_FOUND)
+    hp2_add_test(test_llvm_smoke SOURCES tests/test_llvm_smoke.cpp LIBS hp2_llvm)
+    hp2_add_test(test_lift SOURCES tests/test_lift.cpp LIBS hp2lift)
+  endif()
 endif()

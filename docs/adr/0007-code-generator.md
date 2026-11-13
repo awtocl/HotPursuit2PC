@@ -1,8 +1,9 @@
 # ADR 0007 — Code generator for the recompiler, translation model, and the revised scope of R1
 
-- **Status:** **Proposed (2026-11-12).** The recommended option needs something only the owner can grant: permission
-  to download and build LLVM. It becomes *Accepted* when the spike in Decision 5 confirms the expected gain, and is
-  rewritten if it does not.
+- **Status:** **Accepted (2026-11-13).** Proposed 2026-11-12; the owner allowed the LLVM download the same day; the
+  spike of Decision 5 passed its criterion (translated code 4.1x faster than the reference core on the hottest
+  functions it covers, 0 differences in 1,864 compared calls). Results: "Spike result" below and
+  `docs/recomp-analysis.md` §9.
 - **Constraints in play:** C1 (no game code distributed), C5 (license check), C6 (one portable converter), C8
 - **Evidence:** [docs/recomp-analysis.md](../recomp-analysis.md)
 
@@ -35,7 +36,7 @@ of a single self-contained converter; be deterministic; carry a license compatib
 | D. Emit C++ and compile it | Compiler quality | Needs a compiler on the user's machine, or shipping compiled game code | **Rejected** by ADR 0006 (C1, C6). This is what the existing open PS2 recompiler does (`docs/prior-art.md`). |
 | E. Other embeddable generators (Cranelift, QBE, MIR, asmjit) | Below LLVM; from prior knowledge only, **UNVERIFIED** | Cranelift needs a Rust toolchain (not installed; installing software needs the owner); QBE emits assembly text and has no Windows calling convention; asmjit is an assembler with register allocation but no optimiser | Not evaluated further; none changes the picture between B and C. |
 
-## Decision (proposed)
+## Decision
 
 1. **Generator: LLVM, embedded** (option C). Pinned release, fetched by a script like `tools/fetch-play.ps1` into
    `.cache/third_party/`, built once with the static C runtime and only the x86 target. Its license text is added
@@ -73,6 +74,31 @@ of a single self-contained converter; be deterministic; carry a license compatib
    about 20 of the hottest functions and one microprogram; run them through the tracing executor in lock-step with
    the core's JIT; time the same functions in isolation, JIT against LLVM. If the gain on those is below 2×, this
    ADR is rewritten around option B.
+
+## Spike result (2026-11-13)
+
+LLVM 23.1.5 (pinned by SHA-256 in `tools/fetch-llvm.ps1`; license read from the fetched `llvm/LICENSE.TXT`:
+Apache 2.0 with LLVM Exceptions) built here once with MSVC and the static C runtime, x86 target only
+(`tools/build-llvm.ps1`: about 1.9 GB of build tree, 527 MB installed, all inside `.cache/third_party/`).
+
+The spike translator (`recomp/src/lift.cpp`) covers leaf functions (no calls) using integer, memory, FPU and some
+128-bit instructions, with the reference core's semantics for clamping, division by zero and conversions. It was
+run inside the reference build (`--lift-check`): at every entry of a translated function the translated code runs on
+a copy of the processor state and of main memory, the reference core runs the same call, and both results are
+compared when it returns.
+
+| Measure | Result |
+|---|---|
+| Of the 400 hottest functions, translated | 97 (they execute 13.1 % of the game's instructions in the session); optimising and compiling them to x64 took 0.57 s |
+| Compared with the reference | 81 functions, 1,864 calls: **0 differences** in registers, FPU state or memory |
+| Left through the trap | 16 functions (1.7 % of instructions): they use memory outside main RAM (the scratchpad), which the spike does not model |
+| Time, median call time x calls in the counting session | reference core 842 ms, translated code 206 ms: **4.1x** |
+| Why the rest was not translated (share of executed instructions) | calls 51.5 %, VU0 macro instructions 11.6 %, a few 128-bit multiply instructions and second-pipeline mult/div 12 %, the rest small |
+
+Limits of these numbers: the reference time includes one extra call per executed block (the spike's own hook);
+the translated code was timed by running each call 64 times on copies of its inputs; the time-stamp counter on
+this PC advances in 10 ns steps. FPU-heavy functions gained least (about 1.1-1.5x): the reference core's clamping
+is reproduced literally and costs as much in both. Criterion of Decision 5 (at least 2x): **met**.
 
 ## Consequences
 

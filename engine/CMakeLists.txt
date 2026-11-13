@@ -68,6 +68,7 @@ add_executable(hp2-launcher WIN32
   src/main.cpp
   src/ref_trace.cpp
   src/ref_trace.h
+  src/lift_check.h
   src/launcher.manifest
   "${HP2_PLAY_DIR}/Source/sound/SH_WaveOut/SH_WaveOut.cpp")
 set_target_properties(hp2-launcher PROPERTIES OUTPUT_NAME HotPursuit2)
@@ -78,4 +79,16 @@ target_include_directories(hp2-launcher PRIVATE
 target_link_libraries(hp2-launcher PRIVATE hp2vdisc gsh_opengl PlayCore opengl32 winmm xinput dbghelp user32 gdi32 shell32)
 if(MSVC)
   target_compile_options(hp2-launcher PRIVATE /W3 /utf-8)
+endif()
+
+# Translator spike inside the launcher (--lift-check): measurement builds only,
+# because it links LLVM (tens of MB). Normal builds get a stub.
+option(HP2_LIFT_CHECK "Link the recompiler's translator into the launcher (measurement builds)" OFF)
+if(HP2_LIFT_CHECK AND TARGET hp2lift)
+  target_sources(hp2-launcher PRIVATE src/lift_check.cpp)
+  set_source_files_properties(src/lift_check.cpp PROPERTIES COMPILE_OPTIONS "/std:c++20")
+  target_link_libraries(hp2-launcher PRIVATE hp2lift)
+  message(STATUS "engine: the launcher includes the translator spike (--lift-check)")
+else()
+  target_sources(hp2-launcher PRIVATE src/lift_check_stub.cpp)
 endif()

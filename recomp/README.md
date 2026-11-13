@@ -5,7 +5,7 @@ Static recompilation of the game program (stage R1 of
 translate the game's PS2 machine code into x64 code on the user's machine, ahead of
 time, so that nothing is compiled while playing.
 
-What exists so far is the analysis half. Evidence and numbers:
+What exists so far: the analysis and a translator prototype. Evidence and numbers:
 [docs/recomp-analysis.md](../docs/recomp-analysis.md).
 
 | Part | What it does |
@@ -13,11 +13,13 @@ What exists so far is the analysis half. Evidence and numbers:
 | `include/hp2/elf.h` | reads the game's executable (32-bit MIPS ELF): where each part is loaded, word access by address |
 | `include/hp2/r5900.h` | decodes every instruction of the PS2's main processor (MIPS III + multimedia + FPU + VU0 macro), with control-flow classification and a disassembler |
 | `include/hp2/discover.h` | function discovery without symbols: function starts, switch tables, every place where a straight run of code can begin |
-| `tool/main.cpp` | `hp2recomp.exe`: `info`, `functions`, `disasm`, and `check-trace` (compares the analysis with what the reference core really executed) |
+| `tool/main.cpp` | `hp2recomp.exe`: `info`, `functions`, `disasm`, `check-trace` (compares the analysis with what the reference core really executed), `hot`, `lift` |
 | `tests/` | synthetic tests (hand-assembled program, no game data) and tests on the owner's executable (skipped without a dump) |
+| `include/hp2/lift.h`, `src/lift.cpp` | **translator spike**: leaf functions → LLVM IR → optimised x64 in memory, with the reference core's semantics (needs LLVM: `tools/fetch-llvm.ps1`, `tools/build-llvm.ps1`) |
 
-Not here yet: the translator itself. The code generator is the subject of
-[ADR 0007](../docs/adr/0007-code-generator.md).
+The code generator is chosen in [ADR 0007](../docs/adr/0007-code-generator.md) (LLVM). `hp2recomp hot` ranks the game's
+functions by executed instructions (trace recorded with `--trace-counts`); `hp2recomp lift` translates the hottest
+ones and writes the list the launcher's `--lift-check` compares with the reference core (`docs/recomp-analysis.md` §9).
 
 ## Checking the analysis against the reference build
 

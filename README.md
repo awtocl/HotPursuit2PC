@@ -162,8 +162,9 @@ What this means for you:
 | Disc image | Done. `hp2pc-cli image` rebuilds an ISO 9660 image from the validated folder (verified with an independent reader). |
 | Running the game | **Works, with problems.** Boots, plays movies, menus, races, pause, and saves to / loads from a virtual PS2 memory card. Emulator-backed. |
 | GUI and CLI | Done. Same operations in both. |
-| Recompiler, analysis half | Done. Every one of the 431,681 instruction words of the game program decodes; 10,146 functions and 193 switch tables are found without symbols; in a traced session every one of the 29,860 code blocks the embedded core executed starts where the analysis predicted. The translator itself does not exist yet. |
-| Automated tests | 12 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
+| Recompiler, analysis half | Done. Every one of the 431,681 instruction words of the game program decodes; 10,146 functions and 193 switch tables are found without symbols; in a traced session every one of the 29,860 code blocks the embedded core executed starts where the analysis predicted. |
+| Recompiler, translator | **Prototype.** Simple game functions (those that call no others) are translated through LLVM to x64. Checked against the embedded core on 1,864 real calls while the game runs: identical results, 4.1 times faster. Not yet used to play. |
+| Automated tests | 14 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
 
 ## Known problems
 
@@ -239,6 +240,16 @@ Outputs: `.cache\build\release\converter\HotPursuit2PC.exe` and
 command everything except the launcher still builds, and the converter's
 last stage reports itself as unavailable.
 
+Optional, for the recompiler's translator (LLVM, Apache 2.0 with LLVM Exceptions; about 171 MB to download,
+about 2.5 GB on disk after building, once):
+
+```powershell
+pwsh tools/fetch-llvm.ps1
+pwsh tools/build-llvm.ps1
+```
+
+Without it everything else builds; the translator and its tests are left out.
+
 Tests that need a real dump look for it in `ROM\Need for Speed - Hot Pursuit 2 (USA)\`
 or in the `HP2_ROM_DIR` environment variable, and are skipped when it is absent.
 
@@ -310,9 +321,8 @@ checked against.
    of time, on the user's machine. No code is compiled while playing. Checked
    by running it in lock-step against the reference core.
    *Analysis done* (function discovery validated against a traced session);
-   *translator not started*: the code generator is proposed in
-   [ADR 0007](docs/adr/0007-code-generator.md) and waits for the owner's
-   go-ahead on a dependency.
+   *translator prototyped* with LLVM ([ADR 0007](docs/adr/0007-code-generator.md)):
+   identical results to the reference on real calls, 4.1x faster.
 2. **Host services instead of emulated hardware** where the game calls its
    libraries: disc reads straight from files, controller with analog
    triggers and rumble, memory card, timers.

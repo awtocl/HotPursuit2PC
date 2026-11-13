@@ -26,6 +26,9 @@
 //                         (analyse with tools/frametimes.py)
 //   --trace <dir>         reference measurements for the recompiler (ref_trace.h): every block of
 //                         game code the core executed, time per refresh, a copy of main memory
+//   --trace-counts        with --trace: also count how often each block runs (slower, counting runs only)
+//   --lift-check <list>   with --trace: translate the listed game functions (translator spike) and
+//                         compare them with the reference core while the game runs (builds with LLVM only)
 #include <windows.h>
 
 #include <dbghelp.h>
@@ -492,6 +495,8 @@ namespace
 		fs::path shots;
 		fs::path frameTimes;  // CSV of every vblank and present (development)
 		fs::path trace;       // folder for reference measurements (development, ref_trace.h)
+		bool traceCounts = false;  // with --trace: count how often each block of game code runs
+		fs::path liftCheck;        // with --trace: list of functions to translate and compare (lift_check.h)
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -569,6 +574,8 @@ namespace
 				g_frameTimes.events.reserve(1 << 18);
 			}
 			else if(a == L"--trace" && hasValue) options.trace = argv[++i];
+			else if(a == L"--trace-counts") options.traceCounts = true;
+			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
 			else if(a == L"--unlimited") options.unlimited = true;
@@ -814,7 +821,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->Pause();
 		if(!options.trace.empty())
 		{
-			hp2ref::TraceInstall(*g_vm, options.trace);
+			const std::string traceError = hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, options.liftCheck,
+			                                                    options.rom / L"SLUS_203.62");
+			if(!traceError.empty()) throw std::runtime_error("--lift-check: " + traceError);
 			Log("step: reference tracing installed");
 		}
 		g_vm->Reset();
