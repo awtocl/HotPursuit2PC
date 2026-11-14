@@ -62,6 +62,31 @@ std::string_view mnemonic(Lower op);
 std::uint32_t branch_target(std::uint32_t address, std::uint32_t lower);
 std::string disassemble(std::uint32_t address, std::uint32_t lower, std::uint32_t upper);
 
+// The registers an instruction word reads and writes, as the reference core's
+// VU reflection tables give them (CMA_VU::GetAffectedOperands). They drive its
+// pipeline model - FMAC stall delays, the integer-branch rule, Q/P syncs - so
+// they are reproduced entry by entry, quirks included (for example `addabc`
+// reads ft with the destination mask, not the broadcast element, and `subaq`
+// has no entry at all). Element masks use the destination-field order:
+// bit 3 = x ... bit 0 = w. The launcher checks these against the reference
+// core for every word of the game's microcode.
+struct Operands {
+  std::uint8_t write_f = 0, read_f0 = 0, read_elem_f0 = 0, read_f1 = 0, read_elem_f1 = 0;
+  std::uint8_t write_i = 0, write_i_lsu = 0, read_i0 = 0, read_i1 = 0;
+  bool sync_q = false, read_q = false, sync_p = false, read_p = false;
+  bool read_mac = false, write_mac = false, branch_value = false;
+  bool operator==(const Operands&) const = default;
+};
+inline constexpr std::uint32_t kLowerNop = 0x8000033C;  // the assembler's lower-word nop
+Operands upper_operands(std::uint32_t upper);
+// Operands of a lower word; none when the pair's I bit makes it an immediate, or for the nop encoding.
+Operands lower_operands(std::uint32_t lower, std::uint32_t upper);
+// Conditional integer branch (ibeq ... ibgez), judged on the raw word as the reference core does.
+inline bool is_conditional_branch(std::uint32_t lower) {
+  const std::uint32_t id = (lower >> 25) & 0x7F;
+  return id >= 0x28 && id < 0x30;
+}
+
 // A microcode upload (VIF "MPG" packet) found in the executable.
 struct Upload {
   std::uint32_t file_address = 0;  // where its words start in the executable's memory image
@@ -70,5 +95,14 @@ struct Upload {
 };
 // Scans `.vutext` for MPG packets. Throws when the section is missing.
 std::vector<Upload> find_uploads(const ElfImage& elf);
+
+// Microcode memory as the uploads leave it when applied in order (later ones
+// overwrite earlier ones): one image per contiguous range they cover. This is
+// what the game runs (checked against the reference core's memory dumps).
+struct MicroImage {
+  std::uint32_t vu_address = 0;
+  std::vector<std::uint32_t> words;  // lower, upper, lower, upper ...
+};
+std::vector<MicroImage> microcode_images(const ElfImage& elf, std::uint32_t memory_size = 0x4000);
 
 }  // namespace hp2::vu

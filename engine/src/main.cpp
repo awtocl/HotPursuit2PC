@@ -31,6 +31,8 @@
 //                         compare them with the reference core while the game runs (builds with LLVM only)
 //   --run-translated <list>  with --trace: translate the listed game functions and run them instead of the
 //                         reference core (builds with LLVM only)
+//   --vu1 check|run       with --trace: translate the VU1 microcode (ADR 0008) and compare every translated
+//                         run with the reference core (check), or run it translated (run) (builds with LLVM only)
 #include <windows.h>
 
 #include <dbghelp.h>
@@ -500,6 +502,7 @@ namespace
 		bool traceCounts = false;  // with --trace: count how often each block of game code runs
 		fs::path liftCheck;        // with --trace: list of functions to translate and compare (lift_check.h)
 		fs::path runTranslated;    // with --trace: list of functions to translate and run instead of the core
+		int vu1 = 0;               // with --trace: VU1 microcode translated, 1 = compared, 2 = run
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -580,6 +583,12 @@ namespace
 			else if(a == L"--trace-counts") options.traceCounts = true;
 			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
 			else if(a == L"--run-translated" && hasValue) options.runTranslated = argv[++i];
+			else if(a == L"--vu1" && hasValue)
+			{
+				const std::wstring mode = argv[++i];
+				options.vu1 = mode == L"check" ? 1 : mode == L"run" ? 2 : 0;
+				if(options.vu1 == 0) ok = false;
+			}
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
 			else if(a == L"--unlimited") options.unlimited = true;
@@ -828,8 +837,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			const bool run = !options.runTranslated.empty();
 			const std::string traceError =
 			    hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, run ? options.runTranslated : options.liftCheck,
-			                         options.rom / L"SLUS_203.62", run);
-			if(!traceError.empty()) throw std::runtime_error("--lift-check: " + traceError);
+			                         options.rom / L"SLUS_203.62", run, options.vu1);
+			if(!traceError.empty()) throw std::runtime_error("--trace: " + traceError);
 			Log("step: reference tracing installed");
 		}
 		g_vm->Reset();

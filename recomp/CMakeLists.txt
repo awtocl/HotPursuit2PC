@@ -41,7 +41,7 @@ endif()
 
 # --- translator (needs LLVM) ---------------------------------------------------
 if(LLVM_FOUND)
-  add_library(hp2lift STATIC src/lift.cpp include/hp2/lift.h)
+  add_library(hp2lift STATIC src/lift.cpp src/lift_internal.h src/vulift.cpp include/hp2/lift.h include/hp2/vulift.h)
   target_link_libraries(hp2lift PUBLIC hp2recomp PRIVATE hp2_llvm)
 endif()
 
@@ -61,5 +61,6 @@ if(BUILD_TESTING)
   if(LLVM_FOUND)
     hp2_add_test(test_llvm_smoke SOURCES tests/test_llvm_smoke.cpp LIBS hp2_llvm)
     hp2_add_test(test_lift SOURCES tests/test_lift.cpp LIBS hp2lift)
+    hp2_add_test(test_vulift SOURCES tests/test_vulift.cpp LIBS hp2lift)
   endif()
 endif()

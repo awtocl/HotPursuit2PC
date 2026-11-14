@@ -3,7 +3,12 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-13 — phase **R1b-3a (VU1 analysis)**: VU1 microcode decoded and measured (54 % of upper and
+**Last update:** 2026-11-14 — phase **R1b-3b (VU1 microcode translated)**: one image of the game's microcode
+translated with the reference core's own pipeline model; 0 differences in 5,947,088 compared time slices (14.5 million
+graphics packets); the whole race now runs on translated game code, VU0 and VU1 with no hand-over: same race, mean
+VM-thread work per refresh 6.22 → 4.48 ms (VU1 2.31 → 1.09 ms), refreshes over 16.7 ms 17 → 4. Next: the converter
+stage that compiles once and stores the code, then VU1 on its own thread.
+Previous: phase **R1b-3a (VU1 analysis)**: VU1 microcode decoded and measured (54 % of upper and
 35 % of lower slots are padding; no MAC/status flag is ever read); ADR 0008 decides how to translate it. Next: the
 VU1 translator and its verification.
 Previous: phase **R1b-2 (VU0 macro mode translated)**: 0 differences in 1,530 compared calls
@@ -53,7 +58,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1b-1 calls, hand-over, re-entry, run mode** | **done** | this commit; whole functions with calls, hand-over to the reference core at any uncovered instruction, re-entry at 38,624 places, scratchpad and hardware slow path, time slice and waiting loops; launcher `--run-translated`; `docs/recomp-analysis.md` §10 |
 | **R1b-2 VU0 macro mode** | **done** | this commit; VU0 vector, integer, Q and control-register instructions with the reference core's clamping, special cases and flag pipelines; flag writes buffered per straight run; `docs/recomp-analysis.md` §11 |
 | **R1b-3a VU1 analysis** | **done** | this commit; `recomp/include/hp2/vu.h` (decoder, disassembler, upload packets), `hp2recomp vu1`, VU1 block counts in `--trace-counts`; `docs/recomp-analysis.md` §12; [ADR 0008](adr/0008-vu1-microcode.md) |
-| **R1b translator (rest)** | **next** | VU1 microprograms; branch in a delay slot; converter stage that compiles once and stores the code | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
+| **R1b-3b VU1 microcode translated** | **done** | this commit; `recomp/src/vulift.cpp`, shared vector code in `recomp/src/lift_internal.h`, operand tables in `hp2/vu.h`, `hp2recomp vu1-lift`, launcher `--vu1 check\|run`, `test_vulift` (7 tests); `docs/recomp-analysis.md` §13. **Not verified:** other tracks, cars and game modes than the scripted session (other microcode entries are translated on first use; a refused one runs on the reference core). |
+| **R1b translator (rest)** | **next** | converter stage that compiles once and stores the code (today ~3 min at launcher start); VU1 on its own thread (ADR 0008 point 5); branch in a delay slot; then R2 (own runtime) |
 
 ## Decisions (ADRs)
 

@@ -17,10 +17,13 @@
 #include "Ps2Const.h"
 #include "ee/EeBasicBlock.h"
 #include "ee/EeExecutor.h"
+#include "ee/MA_VU.h"
+#include "ee/Vpu.h"
 #include "MemoryUtils.h"
 #include "ee/VuBasicBlock.h"
 #include "ee/VuExecutor.h"
 #include "string_format.h"
+#include "xxhash.h"
 
 #include "lift_check.h"
 
@@ -465,10 +468,280 @@ namespace hp2ref
 			uint32 m_slot;
 		};
 
+		// ---- translated VU1 microcode (--vu1 check|run, ADR 0008) ----
+		// The translated images are valid while microcode memory holds exactly
+		// their words: the core invalidates a range before an upload changes it,
+		// and the next run compares the memory again.
+		int g_vuMode = 0;  // 0 off, 1 compare every translated run with the reference core, 2 run translated
+		std::vector<VuLiftImage> g_vuImages;
+		enum class ImageState : uint8_t
+		{
+			Unknown,
+			Valid,
+			Invalid
+		};
+		std::vector<ImageState> g_vuImageState;
+		CMIPS* g_vu1 = nullptr;
+		uint8_t* g_microMem1 = nullptr;
+		uint8_t* g_vuMem1 = nullptr;
+		std::vector<uint8_t> g_vuMemLifted;
+
+		struct VuKick
+		{
+			uint32_t address;
+			uint64_t memoryHash;  // all of VU1 data memory when the packet is handed to the GIF
+			bool operator==(const VuKick& o) const { return address == o.address && memoryHash == o.memoryHash; }
+		};
+		std::vector<VuKick> g_kicksReference, g_kicksLifted;
+		bool g_recordReferenceKicks = false;
+
+		struct VuStats
+		{
+			uint64_t verified = 0, stateMismatch = 0, memoryMismatch = 0, kickMismatch = 0, kicks = 0;
+			uint64_t handedOver = 0, notTranslated = 0;
+			uint64_t referenceTicks = 0;
+			std::string firstMismatch;
+			std::map<uint32_t, uint64_t> handOverAt;
+			uint64_t runCalls = 0, runHandOvers = 0, runReferenceBlocks = 0;
+			uint32_t operandWords = 0, operandMismatches = 0;
+			std::string firstOperandMismatch;
+		};
+		VuStats g_vuStats;
+		bool g_vuOperandsChecked = false;
+
+		uint64_t HashVuMemory(const uint8_t* memory)
+		{
+			return XXH3_64bits(memory, PS2::VUMEM1SIZE);
+		}
+		uint32_t VuPortRead(uint8_t*, uint32_t address)
+		{
+			return MemoryUtils_GetWordProxy(g_vu1, address);
+		}
+		void VuPortWrite(uint8_t*, uint32_t address, uint32_t value)
+		{
+			MemoryUtils_SetWordProxy(g_vu1, value, address);
+		}
+		const VuLiftRuntime g_vuRealRuntime{&VuPortRead, &VuPortWrite};
+		// Verification: the translated code runs on copies; its xgkicks are recorded, not sent.
+		void VuRecordKick(uint8_t*, uint32_t, uint32_t value)
+		{
+			g_kicksLifted.push_back({value, HashVuMemory(g_vuMemLifted.data())});
+		}
+		const VuLiftRuntime g_vuCheckRuntime{&VuPortRead, &VuRecordKick};
+
+		// The translator's operand tables against the reference core's, on the real microcode memory.
+		void CheckVuOperands(const VuLiftImage& image)
+		{
+			g_vuOperandsChecked = true;
+			auto arch = static_cast<CMA_VU*>(g_vu1->m_pArch);
+			for(uint32_t a = image.address; a + 8 <= image.address + image.words.size() * 4; a += 8)
+			{
+				const uint32_t lower = image.words[(a - image.address) / 4], upper = image.words[(a - image.address) / 4 + 1];
+				for(int word = 0; word < 2; word++)
+				{
+					const auto ref = arch->GetAffectedOperands(g_vu1, a + word * 4, word ? upper : lower);
+					const uint32_t expected[16] = {ref.writeF, ref.readF0, ref.readElemF0, ref.readF1, ref.readElemF1,
+					                               ref.writeI, ref.writeILsu, ref.readI0, ref.readI1, ref.syncQ, ref.readQ,
+					                               ref.syncP, ref.readP, ref.readMACflags, ref.writeMACflags, ref.branchValue};
+					uint32_t mine[16];
+					VuLiftOperands(lower, upper, word == 1, mine);
+					g_vuStats.operandWords++;
+					if(memcmp(expected, mine, sizeof mine) != 0)
+					{
+						g_vuStats.operandMismatches++;
+						if(g_vuStats.firstOperandMismatch.empty())
+						{
+							int field = 0;
+							while(expected[field] == mine[field]) field++;
+							g_vuStats.firstOperandMismatch = string_format("%s word at %04X (%08X): field %d is %u, translator says %u",
+							                                               word ? "upper" : "lower", a + word * 4,
+							                                               word ? upper : lower, field, expected[field], mine[field]);
+						}
+					}
+				}
+			}
+		}
+
+		// The code to run from `pc` in a valid image: the image itself at one of its
+		// block starts, else an entry translated on first use; nullptr if none.
+		VuLiftedCode VuCodeFor(int image, uint32_t pc)
+		{
+			if(VuLiftIsBlockStart(image, pc)) return g_vuImages[image].code;
+			return VuLiftEntry(image, pc);
+		}
+
+		int FindVuImage(uint32_t pc)
+		{
+			for(size_t i = 0; i < g_vuImages.size(); i++)
+			{
+				const auto& image = g_vuImages[i];
+				if(pc < image.address || pc >= image.address + image.words.size() * 4) continue;
+				if(g_vuImageState[i] == ImageState::Unknown)
+				{
+					const bool same = memcmp(g_microMem1 + image.address, image.words.data(), image.words.size() * 4) == 0;
+					g_vuImageState[i] = same ? ImageState::Valid : ImageState::Invalid;
+					if(same && !g_vuOperandsChecked) CheckVuOperands(image);
+				}
+				if(g_vuImageState[i] == ImageState::Valid) return static_cast<int>(i);
+			}
+			return -1;
+		}
+
+		std::string DescribeVuDifference(const MIPSSTATE& r, const MIPSSTATE& l)
+		{
+			if(r.nPC != l.nPC) return string_format("pc %04X vs %04X", r.nPC, l.nPC);
+			if(r.nDelayedJumpAddr != l.nDelayedJumpAddr) return string_format("delayed jump %08X vs %08X", r.nDelayedJumpAddr, l.nDelayedJumpAddr);
+			if(r.nHasException != l.nHasException) return string_format("exception %08X vs %08X", r.nHasException, l.nHasException);
+			if(r.cycleQuota != l.cycleQuota) return string_format("cycle quota %d vs %d", r.cycleQuota, l.cycleQuota);
+			for(int i = 1; i < 32; i++)
+				for(int w = 0; w < 4; w++)
+					if(r.nCOP2[i].nV[w] != l.nCOP2[i].nV[w])
+						return string_format("vf%d word %d: %08X vs %08X", i, w, r.nCOP2[i].nV[w], l.nCOP2[i].nV[w]);
+			for(int w = 0; w < 4; w++)
+				if(r.nCOP2A.nV[w] != l.nCOP2A.nV[w]) return string_format("acc word %d: %08X vs %08X", w, r.nCOP2A.nV[w], l.nCOP2A.nV[w]);
+			for(int i = 0; i < 16; i++)
+				if(r.nCOP2VI[i] != l.nCOP2VI[i]) return string_format("vi%d: %08X vs %08X", i, r.nCOP2VI[i], l.nCOP2VI[i]);
+			if(r.nCOP2Q != l.nCOP2Q) return string_format("Q: %08X vs %08X", r.nCOP2Q, l.nCOP2Q);
+			if(r.nCOP2I != l.nCOP2I) return string_format("I: %08X vs %08X", r.nCOP2I, l.nCOP2I);
+			if(r.nCOP2R != l.nCOP2R) return string_format("R: %08X vs %08X", r.nCOP2R, l.nCOP2R);
+			if(r.nCOP2CF != l.nCOP2CF) return string_format("clip flags: %08X vs %08X", r.nCOP2CF, l.nCOP2CF);
+			if(r.nCOP2DF != l.nCOP2DF) return string_format("division flag: %08X vs %08X", r.nCOP2DF, l.nCOP2DF);
+			if(r.nCOP2T != l.nCOP2T) return string_format("T: %08X vs %08X", r.nCOP2T, l.nCOP2T);
+			if(r.pipeQ.counter != l.pipeQ.counter || r.pipeQ.heldValue != l.pipeQ.heldValue)
+				return string_format("Q pipeline: %08X/%08X vs %08X/%08X", r.pipeQ.counter, r.pipeQ.heldValue, l.pipeQ.counter, l.pipeQ.heldValue);
+			if(memcmp(&r.pipeClip, &l.pipeClip, sizeof(FLAG_PIPELINE)) != 0)
+				return string_format("clip flag pipeline (index %u vs %u)", r.pipeClip.index, l.pipeClip.index);
+			for(int i = 0; i < 3; i++)
+				for(int w = 0; w < 4; w++)
+					if(r.pipeFmacWrite[i].nV[w] != l.pipeFmacWrite[i].nV[w])
+						return string_format("FMAC writes %d word %d: %08X vs %08X", i, w, r.pipeFmacWrite[i].nV[w], l.pipeFmacWrite[i].nV[w]);
+			if(r.pipeTime != l.pipeTime) return string_format("pipeline time %u vs %u", r.pipeTime, l.pipeTime);
+			if(r.savedNextBlockIntRegIdx != l.savedNextBlockIntRegIdx || r.savedNextBlockIntRegVal != l.savedNextBlockIntRegVal)
+				return string_format("trailing integer register %u=%08X vs %u=%08X", r.savedNextBlockIntRegIdx, r.savedNextBlockIntRegVal,
+				                     l.savedNextBlockIntRegIdx, l.savedNextBlockIntRegVal);
+			if(r.xgkickAddress != l.xgkickAddress) return string_format("xgkick address %08X vs %08X", r.xgkickAddress, l.xgkickAddress);
+			return {};
+		}
+
 		class CTracingVuExecutor : public CVuExecutor
 		{
 		public:
 			using CVuExecutor::CVuExecutor;
+
+			int Execute(int quota) override
+			{
+				if(g_vuMode == 0) return CVuExecutor::Execute(quota);
+				auto& s = m_context.m_State;
+				if(g_vuMode == 1)
+				{
+					const int image = s.nHasException == 0 ? FindVuImage(s.nPC) : -1;
+					if(image < 0)
+					{
+						g_vuStats.notTranslated++;
+						return CVuExecutor::Execute(quota);
+					}
+					return CheckedExecute(image, quota);
+				}
+				// Run mode: CGenericMipsExecutor::Execute, with translated images where they are valid.
+				s.cycleQuota = quota;
+				while(s.nHasException == 0)
+				{
+					const int image = FindVuImage(s.nPC);
+					if(image >= 0)
+						if(const VuLiftedCode code = VuCodeFor(image, s.nPC))
+						{
+							code(reinterpret_cast<uint8_t*>(&s), g_vuMem1, &g_vuRealRuntime);
+							g_vuStats.runCalls++;
+							continue;  // each call runs at least one block: until an exception, or a place without code
+						}
+					g_vuStats.runHandOvers++;
+					g_vuStats.handOverAt[s.nPC]++;
+					g_vuStats.runReferenceBlocks++;
+					m_blockLookup.FindBlockAt(s.nPC & m_addressMask)->Execute();
+				}
+				s.nHasException &= ~MIPS_EXCEPTION_STATUS_QUOTADONE;
+				return s.cycleQuota;
+			}
+
+			void Reset() override
+			{
+				CVuExecutor::Reset();
+				std::fill(g_vuImageState.begin(), g_vuImageState.end(), ImageState::Unknown);
+			}
+
+			void ClearActiveBlocksInRange(uint32 start, uint32 end, bool executing) override
+			{
+				CVuExecutor::ClearActiveBlocksInRange(start, end, executing);
+				for(size_t i = 0; i < g_vuImages.size(); i++)
+				{
+					const auto& image = g_vuImages[i];
+					if(start < image.address + image.words.size() * 4 && end > image.address) g_vuImageState[i] = ImageState::Unknown;
+				}
+			}
+
+		private:
+			// The translated code runs first, on copies of the state and data memory;
+			// then the reference core runs the same time slice for real; then both are compared.
+			int CheckedExecute(int image, int quota)
+			{
+				auto& s = m_context.m_State;
+				MIPSSTATE lifted = s;
+				memcpy(g_vuMemLifted.data(), g_vuMem1, PS2::VUMEM1SIZE);
+				g_kicksLifted.clear();
+				lifted.cycleQuota = quota;
+				bool handedOver = false;
+				while(lifted.nHasException == 0)
+				{
+					const VuLiftedCode code = VuCodeFor(image, lifted.nPC);
+					if(!code)
+					{
+						handedOver = true;
+						break;
+					}
+					code(reinterpret_cast<uint8_t*>(&lifted), g_vuMemLifted.data(), &g_vuCheckRuntime);
+				}
+				lifted.nHasException &= ~MIPS_EXCEPTION_STATUS_QUOTADONE;
+
+				g_kicksReference.clear();
+				g_recordReferenceKicks = true;
+				const uint64_t t0 = __rdtsc();
+				const int result = CVuExecutor::Execute(quota);
+				g_vuStats.referenceTicks += __rdtsc() - t0;
+				g_recordReferenceKicks = false;
+
+				if(handedOver)
+				{
+					g_vuStats.handedOver++;
+					g_vuStats.handOverAt[lifted.nPC]++;
+					return result;
+				}
+				g_vuStats.verified++;
+				g_vuStats.kicks += g_kicksReference.size();
+				const std::string difference = DescribeVuDifference(s, lifted);
+				if(!difference.empty())
+				{
+					g_vuStats.stateMismatch++;
+					if(g_vuStats.firstMismatch.empty()) g_vuStats.firstMismatch = string_format("run %llu: ", g_vuStats.verified) + difference;
+				}
+				if(memcmp(g_vuMem1, g_vuMemLifted.data(), PS2::VUMEM1SIZE) != 0)
+				{
+					g_vuStats.memoryMismatch++;
+					if(g_vuStats.firstMismatch.empty())
+					{
+						uint32_t at = 0;
+						while(g_vuMem1[at] == g_vuMemLifted[at]) at++;
+						g_vuStats.firstMismatch = string_format("run %llu: data memory differs from byte %04X", g_vuStats.verified, at);
+					}
+				}
+				if(g_kicksReference != g_kicksLifted)
+				{
+					g_vuStats.kickMismatch++;
+					if(g_vuStats.firstMismatch.empty())
+						g_vuStats.firstMismatch = string_format("run %llu: %zu xgkicks vs %zu (or different packets)", g_vuStats.verified,
+						                                        g_kicksReference.size(), g_kicksLifted.size());
+				}
+				return result;
+			}
 
 		protected:
 			BasicBlockPtr BlockFactory(CMIPS& context, uint32 begin, uint32 end) override
@@ -536,14 +809,9 @@ namespace hp2ref
 		return g_enabled;
 	}
 
-	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
-	                         const fs::path& elf, bool runTranslated)
+	namespace
 	{
-		std::error_code ec;
-		fs::create_directories(dir, ec);
-		g_dir = dir;
-		g_countBlocks = countBlocks;
-		if(!liftList.empty())
+		LiftLayout ReferenceLayout()
 		{
 			LiftLayout layout;
 			layout.pc = offsetof(MIPSSTATE, nPC);
@@ -577,6 +845,20 @@ namespace hp2ref
 			              offsetof(FLAG_PIPELINE, pipeTimes) == 36, "flag pipeline layout assumed by the translator");
 			static_assert(offsetof(REGISTER_PIPELINE, counter) == 0 && offsetof(REGISTER_PIPELINE, heldValue) == 4,
 			              "register pipeline layout assumed by the translator");
+			return layout;
+		}
+	}
+
+	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
+	                         const fs::path& elf, bool runTranslated, int vu1Mode)
+	{
+		std::error_code ec;
+		fs::create_directories(dir, ec);
+		g_dir = dir;
+		g_countBlocks = countBlocks;
+		if(!liftList.empty())
+		{
+			const LiftLayout layout = ReferenceLayout();
 			std::string error, report;
 			if(!LiftCheckPrepare(elf, liftList, layout, kRamSize, error, report)) return error;
 			if(FILE* file = _wfopen((dir / L"translation.txt").c_str(), L"w"))
@@ -618,6 +900,43 @@ namespace hp2ref
 		auto& vu1 = vm.m_ee->m_VU1;
 		vu1.m_emptyBlockHandler = nullptr;
 		vu1.m_executor = std::make_unique<CTracingVuExecutor>(vu1, PS2::MICROMEM1SIZE);
+
+		if(vu1Mode != 0)
+		{
+			const VuLiftLayout vuLayout{static_cast<uint32_t>(offsetof(MIPSSTATE, nDelayedJumpAddr)),
+			                            static_cast<uint32_t>(offsetof(MIPSSTATE, pipeFmacWrite)),
+			                            static_cast<uint32_t>(offsetof(MIPSSTATE, savedNextBlockIntRegIdx)),
+			                            static_cast<uint32_t>(offsetof(MIPSSTATE, savedNextBlockIntRegVal)),
+			                            static_cast<uint32_t>(offsetof(MIPSSTATE, xgkickAddress))};
+			const VuLiftConfig config{PS2::MICROMEM1SIZE, PS2::VUMEM1SIZE - 1, CVpu::VU_ADDR_TOP, CVpu::VU_ADDR_XGKICK,
+			                          CVpu::VU_ADDR_ITOP, MIPS_EXCEPTION_VU_DBIT, MIPS_EXCEPTION_VU_TBIT, MIPS_EXCEPTION_VU_EBIT,
+			                          MIPS_EXCEPTION_STATUS_QUOTADONE, MIPS_INVALID_PC};
+			std::string error, report;
+			if(!VuLiftPrepare(elf, ReferenceLayout(), vuLayout, config, g_vuImages, error, report)) return error;
+			if(FILE* file = _wfopen((dir / L"vu1-translation.txt").c_str(), L"w"))
+			{
+				fputs(report.c_str(), file);
+				fclose(file);
+			}
+			g_vuImageState.assign(g_vuImages.size(), ImageState::Unknown);
+			g_vu1 = &vu1;
+			g_microMem1 = vm.m_ee->m_microMem1;
+			g_vuMem1 = vm.m_ee->m_vuMem1;
+			g_vuMemLifted.resize(PS2::VUMEM1SIZE);
+			g_vuMode = vu1Mode;
+			if(vu1Mode == 1)
+			{
+				// Record what the reference core hands to the GIF (xgkick), for the comparison.
+				auto* port = const_cast<CMemoryMap::MEMORYMAPELEMENT*>(vu1.m_pMemoryMap->GetWriteMap(CVpu::VU_ADDR_XGKICK));
+				if(!port) return "the VU1 memory map has no xgkick port";
+				auto original = port->handler;
+				port->handler = [original](uint32 address, uint32 value) -> uint32 {
+					if(g_recordReferenceKicks && address == CVpu::VU_ADDR_XGKICK)
+						g_kicksReference.push_back({value, HashVuMemory(g_vuMem1)});
+					return original(address, value);
+				};
+			}
+		}
 
 		g_startQpc = Qpc();
 		g_startTsc = __rdtsc();
@@ -761,6 +1080,44 @@ namespace hp2ref
 			{
 				fprintf(file, "# calls into translated code during the session: %llu\n",
 				        static_cast<unsigned long long>(g_translatedCalls));
+				fclose(file);
+			}
+		}
+
+		if(g_vuMode != 0)
+		{
+			if(FILE* file = _wfopen((g_dir / L"vu1-check.txt").c_str(), L"w"))
+			{
+				const auto& v = g_vuStats;
+				const double cyclesPerNs = cyclesPerMs / 1e6;
+				fprintf(file, "mode: %s\n", g_vuMode == 1 ? "check (translated runs compared with the reference core)" : "run");
+				fprintf(file, "operand tables: %u words compared with the reference core, %u differ%s%s\n", v.operandWords,
+				        v.operandMismatches, v.firstOperandMismatch.empty() ? "" : "; first: ", v.firstOperandMismatch.c_str());
+				if(g_vuMode == 1)
+				{
+					fprintf(file, "time slices verified: %llu (with %llu xgkicks); state mismatches %llu, data memory mismatches %llu, "
+					              "xgkick mismatches %llu\n",
+					        static_cast<unsigned long long>(v.verified), static_cast<unsigned long long>(v.kicks),
+					        static_cast<unsigned long long>(v.stateMismatch), static_cast<unsigned long long>(v.memoryMismatch),
+					        static_cast<unsigned long long>(v.kickMismatch));
+					fprintf(file, "first mismatch: %s\n", v.firstMismatch.empty() ? "none" : v.firstMismatch.c_str());
+					fprintf(file, "not compared: %llu slices handed over to the reference core, %llu outside the translated images\n",
+					        static_cast<unsigned long long>(v.handedOver), static_cast<unsigned long long>(v.notTranslated));
+					fprintf(file, "reference core time in the verified slices: %.1f ms\n", v.referenceTicks / cyclesPerNs / 1e6);
+				}
+				else
+				{
+					fprintf(file, "translated calls %llu, hand-overs to the reference core %llu, reference blocks run %llu\n",
+					        static_cast<unsigned long long>(v.runCalls), static_cast<unsigned long long>(v.runHandOvers),
+					        static_cast<unsigned long long>(v.runReferenceBlocks));
+				}
+				size_t entries = 0;
+				double entrySeconds = 0;
+				std::string refused;
+				VuLiftEntryStats(entries, entrySeconds, refused);
+				fprintf(file, "entries translated on first use: %zu, %.3f s in total; not translated: %s\n", entries, entrySeconds,
+				        refused.empty() ? "none" : refused.c_str());
+				for(const auto& [pc, n] : v.handOverAt) fprintf(file, "hand-over at %04X: %llu\n", pc, static_cast<unsigned long long>(n));
 				fclose(file);
 			}
 		}

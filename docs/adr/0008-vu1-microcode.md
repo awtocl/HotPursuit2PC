@@ -1,6 +1,7 @@
 # ADR 0008 — Translating the VU1 microprograms
 
-- **Status:** Accepted (2026-11-13), as the plan for the rest of R1; the translator itself is not written yet.
+- **Status:** Accepted (2026-11-13); implemented 2026-11-14 (`recomp/src/vulift.cpp`, `docs/recomp-analysis.md` §13):
+  verified against the reference core on 5.9 million time slices with 0 differences.
 - **Constraints in play:** C1, C4, C7
 - **Evidence:** `docs/recomp-analysis.md` §12, `hp2recomp vu1`, `.cache/r1-vucounts`
 
@@ -61,6 +62,20 @@ Most of its per-pair cost is this bookkeeping and the padding `nop`s, not the ar
   (2.9 ms) remain until R2/R3.
 - A large piece of work: about 70 lower instructions (most simple), the pipeline-time model, subroutines and the
   verification harness.
+
+## Implementation notes (2026-11-14)
+
+- **Unit of translation:** not one microprogram but the whole microcode image. The game's 7 large upload packets
+  are contiguous (0x0000-0x30C8) and are what microcode memory holds in every recorded session, so they are
+  translated as one image; programs are entered at the image's block starts. The verification found that the game
+  also starts microprograms at addresses it computes at run time (not after an end bit, not findable in the
+  executable): such an entry gets its one block translated on first use (2 in a whole session, 43 ms in total)
+  and continues in the image's code. The converter stage will do the same and keep the result.
+- **Block model:** the reference core's own partition and timing rules are reproduced exactly, including its
+  operand-table quirks (for example `vmaddabc` stalls on ft's destination elements, not the broadcast one); the
+  launcher checks the translator's operand tables against the reference core's on every word of the image.
+- **Verification** compares every translated time slice (`--vu1 check`), not only end bits, and compares what is
+  handed to the GIF by hashing all of VU1 data memory at every `xgkick`.
 
 ## What would reopen this ADR
 

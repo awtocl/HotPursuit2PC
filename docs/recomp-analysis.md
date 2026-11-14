@@ -327,6 +327,59 @@ Consequence: [ADR 0008](adr/0008-vu1-microcode.md) - translate the microprograms
 microcode can observe (clip flags, Q, R, the pipeline timing they depend on), not the MAC/status flag bookkeeping
 that dominates the reference core's cost.
 
+## 13. R1b, third stage: VU1 microcode translated (2026-11-14)
+
+`recomp/src/vulift.cpp` (`hp2/vulift.h`), as decided in [ADR 0008](adr/0008-vu1-microcode.md):
+
+- **What is translated:** the microcode image the game runs. Its 7 large upload packets are contiguous
+  (0x0000-0x30C8) and are exactly what microcode memory held at the end of all 14 recorded sessions; they are
+  translated as one image of 136 block starts (2,103 pairs) in about 8 s. The image is used only while microcode
+  memory still holds exactly those words (re-checked after any upload or write the core reports).
+- **Block model:** the reference core's own partition (end bit, D/T bits, branches with their delay slot) and its
+  per-block pipeline model, effect by effect: static FMAC stall delays, the dynamic stalls on writes the previous
+  block left in flight, Q (`div` 7, `rsqrt` 13, `waitq`) and clip-flag (4) latencies relative to each pair's
+  pipeline time, the integer-branch rules (a branch right after its register was written sees the earlier value;
+  the trailing register of the previous block), the "pre-upper" copy when the lower op reads the upper op's
+  destination, `xgkick` delivered after the next pair's lower op, LOI, the cycle quota. The operand tables that
+  drive the stalls are a port of the reference core's, quirks included; the launcher compares them with the
+  reference core's on every word of the image: **3,122 words, 0 differences**.
+- **Not maintained:** MAC, sticky and status flags and the P register (never read by the game's microcode); the
+  translator refuses any block that would read them, or that relies on rules it does not reproduce (branch or end
+  bit in a delay slot, integer fields above vi15, writes to vi0) - the game's microcode has none.
+- **Entries:** the game starts microprograms at addresses it computes at run time, two of which are not block
+  starts of the image. Such an entry gets its one block translated on first use (2 per session, 43 ms in total),
+  which then continues in the image's code.
+- The FMAC operations reuse the VU0 code generator (`recomp/src/lift_internal.h`), whose semantics were already
+  verified (§11).
+
+**Comparison** (`.cache/r1b-vu1check2`, launcher `--vu1 check`): every time slice the VU1 executor ran was first run
+translated on copies of the VU1 state and data memory, then by the reference core, then compared - vector and
+integer registers, accumulator, Q, I, R, clip and division flags, Q and clip pipelines, the pending FMAC writes,
+pipeline time, the integer-branch state, program counter, cycle quota, all 16 KB of data memory, and every
+packet handed to the graphics interface (address plus a hash of all data memory at the `xgkick`):
+**5,947,088 time slices, 14,546,494 xgkicks, 0 differences; no slice left uncompared.**
+
+**Running the game** (`.cache/r1b-runvu1`: game program, VU0 and VU1 all translated; `--vu1 run`). The session
+reached the same race as `r1b-runvu0` (same car, track and positions; the screenshots at frame 3450 differ by one
+hundredth on the lap timer), so they are directly comparable. 11.0 million translated microcode runs, **no
+hand-over to the reference core**. Means over all 1,380 race refreshes:
+
+| Race, same race | VU0 translated (`r1b-runvu0`) | + VU1 translated (`r1b-runvu1`) |
+|---|---|---|
+| Work per refresh, VM thread (mean) | 6.22 ms | **4.48 ms** |
+| ... VU1 microcode | 2.31 ms | **1.09 ms** |
+| ... game program (EE) | 1.86 ms | 1.72 ms |
+| ... VIF1 + GIF | 1.38 ms | 1.09 ms |
+| Busy-refresh p99 / worst | 17.02 / 28.4 ms | **12.06 / 24.9 ms** |
+| Refreshes over 16.7 ms | 17 | **4** |
+
+The VU zone of the core's profiler still contains the VU executor loop and the image validity check around the
+translated code; per busy refresh (8 ms or more of work) it was 4.78 ms with the reference core (§11) and is 2.55 ms
+translated - but fewer refreshes are busy now (381 instead of 625), so the means over all refreshes above are the
+fair comparison. Not done yet: VU1 on its own thread (ADR 0008 point 5), the converter stage that compiles once
+and keeps the code (today everything is compiled when the launcher starts: about 3 minutes for the game program,
+8 s for VU1). The smoke/glow defect (R3) is unchanged, as expected: it is not in the translated code.
+
 ## 8. Reproduce
 
 ```powershell
@@ -348,6 +401,11 @@ pwsh tools/run-launcher.ps1 -RunName r1-counts2 -Preset profile -Rom ".cache\m1-
 & .\tools\run-launcher.ps1 -RunName r1-lift2 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Trace -Extra @('--lift-check', '.cache\r1-lift-list.txt') -Script "<as above>"
 .cache\build\dev\recomp\hp2recomp.exe functions $elf --out .cache\r1-lift\functions.tsv
 python -B tools/recon/liftsummary.py .cache/r1-lift2/trace/lift-check.tsv .cache/r1-counts2/trace/blocks.tsv .cache/r1-lift/functions.tsv
+# VU1 microcode (section 13)
+.cache\build\dev\recomp\hp2recomp.exe vu1-lift $elf
+& .\tools\run-launcher.ps1 -RunName r1b-vu1check2 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -ShotEvery 1150 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--vu1', 'check') -Script "<as above>"
+& .\tools\run-launcher.ps1 -RunName r1b-runvu1 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -ShotEvery 1150 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--run-translated', '.cache\r1b-all.txt', '--vu1', 'run') -Script "<as above>"
+python -B tools/profile.py .cache\r1b-runvu1\trace\profile.csv --from-frame 3120 --to-frame 4500 --label race
 ```
 (`-Extra` with two values must be passed from inside PowerShell, as shown; through `pwsh -File` the list arrives as one argument.)
 

@@ -23,6 +23,7 @@
 #include "hp2/vu.h"
 #ifdef HP2_HAVE_LLVM
 #include "hp2/lift.h"
+#include "hp2/vulift.h"
 #endif
 
 using namespace hp2;
@@ -718,6 +719,69 @@ int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t to
 }
 #endif
 
+#ifdef HP2_HAVE_LLVM
+// ---- vu1-lift ------------------------------------------------------------------------------
+
+// Translates every microcode upload of the executable as one image (ADR 0008)
+// and reports what was translated and what was refused. The state layout is a
+// stand-in (the launcher passes the reference core's): this measures coverage
+// and compile time, not behaviour.
+int cmd_vu1_lift(const fs::path& elf_path, const fs::path& ir_out) {
+  const ElfImage elf = load_elf(elf_path);
+  StateLayout l;
+  std::uint32_t at = 0;
+  auto take = [&](std::uint32_t size) {
+    const std::uint32_t o = at;
+    at += size;
+    return o;
+  };
+  l.pc = take(4);
+  l.cycle_quota = take(4);
+  l.has_exception = take(4);
+  take(4);
+  l.vf = take(32 * 16);
+  l.vacc = take(16);
+  l.vi = take(16 * 4);
+  l.vq = take(4);
+  l.vi_i = take(4);
+  l.vr = take(4);
+  l.vcf = take(4);
+  l.vmf = take(4);
+  l.vdf = take(4);
+  l.vt = take(4);
+  l.pipe_q = take(8);
+  l.pipe_mac = take(68);
+  l.pipe_sticky = take(68);
+  l.pipe_clip = take(68);
+  l.pipe_time = take(4);
+  VuLayout v;
+  v.delayed_jump = take(4);
+  v.saved_next_index = take(4);
+  v.saved_next_value = take(4);
+  v.xgkick_address = take(4);
+  v.fmac_write = take(48);
+  VuConfig c;
+  c.exception_dbit = 8;
+  c.exception_tbit = 9;
+  c.exception_ebit = 10;
+  const auto t0 = std::chrono::steady_clock::now();
+  VuTranslator tr(l, v, c);
+  for (vu::MicroImage& im : vu::microcode_images(elf)) tr.add_image(im.vu_address, std::move(im.words));
+  const auto t1 = std::chrono::steady_clock::now();
+  if (!ir_out.empty()) std::ofstream(ir_out) << tr.ir();
+  tr.compile();
+  const auto t2 = std::chrono::steady_clock::now();
+  std::cout << std::format("{} images, {} block starts translated ({} pairs emitted); translation {:.2f} s, "
+                           "optimisation and compilation {:.2f} s\n",
+                           tr.images(), tr.stats().blocks, tr.stats().pairs,
+                           std::chrono::duration<double>(t1 - t0).count(),
+                           std::chrono::duration<double>(t2 - t1).count());
+  for (const auto& [start, why] : tr.refused_starts())
+    std::cout << std::format("  not translated: block at {:04X}: {}\n", start, why);
+  return 0;
+}
+#endif
+
 void usage() {
   std::cout << "hp2recomp - stage R1 developer tool (static recompilation)\n"
                "  hp2recomp info <elf>\n"
@@ -726,7 +790,8 @@ void usage() {
                "  hp2recomp check-trace <elf> <trace dir>\n"
                "  hp2recomp hot <elf> <trace dir> [how many]     (trace recorded with --trace-counts)\n"
                "  hp2recomp vu1 <elf> [trace dir] [--list]       (VU1 microprograms)\n"
-               "  hp2recomp lift <elf> <trace dir> <how many> [--out <list>]   (builds with LLVM)\n";
+               "  hp2recomp lift <elf> <trace dir> <how many> [--out <list>]   (builds with LLVM)\n"
+               "  hp2recomp vu1-lift <elf> [--ir <file>]          (VU1 microcode; builds with LLVM)\n";
 }
 
 }  // namespace
@@ -756,6 +821,8 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef HP2_HAVE_LLVM
     if (a[0] == L"lift" && (a.size() == 4 || (a.size() == 6 && a[4] == L"--out")))
       return cmd_lift(a[1], a[2], std::stoul(a[3]), a.size() == 6 ? fs::path(a[5]) : fs::path());
+    if (a[0] == L"vu1-lift" && (a.size() == 2 || (a.size() == 4 && a[2] == L"--ir")))
+      return cmd_vu1_lift(a[1], a.size() == 4 ? fs::path(a[3]) : fs::path());
 #endif
     usage();
     return 2;

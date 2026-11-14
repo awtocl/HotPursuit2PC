@@ -95,6 +95,120 @@ bool Pair::lower_reads_flags() const {
   }
 }
 
+namespace {
+
+// The reference core's upper-word reflection entries (VUShared::ReflOpAff*).
+enum class UA : std::uint8_t {
+  None, FdMfFsFtBc, FdFsFt, FdMfFsQ, FdFsI, FdMfFsI, FdMfFsFt, AMfFsFt, FtFs, AMfFsFtBc, AMfFsQ, AMfFsI, CfFsFt
+};
+using enum UA;
+// Indexed by bits 5..0 (m_cVuReflV).
+constexpr std::array<UA, 0x3C> kUpperV = {
+    FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc,  // 00 add, sub
+    FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc,  // 08 madd, msub
+    FdFsFt, FdFsFt, FdFsFt, FdFsFt, FdFsFt, FdFsFt, FdFsFt, FdFsFt,                                  // 10 max, mini
+    FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsFtBc, FdMfFsQ, FdFsI, FdMfFsI, FdFsI,                  // 18 mul, mulq, maxi, muli, minii
+    FdMfFsQ, FdMfFsQ, FdMfFsI, FdMfFsI, FdMfFsQ, FdMfFsQ, FdMfFsI, FdMfFsI,                          // 20 addq ... msubi
+    FdMfFsFt, FdMfFsFt, FdMfFsFt, FdFsFt, FdMfFsFt, FdMfFsFt, FdMfFsFt, FdFsFt,                      // 28 add ... mini
+    None, None, None, None, None, None, None, None, None, None, None, None,                          // 30
+};
+// Bits 5..0 = 0x3C + n, indexed by bits 10..6 (m_cVuReflVX0..3); entries 0x0C and up are empty.
+constexpr std::array<std::array<UA, 12>, 4> kUpperVX = {{
+    {AMfFsFt, AMfFsFt, AMfFsFt, AMfFsFt, FtFs, FtFs, AMfFsFtBc, AMfFsQ, AMfFsQ, None, AMfFsFt, AMfFsFt},
+    {AMfFsFt, AMfFsFt, AMfFsFt, AMfFsFt, FtFs, FtFs, AMfFsFtBc, FtFs, AMfFsQ, AMfFsQ, AMfFsFt, AMfFsFt},
+    {AMfFsFt, AMfFsFt, AMfFsFt, AMfFsFt, FtFs, FtFs, AMfFsFtBc, AMfFsI, AMfFsI, AMfFsI, AMfFsFt, AMfFsFt},
+    {AMfFsFt, AMfFsFt, AMfFsFt, AMfFsFt, FtFs, FtFs, AMfFsFtBc, CfFsFt, AMfFsI, AMfFsI, None, None},
+}};
+
+std::uint8_t component_mask(std::uint32_t component) {  // VUShared::MakeDestFromComponent
+  return static_cast<std::uint8_t>(1u << (3 - component));
+}
+
+}  // namespace
+
+Operands upper_operands(std::uint32_t upper) {
+  const std::uint32_t fn = upper & 0x3F;
+  const UA kind = fn < 0x3C ? kUpperV[fn] : (((upper >> 6) & 0x1F) < 12 ? kUpperVX[fn & 3][(upper >> 6) & 0x1F] : None);
+  const auto dest = static_cast<std::uint8_t>((upper >> 21) & 15), ft = static_cast<std::uint8_t>((upper >> 16) & 31),
+             fs = static_cast<std::uint8_t>((upper >> 11) & 31), fd = static_cast<std::uint8_t>((upper >> 6) & 31);
+  Operands o;
+  switch (kind) {
+    case None: break;
+    case FdMfFsFtBc: case AMfFsFtBc:
+      o.read_f0 = fs; o.read_elem_f0 = dest; o.read_f1 = ft; o.read_elem_f1 = component_mask(upper & 3);
+      o.write_mac = true;
+      if (kind == FdMfFsFtBc) o.write_f = fd;
+      break;
+    case FdFsFt: case FdMfFsFt: case AMfFsFt:
+      o.read_f0 = fs; o.read_elem_f0 = dest; o.read_f1 = ft; o.read_elem_f1 = dest;
+      if (kind != AMfFsFt) o.write_f = fd;
+      o.write_mac = kind != FdFsFt;
+      break;
+    case FdMfFsQ: case AMfFsQ:
+      o.read_f0 = fs; o.read_elem_f0 = dest; o.read_q = true; o.write_mac = true;
+      if (kind == FdMfFsQ) o.write_f = fd;
+      break;
+    case FdFsI: case FdMfFsI: case AMfFsI:
+      o.read_f0 = fs; o.read_elem_f0 = dest;
+      if (kind != AMfFsI) o.write_f = fd;
+      o.write_mac = kind != FdFsI;
+      break;
+    case FtFs:
+      o.read_f0 = fs; o.read_elem_f0 = dest; o.write_f = ft;
+      break;
+    case CfFsFt:
+      o.read_f0 = fs; o.read_elem_f0 = dest; o.read_f1 = ft; o.read_elem_f1 = component_mask(3);
+      break;
+  }
+  return o;
+}
+
+Operands lower_operands(std::uint32_t lower, std::uint32_t upper) {
+  Operands o;
+  if ((upper & kBitI) || lower == kLowerNop) return o;
+  const auto dest = static_cast<std::uint8_t>((lower >> 21) & 15), it = static_cast<std::uint8_t>((lower >> 16) & 31),
+             is = static_cast<std::uint8_t>((lower >> 11) & 31), id = static_cast<std::uint8_t>((lower >> 6) & 31);
+  const std::uint32_t fsf = (lower >> 21) & 3, ftf = (lower >> 23) & 3;
+  switch (decode_lower(lower)) {
+    case LQ: o.write_f = it; o.read_i0 = is; break;                                              // WrFtRdIs
+    case SQ: case SQI: case SQD:                                                                 // RdItFs / WrItRdItFs
+      o.read_i0 = it; o.read_f0 = is; o.read_elem_f0 = dest;
+      if (decode_lower(lower) != SQ) o.write_i = it;
+      break;
+    case ILW: case ILWR: o.write_i = it; o.write_i_lsu = it; o.read_i0 = is; o.branch_value = true; break;
+    case ISW: case ISWR: case IBEQ: case IBNE: o.read_i0 = it; o.read_i1 = is; break;           // RdItIs
+    case IADDIU: case ISUBIU: case IADDI: case JALR: o.write_i = it; o.read_i0 = is; break;     // WrItRdIs
+    case FCEQ: case FCAND: case FCOR: o.write_i = 1; o.branch_value = true; break;               // WrVi1Bv
+    case FSAND: case FSOR: o.write_i = it; o.branch_value = true; o.read_mac = true; break;
+    case FMEQ: case FMAND: case FMOR: o.write_i = it; o.read_i0 = is; o.branch_value = true; o.read_mac = true; break;
+    case FCGET: o.write_i = it; o.branch_value = true; break;
+    case BAL: case XTOP: case XITOP: o.write_i = it; break;
+    case JR: case XGKICK: case IBLTZ: case IBGTZ: case IBLEZ: case IBGEZ: o.read_i0 = is; break;
+    case IADD: case ISUB: case IAND: case IOR: o.read_i0 = it; o.read_i1 = is; o.write_i = id; break;
+    case MOVE: case MR32: o.read_f0 = is; o.read_elem_f0 = dest; o.write_f = it; break;          // WrFtRdFs
+    case LQI: case LQD: o.write_f = it; o.read_i0 = is; o.write_i = is; break;                   // WrFtIsRdIs
+    case DIV: case RSQRT:
+      o.read_f0 = is; o.read_elem_f0 = component_mask(fsf); o.read_f1 = it; o.read_elem_f1 = component_mask(ftf);
+      o.sync_q = true;
+      break;
+    case SQRT: o.read_f0 = it; o.read_elem_f0 = component_mask(ftf); o.sync_q = true; break;
+    case MTIR: o.write_i = it; o.read_f0 = is; o.read_elem_f0 = component_mask(fsf); break;
+    case RNEXT: case RGET: o.write_f = it; break;                                                 // WrFtRdR
+    case MFP: o.write_f = it; o.read_p = true; break;
+    case MFIR: o.write_f = it; o.read_i0 = is; break;
+    case RINIT: case RXOR: case ESQRT: case ESIN: case ERSQRT: case ERCPR: case EEXP:            // ...RdFsf
+      o.read_f0 = is; o.read_elem_f0 = component_mask(fsf);
+      break;
+    case ESADD: case ERSADD: case ELENG: case ESUM: case ERLENG: case EATANxy: case EATANxz:     // WrPRdFs
+      o.read_f0 = is; o.read_elem_f0 = dest; o.sync_p = true;
+      break;
+    case WAITQ: o.sync_q = true; break;
+    case WAITP: o.sync_p = true; break;
+    default: break;  // b, fcset, fsset and the empty entries
+  }
+  return o;
+}
+
 std::string_view mnemonic(Lower op) {
   return kNames[static_cast<std::size_t>(op)];
 }
@@ -161,6 +275,29 @@ std::vector<Upload> find_uploads(const ElfImage& elf) {
     }
   }
   return uploads;
+}
+
+std::vector<MicroImage> microcode_images(const ElfImage& elf, std::uint32_t memory_size) {
+  std::vector<std::uint32_t> memory(memory_size / 4, 0);
+  std::vector<bool> covered(memory_size / 4, false);
+  for (const Upload& u : find_uploads(elf))
+    for (std::uint32_t k = 0; k < u.pairs * 2; ++k) {
+      const std::uint32_t index = (u.vu_address / 4 + k) % (memory_size / 4);  // the address wraps, as in the VIF
+      memory[index] = elf.word(u.file_address + k * 4);
+      covered[index] = true;
+    }
+  std::vector<MicroImage> images;
+  for (std::uint32_t i = 0; i < memory.size();) {
+    if (!covered[i]) {
+      ++i;
+      continue;
+    }
+    MicroImage im;
+    im.vu_address = i * 4;
+    for (; i < memory.size() && covered[i]; ++i) im.words.push_back(memory[i]);
+    images.push_back(std::move(im));
+  }
+  return images;
 }
 
 }  // namespace hp2::vu

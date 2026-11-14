@@ -23,9 +23,11 @@ namespace hp2ref
 	// them with the reference core at run time (lift_check.h). Returns an error
 	// message, or an empty string.
 	// runTranslated: run the listed functions translated instead of comparing them.
+	// vu1Mode: 0, or translate the VU1 microcode of `elf` (ADR 0008) and 1 = compare every translated
+	// time slice with the reference core, 2 = run it translated.
 	std::string TraceInstall(CPS2VM& vm, const std::filesystem::path& dir, bool countBlocks,
 	                         const std::filesystem::path& liftList, const std::filesystem::path& elf,
-	                         bool runTranslated);
+	                         bool runTranslated, int vu1Mode);
 	bool TraceEnabled();
 
 	// VM thread, in the new-frame handler: before and after the pacing wait.
