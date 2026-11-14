@@ -93,6 +93,7 @@ std::string stage_title(std::string_view id) {
   if (id == "rom") return "store the ROM";
   if (id == "unpack") return "unpack the game assets";
   if (id == "build") return "build the runnable game";
+  if (id == "code") return "translate the game code";
   return std::string(id);
 }
 
@@ -197,10 +198,13 @@ std::string runtime_readme_text() {
          "START THE GAME:  HotPursuit2.exe  (in this folder)\r\n"
          "\r\n"
          "WHAT THIS BUILD IS\r\n"
-         "  This is an EMULATOR-BACKED build. The original PlayStation 2 game code from your own\r\n"
-         "  disc runs inside the open-source Play! emulator core, which is built into\r\n"
-         "  HotPursuit2.exe. It is the PS2 game (handling, AI, cameras, menus), but it is NOT a\r\n"
-         "  native Windows port. The native port is the project's later goal.\r\n"
+         "  This build is part translated, part emulated. The game program and its vector-unit\r\n"
+         "  microcode from your own disc were translated by the converter into native x64 code\r\n"
+         "  (hp2code.dll in this folder, made on your PC; nothing is translated while you play).\r\n"
+         "  The PlayStation 2 hardware around that code - graphics, sound, I/O - is still the\r\n"
+         "  open-source Play! emulator core built into HotPursuit2.exe, so this is NOT yet a\r\n"
+         "  complete native port. Without hp2code.dll (or with --reference) everything runs on\r\n"
+         "  the emulator core.\r\n"
          "  The game files are read from ..\\rom and are never modified. No BIOS file is needed.\r\n"
          "\r\n"
          "CONTROLS\r\n"
@@ -389,8 +393,33 @@ GameFolderStatus inspect_game_folder(const fs::path& game_dir, const RomProfile&
       unpack.detail = std::format("{} files so far, no manifest yet", count_files(layout.assets()));
     }
   }
-  st.stages = {validate, rom, unpack, build};
+  StageStatus code{"code", "Translate the game code"};
+  const fs::path dll = layout.build() / from_utf8(kCodeFileName);
+  if (st.is_game_folder && fs::is_regular_file(dll, ec)) {
+    code.state = StageState::Done;
+    code.detail = cfg.has("stage.code") ? cfg.get("stage.code") : "build/hp2code.dll";
+  } else if (!registered_code_builder()) {
+    code.state = StageState::NotAvailable;
+    code.detail = "this converter was built without the translator; the game runs on the reference core";
+  }
+  st.stages = {validate, rom, unpack, build, code};
   return st;
+}
+
+namespace {
+std::optional<CodeBuilder>& code_builder_slot() {
+  static std::optional<CodeBuilder> builder;
+  return builder;
+}
+}  // namespace
+
+void register_code_builder(CodeBuilder builder) {
+  code_builder_slot() = std::move(builder);
+}
+
+const CodeBuilder* registered_code_builder() {
+  const auto& slot = code_builder_slot();
+  return slot ? &*slot : nullptr;
 }
 
 std::optional<fs::path> find_game_folder(const fs::path& base_dir) {
@@ -693,12 +722,54 @@ ConvertResult convert(const ConvertRequest& request, const ConvertEvents& events
       install("README.txt", as_bytes(readme));
       log.line(std::format("Runnable game {}: '{}'.", wrote_launcher ? "installed" : "already in place",
                            to_utf8(layout.build() / from_utf8(kLauncherFileName))));
-      log.line("Note: this is an EMULATOR-BACKED build (the PS2 game code runs inside the Play! core "
-               "built into the launcher). It is not a native port. See build/README.txt.");
-      cfg.set("stage.build", std::format("done {} (emulator-backed launcher)", timestamp()));
+      log.line("Note: the PlayStation 2 hardware runs on the Play! core built into the launcher; the game "
+               "code itself runs translated once the 'code' stage has made build/hp2code.dll. It is not yet "
+               "a complete native port. See build/README.txt.");
+      cfg.set("stage.build", std::format("done {} (launcher with the reference core)", timestamp()));
     }
     cfg.set("updated", timestamp());
     cfg.save(layout.state_file());
+
+    // ---- 7. code: translate the game code once (ADR 0009) ------------------------------
+    stage = "code";
+    if (const CodeBuilder* builder = registered_code_builder(); !builder || !runtime.available()) {
+      log.line("This converter was built without the translator: the game code was not translated "
+               "(stage 'code' skipped); the game runs on the reference core.");
+    } else {
+      const fs::path elf_path = (request.rom_storage == RomStorage::Copy ? layout.rom() : rom_root) /
+                                from_utf8(kGameExecutable);
+      const Bytes elf = read_whole_file(elf_path, 64ull << 20);
+      const std::string identity = builder->identity(elf);
+      const fs::path dll = layout.build() / from_utf8(kCodeFileName);
+      fs::path sidecar = dll;
+      sidecar.replace_extension(".txt");
+      std::string recorded;
+      if (fs::is_regular_file(dll, ec) && fs::is_regular_file(sidecar, ec)) {
+        std::ifstream in(sidecar);
+        std::getline(in, recorded);
+      }
+      if (recorded == identity) {
+        log.line("The translated game code is already in place and up to date (build/hp2code.dll).");
+      } else {
+        for (const fs::path& old : {dll, sidecar})
+          if (fs::exists(old, ec)) {
+            const fs::path aside = move_aside(old);
+            log.line(std::format("'build/{}' was made for another executable or translator version; it was "
+                                 "kept as '{}'.",
+                                 to_utf8(old.filename()), to_utf8(aside.filename())));
+          }
+        log.line("Translating the game code into native code (once; this uses every processor core) ...");
+        report("code", "translating", 0, 1);
+        builder->build(elf, dll, [&](std::string_view line) {
+          check_cancel();
+          log.line(std::string(line));
+        });
+        report("code", "done", 1, 1);
+      }
+      cfg.set("stage.code", std::format("done {} ({})", timestamp(), identity));
+      cfg.set("updated", timestamp());
+      cfg.save(layout.state_file());
+    }
     log.line("Done.");
     result.ok = true;
   } catch (const Cancelled&) {

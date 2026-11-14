@@ -63,11 +63,25 @@ set_target_properties(hp2vdisc PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED 
 target_include_directories(hp2vdisc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vdisc)
 target_link_libraries(hp2vdisc PRIVATE hp2core)
 
+# ---- the reference core's state layout, for translated code (ADR 0009) ----------
+# Used by the launcher (to check a code package) and by the converter (to translate for it).
+add_library(hp2reflayout STATIC src/reference_layout.cpp src/reference_layout.h)
+target_include_directories(hp2reflayout
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src "${PROJECT_SOURCE_DIR}/recomp/include"
+  PRIVATE "${HP2_PLAY_DIR}/Source" "${HP2_PLAY_DIR}/deps/Framework/include" "${HP2_PLAY_DIR}/deps/CodeGen/include"
+          $<TARGET_PROPERTY:PlayCore,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(hp2reflayout PRIVATE $<TARGET_PROPERTY:PlayCore,INTERFACE_COMPILE_DEFINITIONS>)
+if(MSVC)
+  target_compile_options(hp2reflayout PRIVATE /W3 /utf-8)
+endif()
+
 # ---- the launcher -------------------------------------------------------------
 add_executable(hp2-launcher WIN32
   src/main.cpp
   src/ref_trace.cpp
   src/ref_trace.h
+  src/translated.cpp
+  src/translated.h
   src/lift_check.h
   src/launcher.manifest
   "${HP2_PLAY_DIR}/Source/sound/SH_WaveOut/SH_WaveOut.cpp")
@@ -76,7 +90,7 @@ target_include_directories(hp2-launcher PRIVATE
   "${HP2_PLAY_DIR}/Source"
   "${HP2_PLAY_DIR}/deps/Framework/include"
   "${HP2_PLAY_DIR}/deps/CodeGen/include")
-target_link_libraries(hp2-launcher PRIVATE hp2vdisc gsh_opengl PlayCore opengl32 winmm xinput dbghelp user32 gdi32 shell32)
+target_link_libraries(hp2-launcher PRIVATE hp2vdisc hp2reflayout gsh_opengl PlayCore opengl32 winmm xinput dbghelp user32 gdi32 shell32 bcrypt)
 if(MSVC)
   target_compile_options(hp2-launcher PRIVATE /W3 /utf-8)
 endif()

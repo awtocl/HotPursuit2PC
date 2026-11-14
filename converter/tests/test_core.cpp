@@ -294,12 +294,14 @@ TEST(convert_portable_creates_the_whole_layout_inside_one_folder) {
   CHECK_EQ(cfg.get("mode"), std::string("portable"));
   CHECK_EQ(cfg.get("rom_storage"), std::string("copy"));
   CHECK(cfg.get("stage.unpack").starts_with("done"));
-  REQUIRE(r.status.stages.size() == 4);
+  REQUIRE(r.status.stages.size() == 5);
   CHECK(r.status.is_game_folder);
   CHECK(r.status.stages[0].state == StageState::Done);
   CHECK(r.status.stages[1].state == StageState::Done);
   CHECK(r.status.stages[2].state == StageState::Done);
   CHECK(r.status.stages[3].state == StageState::NotAvailable);
+  // No translator registered in this test program: the "code" stage is not available.
+  CHECK(r.status.stages[4].state == StageState::NotAvailable);
 }
 
 TEST(convert_rerun_detects_finished_work_and_rewrites_nothing) {
@@ -472,11 +474,11 @@ TEST(build_stage_installs_the_runtime_and_says_what_it_is) {
   const Bytes readme_raw = testkit::read_bytes(game / "build" / "README.txt");
   const std::string readme(readme_raw.begin(), readme_raw.end());
   CHECK(readme == runtime_readme_text());
-  // Honest labelling (ADR 0001): the build must say it is emulator-backed and not native.
-  CHECK(readme.find("EMULATOR-BACKED") != std::string::npos);
-  CHECK(readme.find("NOT a") != std::string::npos);
+  // Honest labelling (ADR 0001, 0009): the build must say what is emulated and that it is not yet native.
+  CHECK(readme.find("Play! emulator core") != std::string::npos);
+  CHECK(readme.find("NOT yet a") != std::string::npos);
   CHECK(contains(lines, "Runnable game installed"));
-  CHECK(contains(lines, "EMULATOR-BACKED build"));
+  CHECK(contains(lines, "not yet a complete native port"));
   CHECK(r.status.stages[3].state == StageState::Done);
   CHECK(KeyValueFile::load(game / "hp2pc.cfg").get("stage.build").starts_with("done"));
   for (const auto& de : fs::recursive_directory_iterator(game / "build")) CHECK(de.path().extension() != ".part");

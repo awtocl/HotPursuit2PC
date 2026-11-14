@@ -95,6 +95,14 @@ class VuTranslator {
   std::size_t entry_functions() const;  // entries translated so far
   double entry_seconds() const;         // time spent translating them
 
+  // Instead of compile(): object code (COFF) for a DLL, built for the LLVM CPU
+  // `cpu`, with an entry function for every pair of every image that is not a
+  // block start (nothing is translated while the game runs).
+  std::vector<std::vector<char>> emit_objects(const std::string& cpu, unsigned threads = 0);
+  static std::string image_symbol(std::size_t image);
+  std::vector<std::uint32_t> block_starts(std::size_t image) const;
+  const std::map<std::uint32_t, std::string>& entry_symbols(std::size_t image) const;  // after emit_objects()
+
   const VuTranslateStats& stats() const;
   // Block starts that were not translated, by reason.
   const std::map<std::string, std::size_t>& refusals() const;

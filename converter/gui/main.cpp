@@ -18,6 +18,9 @@
 #include <vector>
 
 #include "hp2/convert.h"
+#ifdef HP2_HAVE_TRANSLATOR
+#include "code_builder.h"
+#endif
 
 using namespace hp2;
 
@@ -273,8 +276,9 @@ void on_done(ConvertResult* r) {
       std::wstring msg = L"Conversion finished.\n\n";
       if (fs::is_regular_file(launcher, ec))
         msg += L"Start the game with:\n" + launcher.wstring() +
-               L"\n\nThis is an emulator-backed build: the PS2 game runs inside the Play! core built into that "
-               L"program. It is not a native port yet. Details are in README.txt next to it.";
+               L"\n\nThe game code runs translated to native code (hp2code.dll, when this converter includes "
+               L"the translator); the PS2 hardware around it still runs on the Play! core built into that program, "
+               L"so it is not yet a complete native port. Details are in README.txt next to it.";
       else
         msg += L"The ROM is stored and the game assets are unpacked, but this converter was built without the "
                L"game runtime, so no runnable game was installed.";
@@ -593,6 +597,9 @@ int screenshot(const std::wstring& path) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
   g.inst = inst;
+#ifdef HP2_HAVE_TRANSLATOR
+  hp2::register_translator();
+#endif
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   std::vector<std::wstring> args;

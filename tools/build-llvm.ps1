@@ -5,7 +5,9 @@
 
 .DESCRIPTION
   Libraries only: x86 back end, Release, static C runtime (like the rest of
-  this project), no tools, tests, examples or optional dependencies.
+  this project), no tools, tests, examples or optional dependencies. Also the
+  LLD linker's libraries (COFF), which the converter uses to link the
+  translated game code into a DLL (ADR 0009); tools are configured but not built.
   Everything stays inside <repo>\.cache\third_party\:
     llvm-<version>-build\     build tree (can be removed after a successful build)
     llvm-<version>-install\   headers, libraries and CMake package files used by our build
@@ -40,7 +42,8 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
   "-DCMAKE_INSTALL_PREFIX=$install" `
   -DLLVM_TARGETS_TO_BUILD=X86 `
-  -DLLVM_INCLUDE_TOOLS=OFF -DLLVM_INCLUDE_UTILS=OFF -DLLVM_INCLUDE_TESTS=OFF `
+  -DLLVM_ENABLE_PROJECTS=lld -DLLVM_INCLUDE_TOOLS=ON -DLLVM_BUILD_TOOLS=OFF `
+  -DLLVM_INCLUDE_UTILS=OFF -DLLVM_INCLUDE_TESTS=OFF `
   -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF `
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF `
   -DLLVM_ENABLE_BINDINGS=OFF -DLLVM_ENABLE_DIA_SDK=OFF -DLLVM_ENABLE_PLUGINS=OFF `

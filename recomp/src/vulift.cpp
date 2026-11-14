@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 #include "hp2/vu.h"
 #include "lift_internal.h"
@@ -759,51 +760,24 @@ struct VuTranslator::Impl {
   std::unique_ptr<llvm::LLVMContext> context = std::make_unique<llvm::LLVMContext>();
   std::unique_ptr<llvm::Module> module;
   std::unique_ptr<llvm::orc::LLJIT> jit;
-  std::unique_ptr<llvm::TargetMachine> target;
   std::vector<Image> images;
+  std::vector<std::map<std::uint32_t, std::string>> entry_symbols;  // emit_objects(): per image, entry -> symbol
   std::vector<VuImageCode> code;
   VuTranslateStats stats;
   std::map<std::string, std::size_t> refusals;
   std::map<std::uint32_t, std::string> refused_starts;
-  std::string optimised_ir;
   std::map<std::pair<std::size_t, std::uint32_t>, VuImageCode> entries;  // compiled on first use; null: refused
   std::size_t entry_functions = 0;
   double entry_seconds = 0;
 };
 
-namespace {
-
-void optimise(llvm::Module& mod, llvm::TargetMachine* target) {
-  llvm::PassBuilder passes(target);
-  llvm::LoopAnalysisManager lam;
-  llvm::FunctionAnalysisManager fam;
-  llvm::CGSCCAnalysisManager cgam;
-  llvm::ModuleAnalysisManager mam;
-  passes.registerModuleAnalyses(mam);
-  passes.registerCGSCCAnalyses(cgam);
-  passes.registerFunctionAnalyses(fam);
-  passes.registerLoopAnalyses(lam);
-  passes.crossRegisterProxies(lam, fam, cgam, mam);
-  passes.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(mod, mam);
-}
-
-}  // namespace
 
 VuTranslator::VuTranslator(const StateLayout& layout, const VuLayout& vu_layout, const VuConfig& config)
     : impl_(new Impl{layout, vu_layout, config}) {
-  static const bool initialised = [] {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    return true;
-  }();
-  (void)initialised;
-  auto builder = check(llvm::orc::JITTargetMachineBuilder::detectHost(), "detecting the host CPU");
-  builder.setCodeGenOptLevel(llvm::CodeGenOptLevel::Aggressive);
-  impl_->target = check(builder.createTargetMachine(), "creating the target machine");
-  impl_->jit = check(llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(builder).create(), "creating the JIT");
+  const auto target = make_target("");
   impl_->module = std::make_unique<llvm::Module>("hp2vu", *impl_->context);
-  impl_->module->setDataLayout(impl_->jit->getDataLayout());
-  impl_->module->setTargetTriple(impl_->jit->getTargetTriple());
+  impl_->module->setDataLayout(target->createDataLayout());
+  impl_->module->setTargetTriple(target->getTargetTriple());
 }
 
 VuTranslator::~VuTranslator() = default;
@@ -844,16 +818,34 @@ std::size_t VuTranslator::add_image(std::uint32_t address, std::vector<std::uint
   return index;
 }
 
+namespace {
+
+void add_object(llvm::orc::LLJIT& jit, const std::vector<char>& object, const std::string& name) {
+  check(jit.addObjectFile(llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(object.data(), object.size()), name)),
+        "adding translated microcode");
+}
+
+llvm::Function* declare_image(llvm::Module& module, std::size_t image) {
+  if (llvm::Function* f = module.getFunction(function_name(image))) return f;
+  auto* ptr = llvm::PointerType::get(module.getContext(), 0);
+  return llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(module.getContext()), {ptr, ptr, ptr}, false),
+                                llvm::Function::ExternalLinkage, function_name(image), module);
+}
+
+std::string entry_name(std::size_t image, std::uint32_t address) {
+  return std::format("vu_entry_{}_{:04X}", image, address);
+}
+
+}  // namespace
+
 void VuTranslator::compile() {
   Impl& m = *impl_;
-  llvm::Module& mod = *m.module;
-  if (llvm::verifyModule(mod, &llvm::errs())) fail("the translated microcode does not verify");
-  optimise(mod, m.target.get());
-  {
-    llvm::raw_string_ostream out(m.optimised_ir);
-    mod.print(out, nullptr);
-  }
-  check(m.jit->addIRModule(llvm::orc::ThreadSafeModule(std::move(m.module), std::move(m.context))), "adding the module");
+  if (!m.module) fail("the microcode translator was already compiled");
+  const auto objects = compile_modules({m.module.get()}, "", 1);
+  auto builder = check(llvm::orc::JITTargetMachineBuilder::detectHost(), "detecting the host CPU");
+  m.jit = check(llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(builder).create(), "creating the JIT");
+  add_object(*m.jit, objects[0], "hp2vu");
+  m.module.reset();
   for (std::size_t i = 0; i < m.images.size(); ++i) {
     auto address = check(m.jit->lookup(function_name(i)), "looking up an image");
     m.code.push_back(address.toPtr<VuImageCode>());
@@ -879,23 +871,66 @@ VuImageCode VuTranslator::entry(std::size_t image, std::uint32_t address) {
   }
   auto context = std::make_unique<llvm::LLVMContext>();
   auto module = std::make_unique<llvm::Module>("hp2vu_entry", *context);
-  module->setDataLayout(m.jit->getDataLayout());
-  module->setTargetTriple(m.jit->getTargetTriple());
-  auto* ptr = llvm::PointerType::get(*context, 0);
-  llvm::Function* image_fn = llvm::Function::Create(
-      llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {ptr, ptr, ptr}, false), llvm::Function::ExternalLinkage,
-      function_name(image), *module);
-  const std::string name = std::format("vu_entry_{}_{:04X}", image, address);
+  const std::string name = entry_name(image, address);
   VuTranslateStats stats;
-  MicroLifter(*module, m.layout, m.vu_layout, m.config, im, stats).lift(name, blocks, image_fn);
-  if (llvm::verifyModule(*module, &llvm::errs())) fail("a translated microcode entry does not verify");
-  optimise(*module, m.target.get());
-  check(m.jit->addIRModule(llvm::orc::ThreadSafeModule(std::move(module), std::move(context))), "adding an entry");
+  MicroLifter(*module, m.layout, m.vu_layout, m.config, im, stats).lift(name, blocks, declare_image(*module, image));
+  add_object(*m.jit, compile_modules({module.get()}, "", 1)[0], name);
   const auto code = check(m.jit->lookup(name), "looking up an entry").toPtr<VuImageCode>();
   m.entries.emplace(key, code);
   ++m.entry_functions;
   m.entry_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   return code;
+}
+
+std::vector<std::vector<char>> VuTranslator::emit_objects(const std::string& cpu, unsigned threads) {
+  Impl& m = *impl_;
+  if (!m.module) fail("the microcode translator was already compiled");
+  if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
+  // Every pair of an image that is not a block start gets an entry function,
+  // so that no microcode is ever translated while the game runs. They are
+  // spread over several modules, compiled in parallel.
+  struct Shard {
+    std::unique_ptr<llvm::LLVMContext> context = std::make_unique<llvm::LLVMContext>();
+    std::unique_ptr<llvm::Module> module;
+  };
+  std::vector<Shard> shards(threads);
+  for (std::size_t i = 0; i < shards.size(); ++i)
+    shards[i].module = std::make_unique<llvm::Module>(std::format("hp2vu_entries_{}", i), *shards[i].context);
+  m.entry_symbols.assign(m.images.size(), {});
+  std::size_t n = 0;
+  for (std::size_t image = 0; image < m.images.size(); ++image) {
+    Image& im = m.images[image];
+    for (std::uint32_t a = im.address; a + 8 <= im.address + im.words.size() * 4; a += 8) {
+      if (im.blocks.count(a)) continue;
+      std::map<std::uint32_t, BlockPlan> blocks;
+      try {
+        blocks.emplace(a, Planner(im, m.config).plan(a));
+      } catch (const Unsupported& u) {
+        ++m.refusals["entry: " + u.why];
+        continue;
+      }
+      llvm::Module& mod = *shards[n++ % shards.size()].module;
+      VuTranslateStats stats;
+      MicroLifter(mod, m.layout, m.vu_layout, m.config, im, stats).lift(entry_name(image, a), blocks, declare_image(mod, image));
+      m.entry_symbols[image].emplace(a, entry_name(image, a));
+      ++m.entry_functions;
+    }
+  }
+  std::vector<llvm::Module*> modules{m.module.get()};
+  for (Shard& s : shards) modules.push_back(s.module.get());
+  auto objects = compile_modules(modules, cpu, threads);
+  m.module.reset();
+  return objects;
+}
+
+std::string VuTranslator::image_symbol(std::size_t image) { return function_name(image); }
+std::vector<std::uint32_t> VuTranslator::block_starts(std::size_t image) const {
+  std::vector<std::uint32_t> starts;
+  for (const auto& [a, plan] : impl_->images.at(image).blocks) starts.push_back(a);
+  return starts;
+}
+const std::map<std::uint32_t, std::string>& VuTranslator::entry_symbols(std::size_t image) const {
+  return impl_->entry_symbols.at(image);
 }
 
 std::size_t VuTranslator::entry_functions() const { return impl_->entry_functions; }
@@ -916,13 +951,10 @@ const VuTranslateStats& VuTranslator::stats() const { return impl_->stats; }
 const std::map<std::string, std::size_t>& VuTranslator::refusals() const { return impl_->refusals; }
 const std::map<std::uint32_t, std::string>& VuTranslator::refused_starts() const { return impl_->refused_starts; }
 std::string VuTranslator::ir() const {
-  if (impl_->module) {
-    std::string text;
-    llvm::raw_string_ostream out(text);
-    impl_->module->print(out, nullptr);
-    return text;
-  }
-  return impl_->optimised_ir;
+  std::string text;
+  llvm::raw_string_ostream out(text);
+  if (impl_->module) impl_->module->print(out, nullptr);
+  return text;
 }
 
 }  // namespace hp2

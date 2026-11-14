@@ -14,6 +14,9 @@
 #include <string>
 
 #include "hp2/convert.h"
+#ifdef HP2_HAVE_TRANSLATOR
+#include "code_builder.h"
+#endif
 #include "hp2/iso.h"
 
 using namespace hp2;
@@ -170,6 +173,9 @@ int cmd_convert(const ConvertRequest& req) {
 
 int wmain(int argc, wchar_t** argv) {
   SetConsoleOutputCP(CP_UTF8);
+#ifdef HP2_HAVE_TRANSLATOR
+  hp2::register_translator();
+#endif
   SetConsoleCtrlHandler(on_console_event, TRUE);
   try {
     if (argc < 2) return usage(true);

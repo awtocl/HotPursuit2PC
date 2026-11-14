@@ -28,6 +28,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 
@@ -78,7 +79,9 @@ struct TranslateStats {
 
 class Translator {
  public:
-  Translator(const ElfImage& elf, const Discovery& discovery, const StateLayout& layout, std::uint32_t ram_size);
+  // `threads`: modules compiled in parallel (0 = one per hardware thread).
+  Translator(const ElfImage& elf, const Discovery& discovery, const StateLayout& layout, std::uint32_t ram_size,
+             unsigned threads = 0);
   ~Translator();
   Translator(const Translator&) = delete;
   Translator& operator=(const Translator&) = delete;
@@ -91,6 +94,14 @@ class Translator {
   // Optimises (-O2, host CPU) and compiles everything added to x64 code in
   // memory. Call once, after the last add_function.
   void compile();
+
+  // Instead of compile(): object code (COFF) for linking into a DLL, built
+  // for the LLVM CPU `cpu` (for example "x86-64-v3"). Every translated
+  // function is the external symbol symbol(start); "hp2_dispatch" too.
+  std::vector<std::vector<char>> emit_objects(const std::string& cpu);
+  static std::string symbol(std::uint32_t start);
+  const std::set<std::uint32_t>& functions() const;                         // translated function starts
+  const std::map<std::uint32_t, std::uint32_t>& entry_functions() const;    // entry place -> its function's start
 
   // After compile(): the code for a function that was added, or nullptr.
   LiftedFunction lookup(std::uint32_t start) const;

@@ -380,6 +380,39 @@ fair comparison. Not done yet: VU1 on its own thread (ADR 0008 point 5), the con
 and keeps the code (today everything is compiled when the launcher starts: about 3 minutes for the game program,
 8 s for VU1). The smoke/glow defect (R3) is unchanged, as expected: it is not in the translated code.
 
+## 14. R1c: the translated code built once by the converter (2026-11-14)
+
+[ADR 0009](adr/0009-code-package.md). The converter's new stage "code" translates every discovered function and the
+VU1 microcode, compiles the modules in parallel for `x86-64-v3` and links `build/hp2code.dll` with LLD; the normal
+(release) launcher loads it, checks it and runs on it. Measured on the owner's PC with the test folder
+`.cache/r1c-game` (installed mode, ROM referenced in place, no asset unpacking):
+
+| | |
+|---|---|
+| Stage "code" | 26.5 s: translation 2.1 s, compilation 24.3 s (16 threads, 34 object files), link 0.1 s |
+| Game functions | 10,146 found, **10,123 translated** (23 not: the reference core runs those), 75,545 re-entry places |
+| VU1 | 1 image, 136 block starts, 1,424 further entries (every other pair) |
+| DLL | 27 MB, no C runtime; launcher start to boot **0.4 s** (was about 3 minutes of compilation) |
+
+**The scripted race on the normal launcher** (`.cache/r1c-run`, release build, no measurement hooks): 19.8 million
+calls into the translated game program, 10.7 million into translated VU1 microcode, **0 VU1 blocks on the reference
+core**; the screenshot at frame 3450 shows the same race at the same instant as the measurement runs (lap timer
+6.32). Same launcher with `--reference` (`.cache/r1c-ref`) for comparison, refresh timing from `--frametimes`:
+
+| Refresh (vblank) interval, 4,600 refreshes | Reference core (`--reference`) | Translated (`hp2code.dll`) |
+|---|---|---|
+| Late (over 1.5x the 16.67 ms period) | 337 | **26** |
+| Uneven | 14.5 % | **1.3 %** |
+| p99 / worst | 34.2 / 536 ms | **16.96 / 84.6 ms** |
+
+**Open observation (not caused by this stage, cause not identified):** in races, presented images 50 ms apart (the
+game producing an image every third refresh instead of every second) are more frequent whenever the game program
+runs translated: 150 here, 116-142 in the earlier translated measurement runs, 51 in reference runs - but also 159
+in the VU1 check run, where everything ran on the reference core with heavy checking overhead. The refreshes
+themselves are on time here, so host speed alone does not explain it. Suspects: how the translated code accounts for
+the cycles it spends (only backward branches consume the time slice), or the hand-off between the VM thread and the
+graphics thread. To investigate next; it matters for "works well".
+
 ## 8. Reproduce
 
 ```powershell
@@ -406,6 +439,12 @@ python -B tools/recon/liftsummary.py .cache/r1-lift2/trace/lift-check.tsv .cache
 & .\tools\run-launcher.ps1 -RunName r1b-vu1check2 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -ShotEvery 1150 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--vu1', 'check') -Script "<as above>"
 & .\tools\run-launcher.ps1 -RunName r1b-runvu1 -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -ShotEvery 1150 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--run-translated', '.cache\r1b-all.txt', '--vu1', 'run') -Script "<as above>"
 python -B tools/profile.py .cache\r1b-runvu1\trace\profile.csv --from-frame 3120 --to-frame 4500 --label race
+# converter stage "code" and the normal launcher (section 14)
+pwsh tools/fetch-llvm.ps1; pwsh tools/build-llvm.ps1      # once: adds lld/ and libunwind/ from the same archive
+pwsh tools/build.ps1 -Preset release
+.cache\build\release\converter\hp2pc-cli.exe convert --rom "ROM\Need for Speed - Hot Pursuit 2 (USA)" --install-dir .cache\r1c-game --rom-storage reference --no-assets
+.cache\r1c-game\build\HotPursuit2.exe --frames 4600 --mute --size 1280x896 --res 2 --frametimes .cache\r1c-run\frametimes.csv --script "<as above>"   # add --reference for the baseline
+python -B tools/frametimes.py .cache\r1c-run\frametimes.csv
 ```
 (`-Extra` with two values must be passed from inside PowerShell, as shown; through `pwsh -File` the list arrives as one argument.)
 

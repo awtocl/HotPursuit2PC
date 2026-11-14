@@ -24,6 +24,7 @@
 
 #include <map>
 #include <set>
+#include <thread>
 
 
 namespace hp2 {
@@ -938,55 +939,105 @@ class FunctionLifter : public VectorCode {
 }  // namespace
 
 struct Translator::Impl {
+  // Functions are spread over several modules (each with its own context) so
+  // that they can be optimised and compiled in parallel.
+  struct Shard {
+    std::unique_ptr<llvm::LLVMContext> context = std::make_unique<llvm::LLVMContext>();
+    std::unique_ptr<llvm::Module> module;
+  };
   const ElfImage& elf;
   const Discovery& d;
   StateLayout layout;
   std::uint32_t ram_size;
-  std::unique_ptr<llvm::LLVMContext> context = std::make_unique<llvm::LLVMContext>();
-  std::unique_ptr<llvm::Module> module;
+  unsigned threads = 0;
+  std::vector<Shard> shards;
+  bool finalised = false;
   std::unique_ptr<llvm::orc::LLJIT> jit;
-  std::unique_ptr<llvm::TargetMachine> target;
   std::set<std::uint32_t> added;
   std::map<std::uint32_t, LiftedFunction> code;
   std::map<std::uint32_t, std::uint32_t> entry_function;  // entry other than a start -> its function's start
-  std::size_t entry_count = 0;
-  std::string optimised_ir;
   TranslateStats stats;
   std::map<std::string, std::size_t> reasons;
+
+  // Ends translation: the shared dispatcher, bodies for calls to functions that were not translated.
+  void finalise() {
+    if (finalised) fail("the translator was already compiled");
+    finalised = true;
+    // Calls through a pointer: a switch over every translated function (in the first module).
+    {
+      llvm::Module& mod = *shards[0].module;
+      llvm::LLVMContext& ctx = *shards[0].context;
+      llvm::IRBuilder<> b(ctx);
+      llvm::Function* dispatch = declare_function(mod, "hp2_dispatch");
+      auto* entry = llvm::BasicBlock::Create(ctx, "entry", dispatch);
+      auto* none = llvm::BasicBlock::Create(ctx, "none", dispatch);
+      b.SetInsertPoint(none);
+      b.CreateRetVoid();
+      b.SetInsertPoint(entry);
+      llvm::Value* pc =
+          b.CreateLoad(b.getInt32Ty(), b.CreateConstInBoundsGEP1_32(b.getInt8Ty(), dispatch->getArg(0), layout.pc));
+      auto* sw = b.CreateSwitch(pc, none);
+      for (std::uint32_t start : added) {
+        auto* bb = llvm::BasicBlock::Create(ctx, "", dispatch);
+        sw->addCase(b.getInt32(start), bb);
+        b.SetInsertPoint(bb);
+        b.CreateCall(declare_function(mod, function_name(start)),
+                     {dispatch->getArg(0), dispatch->getArg(1), dispatch->getArg(2), dispatch->getArg(3)});
+        b.CreateRetVoid();
+      }
+    }
+    // Calls to functions that were not translated: a body that returns at once,
+    // leaving the program counter on the callee, so that the caller stops there.
+    for (Shard& s : shards) {
+      llvm::IRBuilder<> b(*s.context);
+      for (llvm::Function& fn : *s.module)
+        if (fn.isDeclaration() && fn.getName().starts_with("fn_") &&
+            !added.count(static_cast<std::uint32_t>(std::stoul(fn.getName().substr(3).str(), nullptr, 16)))) {
+          b.SetInsertPoint(llvm::BasicBlock::Create(*s.context, "untranslated", &fn));
+          b.CreateRetVoid();
+          fn.setLinkage(llvm::Function::InternalLinkage);
+        }
+    }
+  }
+
+  std::vector<llvm::Module*> modules() {
+    std::vector<llvm::Module*> list;
+    for (Shard& s : shards) list.push_back(s.module.get());
+    return list;
+  }
 };
 
 Translator::Translator(const ElfImage& elf, const Discovery& discovery, const StateLayout& layout,
-                       std::uint32_t ram_size)
+                       std::uint32_t ram_size, unsigned threads)
     : impl_(new Impl{elf, discovery, layout, ram_size}) {
-  static const bool initialised = [] {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    return true;
-  }();
-  (void)initialised;
-  auto builder = check(llvm::orc::JITTargetMachineBuilder::detectHost(), "detecting the host CPU");
-  builder.setCodeGenOptLevel(llvm::CodeGenOptLevel::Aggressive);
-  impl_->target = check(builder.createTargetMachine(), "creating the target machine");
-  impl_->jit = check(llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(builder).create(), "creating the JIT");
-  impl_->module = std::make_unique<llvm::Module>("hp2", *impl_->context);
-  impl_->module->setDataLayout(impl_->jit->getDataLayout());
-  impl_->module->setTargetTriple(impl_->jit->getTargetTriple());
+  initialise_llvm();
+  if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
+  impl_->threads = threads;
+  const auto target = make_target("");
+  impl_->shards.resize(threads);
+  for (std::size_t i = 0; i < impl_->shards.size(); ++i) {
+    auto& s = impl_->shards[i];
+    s.module = std::make_unique<llvm::Module>(std::format("hp2_{}", i), *s.context);
+    s.module->setDataLayout(target->createDataLayout());
+    s.module->setTargetTriple(target->getTargetTriple());
+  }
 }
 
 Translator::~Translator() = default;
 
 std::optional<std::string> Translator::add_function(std::uint32_t start) {
   Impl& m = *impl_;
-  if (!m.module) return std::string("compile() was already called");
+  if (m.finalised) return std::string("the translator was already compiled");
   const Function* f = m.d.function_at(start);
   if (!f || f->start != start) return std::format("{:08X} is not a function start", start);
   if (m.added.count(start)) return std::nullopt;
+  Impl::Shard& shard = m.shards[m.added.size() % m.shards.size()];
   // Try in a scratch module first, so that a refusal leaves nothing behind.
   TranslateStats stats;
   std::map<std::string, std::size_t> reasons;
   std::vector<std::uint32_t> entries;
   {
-    llvm::Module scratch("scratch", *m.context);
+    llvm::Module scratch("scratch", *shard.context);
     FunctionLifter probe(m.d, m.layout, m.ram_size, scratch, *f, stats, reasons, entries);
     try {
       probe.lift();
@@ -997,7 +1048,7 @@ std::optional<std::string> Translator::add_function(std::uint32_t start) {
   stats = {};
   reasons.clear();
   entries.clear();
-  FunctionLifter lifter(m.d, m.layout, m.ram_size, *m.module, *f, stats, reasons, entries);
+  FunctionLifter lifter(m.d, m.layout, m.ram_size, *shard.module, *f, stats, reasons, entries);
   lifter.lift();
   for (std::uint32_t e : entries) m.entry_function.emplace(e, start);
   m.stats.instructions += stats.instructions;
@@ -1010,59 +1061,39 @@ std::optional<std::string> Translator::add_function(std::uint32_t start) {
 
 void Translator::compile() {
   Impl& m = *impl_;
-  llvm::Module& mod = *m.module;
-  llvm::IRBuilder<> b(*m.context);
-  // Calls through a pointer: a switch over every translated function.
-  llvm::Function* dispatch = declare_function(mod, "hp2_dispatch");
-  {
-    auto* entry = llvm::BasicBlock::Create(*m.context, "entry", dispatch);
-    auto* none = llvm::BasicBlock::Create(*m.context, "none", dispatch);
-    b.SetInsertPoint(none);
-    b.CreateRetVoid();
-    b.SetInsertPoint(entry);
-    llvm::Value* pc =
-        b.CreateLoad(b.getInt32Ty(), b.CreateConstInBoundsGEP1_32(b.getInt8Ty(), dispatch->getArg(0), m.layout.pc));
-    auto* sw = b.CreateSwitch(pc, none);
-    for (std::uint32_t start : m.added) {
-      auto* bb = llvm::BasicBlock::Create(*m.context, "", dispatch);
-      sw->addCase(b.getInt32(start), bb);
-      b.SetInsertPoint(bb);
-      b.CreateCall(mod.getFunction(function_name(start)),
-                   {dispatch->getArg(0), dispatch->getArg(1), dispatch->getArg(2), dispatch->getArg(3)});
-      b.CreateRetVoid();
-    }
-    dispatch->setLinkage(llvm::Function::InternalLinkage);
-  }
-  // Calls to functions that were not translated: a body that returns at once,
-  // leaving the program counter on the callee, so that the caller stops there.
-  for (llvm::Function& fn : mod)
-    if (fn.isDeclaration() && fn.getName().starts_with("fn_")) {
-      b.SetInsertPoint(llvm::BasicBlock::Create(*m.context, "untranslated", &fn));
-      b.CreateRetVoid();
-      fn.setLinkage(llvm::Function::InternalLinkage);
-    }
-  if (llvm::verifyModule(mod, &llvm::errs())) fail("the translated module does not verify");
-
-  llvm::PassBuilder passes(m.target.get());
-  llvm::LoopAnalysisManager lam;
-  llvm::FunctionAnalysisManager fam;
-  llvm::CGSCCAnalysisManager cgam;
-  llvm::ModuleAnalysisManager mam;
-  passes.registerModuleAnalyses(mam);
-  passes.registerCGSCCAnalyses(cgam);
-  passes.registerFunctionAnalyses(fam);
-  passes.registerLoopAnalyses(lam);
-  passes.crossRegisterProxies(lam, fam, cgam, mam);
-  passes.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(mod, mam);
-  {
-    llvm::raw_string_ostream out(m.optimised_ir);
-    mod.print(out, nullptr);
-  }
-  check(m.jit->addIRModule(llvm::orc::ThreadSafeModule(std::move(m.module), std::move(m.context))), "adding the module");
+  m.finalise();
+  const std::vector<std::vector<char>> objects = compile_modules(m.modules(), "", m.threads);
+  auto builder = check(llvm::orc::JITTargetMachineBuilder::detectHost(), "detecting the host CPU");
+  m.jit = check(llvm::orc::LLJITBuilder().setJITTargetMachineBuilder(builder).create(), "creating the JIT");
+  for (std::size_t i = 0; i < objects.size(); ++i)
+    check(m.jit->addObjectFile(llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(objects[i].data(), objects[i].size()),
+                                                                     std::format("hp2_{}", i))),
+          "adding translated code");
   for (std::uint32_t start : m.added) {
     auto address = check(m.jit->lookup(function_name(start)), "looking up a function");
     m.code.emplace(start, address.toPtr<LiftedFunction>());
   }
+  m.shards.clear();
+}
+
+std::vector<std::vector<char>> Translator::emit_objects(const std::string& cpu) {
+  Impl& m = *impl_;
+  m.finalise();
+  auto objects = compile_modules(m.modules(), cpu, m.threads);
+  m.shards.clear();
+  return objects;
+}
+
+std::string Translator::symbol(std::uint32_t start) {
+  return function_name(start);
+}
+
+const std::set<std::uint32_t>& Translator::functions() const {
+  return impl_->added;
+}
+
+const std::map<std::uint32_t, std::uint32_t>& Translator::entry_functions() const {
+  return impl_->entry_function;
 }
 
 LiftedFunction Translator::lookup(std::uint32_t start) const {
@@ -1081,13 +1112,10 @@ std::size_t Translator::entries() const {
 }
 
 std::string Translator::ir() const {
-  if (impl_->module) {
-    std::string text;
-    llvm::raw_string_ostream out(text);
-    impl_->module->print(out, nullptr);
-    return text;
-  }
-  return impl_->optimised_ir;
+  std::string text;
+  llvm::raw_string_ostream out(text);
+  for (const auto& s : impl_->shards) s.module->print(out, nullptr);
+  return text;
 }
 
 std::size_t Translator::size() const {

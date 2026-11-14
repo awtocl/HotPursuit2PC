@@ -40,6 +40,17 @@ struct Unsupported {
   std::string why;
 };
 
+// ---- code generation (codegen.cpp) ----
+void initialise_llvm();
+// `cpu` empty: this machine's CPU (in-process use); otherwise an LLVM CPU name such as "x86-64-v3".
+std::unique_ptr<llvm::TargetMachine> make_target(const std::string& cpu);
+void optimise(llvm::Module& module, llvm::TargetMachine* target);  // -O2
+// Optimises each module and generates its object code, modules in parallel
+// (up to `threads` at once; 0 = one per hardware thread). The modules must
+// each have their own context.
+std::vector<std::vector<char>> compile_modules(const std::vector<llvm::Module*>& modules, const std::string& cpu,
+                                               unsigned threads);
+
 // Code generation for the vector unit's floating-point side (VU0 macro mode
 // and the upper words of VU microcode), on a state structure in the
 // reference core's layout.

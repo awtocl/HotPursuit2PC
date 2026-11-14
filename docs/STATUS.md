@@ -3,7 +3,13 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-14 — phase **R1b-3b (VU1 microcode translated)**: one image of the game's microcode
+**Last update:** 2026-11-14 — phase **R1c (translated code built once by the converter)**: new converter stage
+"code" translates all 10,146 discovered functions (10,123 translate) and the VU1 microcode and links
+build/hp2code.dll with LLD in 26.5 s; the normal launcher loads it in 0.4 s (was ~3 min of compilation) and runs the
+scripted race on it with 0 VU1 blocks left to the reference core; refreshes late 337 → 26 vs the same launcher with
+`--reference`. Open: more 3-refresh frames in races whenever the game program runs translated (cause not identified).
+Next: that timing question, then VU1 on its own thread.
+Previous: phase **R1b-3b (VU1 microcode translated)**: one image of the game's microcode
 translated with the reference core's own pipeline model; 0 differences in 5,947,088 compared time slices (14.5 million
 graphics packets); the whole race now runs on translated game code, VU0 and VU1 with no hand-over: same race, mean
 VM-thread work per refresh 6.22 → 4.48 ms (VU1 2.31 → 1.09 ms), refreshes over 16.7 ms 17 → 4. Next: the converter
@@ -59,7 +65,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1b-2 VU0 macro mode** | **done** | this commit; VU0 vector, integer, Q and control-register instructions with the reference core's clamping, special cases and flag pipelines; flag writes buffered per straight run; `docs/recomp-analysis.md` §11 |
 | **R1b-3a VU1 analysis** | **done** | this commit; `recomp/include/hp2/vu.h` (decoder, disassembler, upload packets), `hp2recomp vu1`, VU1 block counts in `--trace-counts`; `docs/recomp-analysis.md` §12; [ADR 0008](adr/0008-vu1-microcode.md) |
 | **R1b-3b VU1 microcode translated** | **done** | this commit; `recomp/src/vulift.cpp`, shared vector code in `recomp/src/lift_internal.h`, operand tables in `hp2/vu.h`, `hp2recomp vu1-lift`, launcher `--vu1 check\|run`, `test_vulift` (7 tests); `docs/recomp-analysis.md` §13. **Not verified:** other tracks, cars and game modes than the scripted session (other microcode entries are translated on first use; a refused one runs on the reference core). |
-| **R1b translator (rest)** | **next** | converter stage that compiles once and stores the code (today ~3 min at launcher start); VU1 on its own thread (ADR 0008 point 5); branch in a delay slot; then R2 (own runtime) |
+| **R1c code built once** | **done** | this commit; [ADR 0009](adr/0009-code-package.md); `recomp/src/package.cpp`, `codegen.cpp` (parallel compilation), `hp2/code_package.h`; converter stage "code" (`converter/code/`); launcher `engine/src/translated.cpp`, `--reference`; LLD added to `tools/fetch-llvm.ps1` / `build-llvm.ps1`; `docs/recomp-analysis.md` §14. **Not verified:** other PCs/CPUs, antivirus reaction to a locally made DLL, GUI run by a person. |
+| **R1 rest** | **next** | race timing: more 3-refresh frames with translated code (§14, open); VU1 on its own thread (ADR 0008 point 5); branch in a delay slot; then R2 (own runtime) |
 
 ## Decisions (ADRs)
 
@@ -71,6 +78,7 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names from a table recovered from the dump; unpack = exact 1:1 extents + manifest with SHA-256; resumable; ROM read-only. |
 | [0006](adr/0006-recompilation-main-line.md) | Direction after the M1 trial | **Static recompilation + purpose-built runtime is the product (stages R0–R4); the Play!-based launcher is the reference oracle and fallback.** No game code is ever distributed: translation happens in the converter on the user's machine. |
 | [0008](adr/0008-vu1-microcode.md) | VU1 microcode | Translate each microprogram with LLVM keeping only what this game's microcode can observe (clip flags, Q, R and the timing they depend on); no MAC/status flags (never read; the translator refuses microcode that reads them); verify at each end bit; later run it on its own thread. |
+| [0009](adr/0009-code-package.md) | Translated code built once | The converter's "code" stage translates everything and links a native DLL with LLD (x86-64-v3); the launcher loads it after checking executable hash, state-layout fingerprint and CPU; nothing compiled while playing. |
 | [0007](adr/0007-code-generator.md) | Code generator, translation model, scope of R1 | **Accepted 2026-11-13 (spike: 0 differences, 4.1x):** LLVM embedded in the converter (x86 back end only); one host function per game function, re-enterable at resume points, running on the reference machine model with fallback; R1 covers the game program **and** VU1 microcode; acceptance restated (EE + VU ≤ 3 ms per busy refresh, nothing compiled while playing; "3×" moves to R3). Fallback if LLVM is refused: own x64 emitter. |
 | [0005](adr/0005-rendering-audio.md) | Launcher (now: reference build) | Play! core libraries linked statically (source unmodified); its OpenGL renderer on our WGL context; WaveOut audio; XInput + keyboard; virtual disc from the ROM folder; all data in `game/build/data`; core's 60 Hz limiter on. **Races are drawn at 30 fps by the game itself, menus at 60** (measured; unverified on a console). |
 

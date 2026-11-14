@@ -41,8 +41,20 @@ endif()
 
 # --- translator (needs LLVM) ---------------------------------------------------
 if(LLVM_FOUND)
-  add_library(hp2lift STATIC src/lift.cpp src/lift_internal.h src/vulift.cpp include/hp2/lift.h include/hp2/vulift.h)
+  add_library(hp2lift STATIC src/lift.cpp src/lift_internal.h src/codegen.cpp src/vulift.cpp include/hp2/lift.h include/hp2/vulift.h)
   target_link_libraries(hp2lift PUBLIC hp2recomp PRIVATE hp2_llvm)
+
+  # The converter's "code" stage (ADR 0009): everything translated, compiled
+  # in parallel and linked into a DLL with LLD (built by tools/build-llvm.ps1).
+  find_package(LLD CONFIG PATHS "${HP2_LLVM_DIR}/lib/cmake/lld" NO_DEFAULT_PATH QUIET)
+  if(LLD_FOUND OR TARGET lldCOFF)
+    add_library(hp2package STATIC src/package.cpp include/hp2/package.h include/hp2/code_package.h)
+    target_link_libraries(hp2package PUBLIC hp2lift PRIVATE hp2_llvm lldCOFF lldCommon)
+    target_include_directories(hp2package SYSTEM PRIVATE "${HP2_LLVM_DIR}/include")
+    message(STATUS "recomp: LLD found - the code package builder is built")
+  else()
+    message(STATUS "recomp: LLD not found in ${HP2_LLVM_DIR} - no code package builder (run tools/build-llvm.ps1)")
+  endif()
 endif()
 
 # --- developer tool -----------------------------------------------------------

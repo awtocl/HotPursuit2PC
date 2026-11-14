@@ -61,7 +61,7 @@ class KeyValueFile {
 enum class StageState { NotStarted, Partial, Done, NotAvailable };
 
 struct StageStatus {
-  std::string id;      // "validate", "rom", "unpack", "build"
+  std::string id;      // "validate", "rom", "unpack", "build", "code"
   std::string title;   // human readable
   StageState state = StageState::NotStarted;
   std::string detail;  // e.g. "27 of 27 files present"
@@ -113,6 +113,26 @@ RuntimePayload load_embedded_runtime();
 // The text of <game>/build/README.txt.
 std::string runtime_readme_text();
 
+// --------------------------------------------------------------------- code
+
+// The "code" stage (ADR 0009): the game program and its vector-unit microcode
+// translated into native code once, stored as <game>/build/hp2code.dll. It
+// needs the translator (LLVM), which only converters built with it carry: they
+// register a builder at startup; without one the stage is unavailable and the
+// game runs on the reference core.
+struct CodeBuilder {
+  // One line naming what would be built from this executable (format, hash,
+  // layout, CPU level); a package whose recorded identity matches is kept.
+  std::function<std::string(ByteView elf)> identity;
+  // Builds the package; `log` gets progress lines. Throws on failure.
+  std::function<void(ByteView elf, const fs::path& dll, const std::function<void(std::string_view)>& log)> build;
+};
+void register_code_builder(CodeBuilder builder);
+const CodeBuilder* registered_code_builder();
+
+inline constexpr std::string_view kCodeFileName = "hp2code.dll";
+inline constexpr std::string_view kGameExecutable = "SLUS_203.62";
+
 // --------------------------------------------------------------------- convert
 
 struct ConvertRequest {
@@ -141,7 +161,7 @@ struct ConvertResult {
   GameFolderStatus status;    // state of the game folder after the run
 };
 
-// Runs validate -> rom -> unpack -> build. Safe to call again on the same
+// Runs validate -> rom -> unpack -> build -> code. Safe to call again on the same
 // folder: work that is already complete is detected and kept. Never throws;
 // failures are reported in the result and written to the log.
 ConvertResult convert(const ConvertRequest& request, const ConvertEvents& events = {},

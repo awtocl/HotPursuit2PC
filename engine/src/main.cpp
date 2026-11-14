@@ -13,6 +13,11 @@
 //   --data  where settings, memory cards and the log go (default: .\data)
 //   Alt+Enter or F11 toggles full screen.
 //
+// Translated game code (ADR 0009): when build/hp2code.dll (written by the
+// converter's "code" stage) sits next to the launcher and matches it and the
+// game, the game program and VU1 microcode run on it.
+//   --reference           ignore it: run everything on the reference core (comparisons)
+//
 // Developer/automation switches (used for the acceptance runs):
 //   --disc <image.iso>    boot a disc image file instead of the ROM folder
 //   --frames <n>          exit after n emulated frames
@@ -61,6 +66,7 @@
 #include <GL/wglew.h>
 
 #include "ref_trace.h"
+#include "translated.h"
 #include "virtual_disc.h"
 
 namespace
@@ -507,6 +513,7 @@ namespace
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
 		bool mute = false;
+		bool reference = false;  // ignore build/hp2code.dll
 		bool unlimited = false;
 		bool coreLimiter = false;  // use the core's frame limiter instead of our pacer (comparison only)
 		uint32_t frames = 0;
@@ -591,6 +598,7 @@ namespace
 			}
 			else if(a == L"--script" && hasValue) ok = ParseScript(argv[++i], options);
 			else if(a == L"--mute") options.mute = true;
+			else if(a == L"--reference") options.reference = true;
 			else if(a == L"--unlimited") options.unlimited = true;
 			else if(a == L"--core-limiter") options.coreLimiter = true;
 			else ok = false;
@@ -841,6 +849,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			if(!traceError.empty()) throw std::runtime_error("--trace: " + traceError);
 			Log("step: reference tracing installed");
 		}
+		else if(!options.reference)
+		{
+			Log("%s", hp2rt::InstallTranslatedCode(*g_vm, ExeDir() / L"hp2code.dll", options.rom / L"SLUS_203.62").c_str());
+		}
+		else
+		{
+			Log("translated code not used (--reference)");
+		}
 		g_vm->Reset();
 		Log("step: VM reset");
 		if(g_disc)
@@ -924,6 +940,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->Pause();
 		frameConnection.reset();
 		g_frameTimes.Save(options.frameTimes);
+		if(const std::string report = hp2rt::TranslatedCodeReport(); !report.empty()) Log("%s", report.c_str());
 		hp2ref::TraceFinish(*g_vm);
 		g_vm->DestroyPadHandler();
 		g_vm->DestroyGSHandler();
