@@ -20,6 +20,7 @@
 
 #include "hp2/discover.h"
 #include "hp2/io.h"
+#include "hp2/vu.h"
 #ifdef HP2_HAVE_LLVM
 #include "hp2/lift.h"
 #endif
@@ -534,6 +535,77 @@ int cmd_hot(const fs::path& elf_path, const fs::path& trace_dir, std::size_t top
   return 0;
 }
 
+// ---- vu1 -----------------------------------------------------------------------------------
+
+// The VU1 microprograms: uploads found in .vutext, static census, and - with
+// a trace recorded with --trace-counts - what the reference core executed.
+int cmd_vu1(const fs::path& elf_path, const fs::path& trace_dir, bool list) {
+  const ElfImage elf = load_elf(elf_path);
+  const std::vector<vu::Upload> uploads = vu::find_uploads(elf);
+  std::size_t pairs = 0;
+  for (const vu::Upload& u : uploads) pairs += u.pairs;
+  std::cout << std::format("microcode uploads (MPG packets) in .vutext: {}, {} instruction pairs\n", uploads.size(), pairs);
+  std::map<std::string, std::size_t> upper_static, lower_static;
+  std::size_t e_bits = 0, i_bits = 0, invalid = 0;
+  for (const vu::Upload& u : uploads) {
+    if (list) std::cout << std::format("\nupload at {:08X}: {} pairs to VU address {:04X}\n", u.file_address, u.pairs, u.vu_address);
+    for (std::uint32_t k = 0; k < u.pairs; ++k) {
+      const std::uint32_t lo = elf.word(u.file_address + k * 8), hi = elf.word(u.file_address + k * 8 + 4);
+      const vu::Pair p = vu::decode(lo, hi);
+      ++upper_static[std::string(r5900::mnemonic(p.up))];
+      if (p.i_bit()) ++i_bits;
+      else ++lower_static[std::string(vu::mnemonic(p.lo))];
+      e_bits += p.e_bit();
+      invalid += p.up == r5900::Op::Invalid || (!p.i_bit() && p.lo == vu::Lower::Invalid);
+      if (list) std::cout << "  " << vu::disassemble(u.vu_address + k * 8, lo, hi) << '\n';
+    }
+  }
+  std::cout << std::format("pairs that do not decode: {}; end (E) bits: {}; immediates (I bit): {}\n", invalid, e_bits, i_bits);
+
+  if (trace_dir.empty()) return invalid ? 1 : 0;
+  std::ifstream in(trace_dir / "vu1-blocks.tsv");
+  if (!in) fail("cannot open '{}'", to_utf8(trace_dir / "vu1-blocks.tsv"));
+  std::map<std::string, std::uint64_t> upper_dyn, lower_dyn;
+  std::uint64_t total = 0, fmac = 0, flag_reads = 0, xgkicks = 0, branches = 0;
+  std::size_t blocks = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::vector<std::string> f;
+    std::istringstream fields(line);
+    for (std::string x; std::getline(fields, x, '\t');) f.push_back(x);
+    if (f.size() != 6) fail("vu1-blocks.tsv has no execution counts: record the trace with --trace-counts");
+    const std::uint64_t executed = std::stoull(f[4]);
+    const std::string& words = f[5];
+    ++blocks;
+    for (std::size_t k = 0; k + 16 <= words.size(); k += 16) {
+      const std::uint32_t lo = static_cast<std::uint32_t>(std::stoul(words.substr(k, 8), nullptr, 16));
+      const std::uint32_t hi = static_cast<std::uint32_t>(std::stoul(words.substr(k + 8, 8), nullptr, 16));
+      const vu::Pair p = vu::decode(lo, hi);
+      total += executed;
+      upper_dyn[std::string(r5900::mnemonic(p.up))] += executed;
+      if (p.up != r5900::Op::VNOP) fmac += executed;
+      if (!p.i_bit()) lower_dyn[std::string(vu::mnemonic(p.lo))] += executed;
+      if (p.lower_reads_flags()) flag_reads += executed;
+      if (!p.i_bit() && p.lo == vu::Lower::XGKICK) xgkicks += executed;
+      if (p.lower_is_branch()) branches += executed;
+    }
+  }
+  auto pct = [&](std::uint64_t n) { return 100.0 * static_cast<double>(n) / static_cast<double>(total ? total : 1); };
+  std::cout << std::format("\nexecuted ({} blocks): {} instruction pairs; FMAC (upper not nop) {:.1f}%; branches {:.1f}%; "
+                           "flag reads {:.2f}%; xgkick {}\n", blocks, total, pct(fmac), pct(branches), pct(flag_reads), xgkicks);
+  for (auto* table : {&upper_dyn, &lower_dyn}) {
+    std::vector<std::pair<std::uint64_t, std::string>> order;
+    for (const auto& [k, n] : *table) order.emplace_back(n, k);
+    std::sort(order.rbegin(), order.rend());
+    std::cout << (table == &upper_dyn ? "upper:" : "lower:");
+    for (std::size_t i = 0; i < order.size() && i < 16; ++i)
+      std::cout << std::format(" {} {:.1f}%", order[i].second, pct(order[i].first));
+    std::cout << '\n';
+  }
+  return 0;
+}
+
 #ifdef HP2_HAVE_LLVM
 // ---- lift ----------------------------------------------------------------------------------
 
@@ -653,6 +725,7 @@ void usage() {
                "  hp2recomp disasm <elf> <hex address> [count]\n"
                "  hp2recomp check-trace <elf> <trace dir>\n"
                "  hp2recomp hot <elf> <trace dir> [how many]     (trace recorded with --trace-counts)\n"
+               "  hp2recomp vu1 <elf> [trace dir] [--list]       (VU1 microprograms)\n"
                "  hp2recomp lift <elf> <trace dir> <how many> [--out <list>]   (builds with LLVM)\n";
 }
 
@@ -675,6 +748,11 @@ int wmain(int argc, wchar_t** argv) {
     if (a[0] == L"check-trace" && a.size() == 3) return cmd_check_trace(a[1], a[2]);
     if (a[0] == L"hot" && (a.size() == 3 || a.size() == 4))
       return cmd_hot(a[1], a[2], a.size() == 4 ? std::stoul(a[3]) : 30);
+    if (a[0] == L"vu1" && a.size() >= 2 && a.size() <= 4) {
+      const bool list = a.size() >= 3 && a.back() == L"--list";
+      const fs::path trace = a.size() >= 3 && a[2] != L"--list" ? fs::path(a[2]) : fs::path();
+      return cmd_vu1(a[1], trace, list);
+    }
 #ifdef HP2_HAVE_LLVM
     if (a[0] == L"lift" && (a.size() == 4 || (a.size() == 6 && a[4] == L"--out")))
       return cmd_lift(a[1], a[2], std::stoul(a[3]), a.size() == 6 ? fs::path(a[5]) : fs::path());

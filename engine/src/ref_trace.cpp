@@ -18,6 +18,7 @@
 #include "ee/EeBasicBlock.h"
 #include "ee/EeExecutor.h"
 #include "MemoryUtils.h"
+#include "ee/VuBasicBlock.h"
 #include "ee/VuExecutor.h"
 #include "string_format.h"
 
@@ -432,9 +433,37 @@ namespace hp2ref
 		{
 			uint32_t begin, end, firstFrame, created;
 			std::vector<uint32_t> words;
+			std::vector<uint32_t> slots;  // counters of this block's compiled copies (--trace-counts)
 		};
 		std::map<std::pair<uint32_t, uint64_t>, VuBlock> g_vuBlocks;  // by (begin, content hash); VM thread only
 		uint64_t g_vuBlocksCreated = 0;
+
+		// --trace-counts: how often each VU1 block runs (counted in its epilogue, like the EE's).
+		std::vector<uint64_t> g_vuCounts;
+		void CountVuBlock(uint32 slot)
+		{
+			++g_vuCounts[slot];
+		}
+		class CCountingVuBasicBlock : public CVuBasicBlock
+		{
+		public:
+			CCountingVuBasicBlock(CMIPS& context, uint32 begin, uint32 end, BLOCK_CATEGORY category, uint32 slot)
+			    : CVuBasicBlock(context, begin, end, category)
+			    , m_slot(slot)
+			{
+			}
+
+		protected:
+			void CompileEpilog(CMipsJitter* jitter, bool loopsOnItself) override
+			{
+				jitter->PushCst(m_slot);
+				jitter->Call(reinterpret_cast<void*>(&CountVuBlock), 1, Jitter::CJitter::RETURN_VALUE_NONE);
+				CVuBasicBlock::CompileEpilog(jitter, loopsOnItself);
+			}
+
+		private:
+			uint32 m_slot;
+		};
 
 		class CTracingVuExecutor : public CVuExecutor
 		{
@@ -454,9 +483,15 @@ namespace hp2ref
 				}
 				++g_vuBlocksCreated;
 				auto [it, isNew] = g_vuBlocks.try_emplace({begin, hash});
-				if(isNew) it->second = {begin, end, g_frame.load(std::memory_order_relaxed), 0, std::move(words)};
+				if(isNew) it->second = {begin, end, g_frame.load(std::memory_order_relaxed), 0, std::move(words), {}};
 				++it->second.created;
-				return CVuExecutor::BlockFactory(context, begin, end);
+				if(!g_countBlocks) return CVuExecutor::BlockFactory(context, begin, end);
+				const uint32 slot = static_cast<uint32>(g_vuCounts.size());
+				g_vuCounts.push_back(0);
+				it->second.slots.push_back(slot);
+				auto block = std::make_shared<CCountingVuBasicBlock>(context, begin, end, m_blockCategory, slot);
+				block->Compile();
+				return block;
 			}
 		};
 
@@ -568,6 +603,7 @@ namespace hp2ref
 		g_blocks.reserve(1 << 18);
 		g_blockCounts.reserve(1 << 18);  // never reallocated while compiled code holds indices into it
 		g_translatedEntries.reserve(1 << 16);
+		g_vuCounts.reserve(1 << 16);  // never reallocated while compiled code holds indices into it
 		g_samples.reserve(1 << 16);
 		g_zoneTimes.reserve(1 << 20);
 
@@ -684,11 +720,14 @@ namespace hp2ref
 		if(FILE* file = _wfopen((g_dir / L"vu1-blocks.tsv").c_str(), L"w"))
 		{
 			fprintf(file, "# distinct VU1 microcode blocks the reference core compiled (%llu block creations in total):\n"
-			              "# begin, end, first frame, times created, contents (32-bit words, lower/upper pairs)\n",
+			              "# begin, end, first frame, times created, times executed (with --trace-counts), contents (32-bit words, lower/upper pairs)\n",
 			        static_cast<unsigned long long>(g_vuBlocksCreated));
 			for(const auto& [key, block] : g_vuBlocks)
 			{
-				fprintf(file, "%04X\t%04X\t%u\t%u\t", block.begin, block.end, block.firstFrame, block.created);
+				uint64_t executed = 0;
+				for(uint32_t slot : block.slots) executed += g_vuCounts[slot];
+				fprintf(file, "%04X\t%04X\t%u\t%u\t%llu\t", block.begin, block.end, block.firstFrame, block.created,
+				        static_cast<unsigned long long>(executed));
 				for(uint32_t word : block.words) fprintf(file, "%08X", word);
 				fputc('\n', file);
 			}

@@ -306,6 +306,27 @@ longer handing over to the reference core in the middle of the hottest call chai
 **What is left of the busy race refresh:** VU1 microcode 4.78 ms, VIF + GIF 2.86 ms, game program 3.63 ms. The
 next step is the VU1 microprograms (ADR 0007, R1 scope).
 
+## 12. VU1 microcode: what it does and what it costs (2026-11-13)
+
+`hp2recomp vu1` (new): decodes VU microcode (lower and upper words, `recomp/include/hp2/vu.h`), finds the upload
+packets in `.vutext`, and with a counting trace (`--trace-counts` now also counts VU1 blocks, in their epilogue)
+reports what the reference core executed (`.cache/r1-vucounts`).
+
+- 8 upload packets, 1,563 instruction pairs, all decode; 9 end bits; 19 immediates.
+- 3.88 billion pairs executed in the 82 s session, in 125 distinct blocks; 9 blocks make up half. At the measured
+  4.8-5.0 ms per busy race refresh that is about 3 ns per pair in the reference core.
+- Upper slot: 54 % `nop`; FMAC operations 46 % (`vmaddbc` 8.2 %, `vmaddabc` 7.5 %, `vmulabc` 4.7 %, `vmula` 2.9 %,
+  `vclip` 2.4 %, `vadda` 2.3 %, `vmaddq` 2.2 %, `vmulq` 2.1 %, `vftoi0`/`vitof0` 1.6 % each ...).
+- Lower slot: 35 % `nop`; `sqi` 8.7 %, `lqi` 7.9 %, `lq` 4.9 %, `iaddi` 4.8 %, `iaddiu` 4.3 %, `ilw` 3.3 %, `mr32` 2.9 %;
+  branches 8.2 % of pairs; 14.5 million `xgkick`.
+- Over all the microcode (not only what ran): clip-flag reads only (`fcget` 9, `fcand` 4, `fcset` 3), **no MAC or
+  status flag read**, no EFU/P instruction; `div` 29, `waitq` 3, `rnext` 22, `rinit` 6, `rget` 2, `bal` 15, `jalr` 17,
+  `xtop` 2, `xitop` 1.
+
+Consequence: [ADR 0008](adr/0008-vu1-microcode.md) - translate the microprograms keeping only what this game's
+microcode can observe (clip flags, Q, R, the pipeline timing they depend on), not the MAC/status flag bookkeeping
+that dominates the reference core's cost.
+
 ## 8. Reproduce
 
 ```powershell

@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "hp2/discover.h"
+#include "hp2/vu.h"
 
 using namespace hp2;
 using r5900::Flow;
@@ -329,6 +330,28 @@ TEST(discovery_treats_a_jump_out_of_a_function_as_a_new_function) {
   CHECK_EQ(f4->start, 0x10008Cu);
   CHECK(f4->origin == FuncOrigin::Jump);
   CHECK(d.cross_branches.empty());
+}
+
+TEST(vu_microcode_decoding) {
+  // upper "nop" and lower "nop" (an empty move), as they pad most of the game's microcode
+  const vu::Pair padding = vu::decode(0x8000033Cu, 0x000002FFu);
+  CHECK(padding.up == r5900::Op::VNOP);
+  CHECK(padding.lo == vu::Lower::MOVE);
+  CHECK(!padding.lower_is_branch());
+  // xgkick vi1 (lower special, vector0 index 0x1B)
+  CHECK(vu::decode_lower(0x800006FCu | (1u << 11)) == vu::Lower::XGKICK);
+  // b with offset -2 pairs from address 0x100: target 0x100 + 8 - 16
+  const std::uint32_t b = (0x20u << 25) | 0x7FEu;
+  CHECK(vu::decode_lower(b) == vu::Lower::B);
+  CHECK_EQ(vu::branch_target(0x100, b), 0xF8u);
+  // fcand reads flags; the I bit turns the lower word into an immediate
+  const vu::Pair fc = vu::decode((0x12u << 25), 0x000002FFu);
+  CHECK(fc.lower_reads_flags());
+  const vu::Pair imm = vu::decode((0x12u << 25), 0x800002FFu);
+  CHECK(imm.i_bit());
+  CHECK(!imm.lower_reads_flags());
+  // macro-only operations do not exist in the upper word
+  CHECK(vu::decode_upper(0x00000030u) == r5900::Op::Invalid);  // index 0x30 = viadd in macro mode
 }
 
 MINITEST_MAIN()

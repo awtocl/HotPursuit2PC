@@ -6,9 +6,11 @@ add_library(hp2recomp STATIC
   src/elf.cpp
   src/r5900.cpp
   src/discover.cpp
+  src/vu.cpp
   include/hp2/elf.h
   include/hp2/r5900.h
-  include/hp2/discover.h)
+  include/hp2/discover.h
+  include/hp2/vu.h)
 target_include_directories(hp2recomp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # The tool is called hp2recomp.exe; its import library would clash with hp2recomp.lib.
 set_target_properties(hp2recomp PROPERTIES OUTPUT_NAME hp2recomp_core)

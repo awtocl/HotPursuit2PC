@@ -3,7 +3,10 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-13 — phase **R1b-2 (VU0 macro mode translated)**: 0 differences in 1,530 compared calls
+**Last update:** 2026-11-13 — phase **R1b-3a (VU1 analysis)**: VU1 microcode decoded and measured (54 % of upper and
+35 % of lower slots are padding; no MAC/status flag is ever read); ADR 0008 decides how to translate it. Next: the
+VU1 translator and its verification.
+Previous: phase **R1b-2 (VU0 macro mode translated)**: 0 differences in 1,530 compared calls
 including the VU0 state; in the same race, refreshes over 16.7 ms 138 → 17, worst 46 → 28 ms, game program
 3.6 ms per busy refresh (reference core 6.1). Next: VU1 microprograms.
 Previous: phase **R1b-1 (game running on translated code)**: 3,692 functions (99.8 % of executed
@@ -49,6 +52,7 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1b-spike translator spike** | **done** | this commit; LLVM 23.1.5 fetched (pinned SHA-256) and built in `.cache`; `recomp/src/lift.cpp` (leaf functions → LLVM → x64); `--trace-counts` fixed (epilogue), `hp2recomp hot` / `lift`; launcher `--lift-check` (profile build); 97 of the 400 hottest functions translated in 0.57 s; 81 compared on 1,864 calls: **0 differences**; **4.1x** faster; 16 trapped on the scratchpad; ADR 0007 accepted; 14 CTest tests pass in dev and release. The VU1 microprogram part of the spike was not done (next). |
 | **R1b-1 calls, hand-over, re-entry, run mode** | **done** | this commit; whole functions with calls, hand-over to the reference core at any uncovered instruction, re-entry at 38,624 places, scratchpad and hardware slow path, time slice and waiting loops; launcher `--run-translated`; `docs/recomp-analysis.md` §10 |
 | **R1b-2 VU0 macro mode** | **done** | this commit; VU0 vector, integer, Q and control-register instructions with the reference core's clamping, special cases and flag pipelines; flag writes buffered per straight run; `docs/recomp-analysis.md` §11 |
+| **R1b-3a VU1 analysis** | **done** | this commit; `recomp/include/hp2/vu.h` (decoder, disassembler, upload packets), `hp2recomp vu1`, VU1 block counts in `--trace-counts`; `docs/recomp-analysis.md` §12; [ADR 0008](adr/0008-vu1-microcode.md) |
 | **R1b translator (rest)** | **next** | VU1 microprograms; branch in a delay slot; converter stage that compiles once and stores the code | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
 
 ## Decisions (ADRs)
@@ -60,6 +64,7 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | [0003](adr/0003-gui-framework.md) | GUI framework | Plain Win32 + Common Controls 6; all logic in `hp2core`; GUI and CLI are thin front-ends. |
 | [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names from a table recovered from the dump; unpack = exact 1:1 extents + manifest with SHA-256; resumable; ROM read-only. |
 | [0006](adr/0006-recompilation-main-line.md) | Direction after the M1 trial | **Static recompilation + purpose-built runtime is the product (stages R0–R4); the Play!-based launcher is the reference oracle and fallback.** No game code is ever distributed: translation happens in the converter on the user's machine. |
+| [0008](adr/0008-vu1-microcode.md) | VU1 microcode | Translate each microprogram with LLVM keeping only what this game's microcode can observe (clip flags, Q, R and the timing they depend on); no MAC/status flags (never read; the translator refuses microcode that reads them); verify at each end bit; later run it on its own thread. |
 | [0007](adr/0007-code-generator.md) | Code generator, translation model, scope of R1 | **Accepted 2026-11-13 (spike: 0 differences, 4.1x):** LLVM embedded in the converter (x86 back end only); one host function per game function, re-enterable at resume points, running on the reference machine model with fallback; R1 covers the game program **and** VU1 microcode; acceptance restated (EE + VU ≤ 3 ms per busy refresh, nothing compiled while playing; "3×" moves to R3). Fallback if LLVM is refused: own x64 emitter. |
 | [0005](adr/0005-rendering-audio.md) | Launcher (now: reference build) | Play! core libraries linked statically (source unmodified); its OpenGL renderer on our WGL context; WaveOut audio; XInput + keyboard; virtual disc from the ROM folder; all data in `game/build/data`; core's 60 Hz limiter on. **Races are drawn at 30 fps by the game itself, menus at 60** (measured; unverified on a console). |
 

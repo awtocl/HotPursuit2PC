@@ -46,7 +46,10 @@ def main():
         for line in f:
             if line.startswith("#"):
                 continue
-            begin, end, frame, created, words = line.split("\t")
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) == 6:  # recorded with --trace-counts: an execution count before the contents
+                del fields[4]
+            begin, end, frame, created, words = fields
             data = b"".join(struct.pack("<I", int(words[i:i + 8], 16)) for i in range(0, len(words.strip()), 8))
             blocks.append((int(begin, 16), int(end, 16), int(frame), int(created), data))
             created_total += int(created)
