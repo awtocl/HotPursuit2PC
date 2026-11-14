@@ -795,6 +795,12 @@ namespace hp2ref
 			return consumed;
 		}
 
+		// ---- GS privileged registers (--trace-gs): when the game flips, in emulated refreshes ----
+		// Every EE write to 0x12000000-0x1200108C is listed in gs-priv.tsv with the refresh
+		// (vertical blank) it happened in: the game's own frame changes (DISPFB1/2), counted
+		// in emulated time, independent of how fast the host renders.
+		FILE* g_gsFile = nullptr;
+
 		// ---- time per emulated refresh ------------------------------------------------------
 		struct FrameSample
 		{
@@ -877,7 +883,8 @@ namespace hp2ref
 	}
 
 	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
-	                         const fs::path& elf, bool runTranslated, int vu1Mode, uint32_t vifFrom, uint32_t vifTo)
+	                         const fs::path& elf, bool runTranslated, int vu1Mode, uint32_t vifFrom, uint32_t vifTo,
+	                         bool traceGs)
 	{
 		std::error_code ec;
 		fs::create_directories(dir, ec);
@@ -965,6 +972,20 @@ namespace hp2ref
 			}
 		}
 
+		if(traceGs)
+		{
+			g_gsFile = _wfopen((dir / L"gs-priv.tsv").c_str(), L"w");
+			if(!g_gsFile) return "cannot create gs-priv.tsv";
+			fputs("# refresh\taddress\tvalue (EE writes to the GS privileged registers)\n", g_gsFile);
+			auto* port = const_cast<CMemoryMap::MEMORYMAPELEMENT*>(vm.m_ee->m_EE.m_pMemoryMap->GetWriteMap(0x12000000));
+			if(!port) return "the EE memory map has no GS port";
+			auto original = port->handler;
+			port->handler = [original](uint32 address, uint32 value) -> uint32 {
+				if(g_gsFile && address >= 0x12000000 && address <= 0x1200108C)
+					fprintf(g_gsFile, "%u\t%08X\t%08X\n", g_frame.load(std::memory_order_relaxed), address, value);
+				return original(address, value);
+			};
+		}
 		if(vifTo > vifFrom)
 		{
 			g_vifFile = _wfopen((dir / L"vif1-stream.bin").c_str(), L"wb");
@@ -1161,6 +1182,11 @@ namespace hp2ref
 			}
 		}
 
+		if(g_gsFile)
+		{
+			fclose(g_gsFile);
+			g_gsFile = nullptr;
+		}
 		if(g_vifFile)
 		{
 			fclose(g_vifFile);

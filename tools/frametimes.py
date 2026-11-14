@@ -2,7 +2,8 @@
 """Frame-time statistics from the launcher's --frametimes CSV (DEV-ONLY).
 
 The CSV has one line per event: kind ('V' = emulated vertical blank,
-'P' = image presented) and the time in milliseconds.
+'P' = image presented; 'R' = GS thread has an image ready) and the
+time in milliseconds.
 
 Usage: python -B tools/frametimes.py <frametimes.csv> [--from <ms>] [--to <ms>] [--label <text>]
 
@@ -57,7 +58,10 @@ def main():
             kind, ms = line.strip().split(",")
             t = float(ms)
             if a.t0 <= t <= a.t1:
-                (v if kind == "V" else p).append(t)
+                if kind == "V":
+                    v.append(t)
+                elif kind == "P":  # R: GS-thread mark, not a presentation
+                    p.append(t)
     span = f"{a.t0 / 1000:.0f}-{(a.t1 if a.t1 != float('inf') else (v[-1] if v else 0)) / 1000:.0f} s"
     print(f"{a.label or a.csv} [{span}]")
     stats(v, "vblank")

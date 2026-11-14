@@ -3,7 +3,13 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-14 — **ADR 0010 (VU1 on its own thread): measured and deferred to R2.** Inside the
+**Last update:** 2026-11-14 — **race timing fixed.** The extra 50 ms image intervals with translated code were not
+the game: it flips every 2 refreshes in both builds (690/690, `--trace-gs`). The launcher showed each image at the
+first half-period point after it was ready; the faster translated build made images ready right at that point, so
+they alternated 17/50 ms. Images are now shown a measured, adaptive time after their own refresh: race intervals
+688/688 exactly 2 refreshes on the normal launcher, mean display latency 6.4 ms (`docs/recomp-analysis.md` §16).
+Next: R2 (own runtime), or what the owner finds when playing.
+Previous: **ADR 0010 (VU1 on its own thread): measured and deferred to R2.** Inside the
 reference core a VU1 thread has nothing to overlap (its VIF starts a program at the next waiting command and stalls
 until it ends; stalled VIF1 is retried once per scheduler turn, ~1,024 turns per refresh vs 1,700-3,400 programs) and
 its GS buffer is not thread-safe; the game's own stream is double-buffered, so the own runtime (R2) can use it. New
@@ -72,7 +78,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1b-3b VU1 microcode translated** | **done** | this commit; `recomp/src/vulift.cpp`, shared vector code in `recomp/src/lift_internal.h`, operand tables in `hp2/vu.h`, `hp2recomp vu1-lift`, launcher `--vu1 check\|run`, `test_vulift` (7 tests); `docs/recomp-analysis.md` §13. **Not verified:** other tracks, cars and game modes than the scripted session (other microcode entries are translated on first use; a refused one runs on the reference core). |
 | **R1c code built once** | **done** | this commit; [ADR 0009](adr/0009-code-package.md); `recomp/src/package.cpp`, `codegen.cpp` (parallel compilation), `hp2/code_package.h`; converter stage "code" (`converter/code/`); launcher `engine/src/translated.cpp`, `--reference`; LLD added to `tools/fetch-llvm.ps1` / `build-llvm.ps1`; `docs/recomp-analysis.md` §14. **Not verified:** other PCs/CPUs, antivirus reaction to a locally made DLL, GUI run by a person. |
 | **VU1 thread study** | **done** | this commit; [ADR 0010](adr/0010-vu1-thread.md): deferred to R2 with measurements (`docs/recomp-analysis.md` §15) |
-| **R1 rest** | **next** | race timing: more 3-refresh frames with translated code (§14, open); branch in a delay slot; then R2 (own runtime, with VU1 on its own thread per ADR 0010) |
+| **Race timing (R1c open point)** | **done** | this commit; presentation tied to each image's own refresh with adaptive latency (`FramePacer`); launcher `--trace-gs`, `--code`, `--frametimes` mark 'R'; `docs/recomp-analysis.md` §16. **Not verified:** played by a person; other PCs and monitors. |
+| **R1 rest** | **next** | owner's play-test of the converter-made build; branch in a delay slot; then R2 (own runtime, with VU1 on its own thread per ADR 0010) |
 
 ## Decisions (ADRs)
 

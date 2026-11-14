@@ -36,6 +36,8 @@
 //                         compare them with the reference core while the game runs (builds with LLVM only)
 //   --run-translated <list>  with --trace: translate the listed game functions and run them instead of the
 //                         reference core (builds with LLVM only)
+//   --trace-gs            with --trace: GS privileged register writes per refresh (gs-priv.tsv)
+//   --code <dll>          with --trace: run on this code package (measuring the converter's output)
 //   --trace-vif <a>-<b>   with --trace: record the VIF1 command stream of frames a..b-1 (vif1-stream.bin)
 //   --vu1 check|run       with --trace: translate the VU1 microcode (ADR 0008) and compare every translated
 //                         run with the reference core (check), or run it translated (run) (builds with LLVM only)
@@ -45,6 +47,8 @@
 #include <shellapi.h>
 #include <xinput.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -167,25 +171,54 @@ namespace
 				deadline = now;
 				m_anchor.store(now);
 			}
+			// The refresh whose frame end this is: the GS thread shows that refresh's image
+			// relative to this instant (WaitPresent).
+			const uint32_t refresh = ++m_vmRefresh;
+			m_refreshEnd[refresh % kRefreshRing].store(deadline);
 			WaitUntil(deadline, timer);
 			m_nextFrameEnd = deadline + m_period;
 		}
-		// GS thread, immediately before the buffer swap: hold the image until the
-		// next presentation point, so presentations are exactly one (or two, ...)
-		// periods apart. Presentation points sit half a period after the frame-end
-		// grid: the game does a 30 fps frame's work inside one refresh, and that
-		// busy refresh sometimes takes a few ms more than 1/60 s to emulate. With
-		// the half-period slack such a frame is still shown on time instead of a
-		// whole refresh late (measured: 50 ms + 17 ms pairs). Cost: up to 8 ms of
-		// added display latency.
+
+		// GS thread, once per emulated refresh, in order (the GS handler's own
+		// new-frame signal, which comes before that refresh's flip).
+		void GsRefresh()
+		{
+			++m_gsRefresh;
+		}
+		// GS thread, immediately before the buffer swap. A refresh's image is shown a
+		// fixed time L after that refresh's frame end, so the game's own cadence
+		// (an image every refresh, or every second refresh in races) reaches the
+		// screen unchanged. L follows how late images actually become ready: it
+		// grows at once when an image would miss its instant and shrinks slowly
+		// (0.05 ms per image) when the last 240 images were all ready earlier.
+		// Before (2026-11-14) images were shown at the first half-period point
+		// after they were ready; when "ready" fell near that point, images went
+		// out one refresh apart, then three (measured: docs/recomp-analysis.md §16).
 		void WaitPresent()
 		{
 			if(!m_enabled) return;
 			static thread_local HANDLE timer = CreateTimer();
-			const int64_t first = m_anchor.load() + m_period / 2;
+			const uint32_t refresh = m_gsRefresh.load();
+			const int64_t frameEnd = m_refreshEnd[refresh % kRefreshRing].load();
 			const int64_t now = Now();
-			const int64_t periods = now <= first ? 0 : (now - first + m_period - 1) / m_period;
-			WaitUntil(first + periods * m_period, timer);
+			if(refresh == 0 || frameEnd == 0 || m_vmRefresh.load() - refresh >= kRefreshRing) return;  // unknown: show now
+			const int64_t ready = now - frameEnd;
+			m_readyHistory[m_readyCount++ % kHistory] = ready;
+			int64_t worst = 0;
+			for(int64_t r : m_readyHistory) worst = (std::max)(worst, r);
+			const int64_t wanted = (std::clamp<int64_t>)(worst + m_ticksPerSecond / 1000, m_ticksPerSecond / 500, m_period);
+			if(wanted > m_latency)
+				m_latency = wanted;
+			else
+				m_latency = (std::max)(wanted, m_latency - m_ticksPerSecond / 20000);
+			m_latencySum += m_latency;
+			++m_latencySamples;
+			WaitUntil(frameEnd + m_latency, timer);
+		}
+
+		double MeanLatencyMs() const
+		{
+			return m_latencySamples ? m_latencySum * 1000.0 / m_ticksPerSecond / m_latencySamples : 0.0;
 		}
 
 	private:
@@ -219,7 +252,16 @@ namespace
 		int64_t m_ticksPerSecond = 1;
 		int64_t m_period = 1;
 		int64_t m_nextFrameEnd = 0;       // VM thread only
-		std::atomic<int64_t> m_anchor{0};  // origin of the grid, shared with the GS thread
+		std::atomic<int64_t> m_anchor{0};  // origin of the grid
+		// Frame-end instant of each recent refresh, written by the VM thread, read by the GS thread.
+		static constexpr uint32_t kRefreshRing = 256;
+		std::array<std::atomic<int64_t>, kRefreshRing> m_refreshEnd{};
+		std::atomic<uint32_t> m_vmRefresh{0}, m_gsRefresh{0};
+		// GS thread only: presentation latency and how late the recent images were ready.
+		static constexpr size_t kHistory = 240;
+		std::array<int64_t, kHistory> m_readyHistory{};
+		size_t m_readyCount = 0;
+		int64_t m_latency = 0, m_latencySum = 0, m_latencySamples = 0;
 	};
 	FramePacer g_pacer;
 
@@ -361,10 +403,13 @@ namespace
 		}
 
 	protected:
+		// --frametimes also records, on this (GS) thread, when an image is ready to be
+		// shown ('R'), to tell late drawing from late presentation.
 		void PresentBackbuffer() override
 		{
 			if(m_shotRequested.exchange(false)) SaveBackbuffer();
 			hp2ref::TracePresent();
+			g_frameTimes.Mark('R');
 			g_pacer.WaitPresent();
 			SwapBuffers(m_dc);
 			g_frameTimes.Mark('P');
@@ -511,6 +556,8 @@ namespace
 		fs::path runTranslated;    // with --trace: list of functions to translate and run instead of the core
 		int vu1 = 0;               // with --trace: VU1 microcode translated, 1 = compared, 2 = run
 		uint32_t vifFrom = 0, vifTo = 0;  // with --trace: frames whose VIF1 command stream is recorded
+		bool traceGs = false;             // with --trace: GS privileged register writes per refresh
+		fs::path code;                    // with --trace: a code package to run on (build/hp2code.dll)
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -592,6 +639,8 @@ namespace
 			else if(a == L"--trace-counts") options.traceCounts = true;
 			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
 			else if(a == L"--run-translated" && hasValue) options.runTranslated = argv[++i];
+			else if(a == L"--trace-gs") options.traceGs = true;
+			else if(a == L"--code" && hasValue) options.code = argv[++i];
 			else if(a == L"--trace-vif" && hasValue)
 			{
 				if(swscanf_s(argv[++i], L"%u-%u", &options.vifFrom, &options.vifTo) != 2) ok = false;
@@ -836,6 +885,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		Log("step: sound and pad handlers created");
 		g_vm->CreateGSHandler(CGSH_OpenGL_Hp2::GetFactoryFunction(window));
 		Log("step: GS handler created");
+		auto gsRefreshConnection = g_vm->m_ee->m_gs->OnNewFrame.Connect([](uint32) { g_pacer.GsRefresh(); });
 		UpdatePresentation(window);
 		auto frameConnection = g_vm->OnNewFrame.Connect([]() {
 			hp2ref::TraceVmFrameWorkDone(g_vmFrames.load());
@@ -851,9 +901,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			const bool run = !options.runTranslated.empty();
 			const std::string traceError =
 			    hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, run ? options.runTranslated : options.liftCheck,
-			                         options.rom / L"SLUS_203.62", run, options.vu1, options.vifFrom, options.vifTo);
+			                         options.rom / L"SLUS_203.62", run, options.vu1, options.vifFrom, options.vifTo,
+			                         options.traceGs);
 			if(!traceError.empty()) throw std::runtime_error("--trace: " + traceError);
 			Log("step: reference tracing installed");
+			// Measuring on a code package: its executors replace the tracing ones (block lists are then not recorded).
+			if(!options.code.empty())
+				Log("%s", hp2rt::InstallTranslatedCode(*g_vm, options.code, options.rom / L"SLUS_203.62").c_str());
 		}
 		else if(!options.reference)
 		{
@@ -945,6 +999,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
 		g_vm->Pause();
 		frameConnection.reset();
+		gsRefreshConnection.reset();
+		if(g_pacer.Enabled()) Log("presentation: images shown %.1f ms after their refresh on average", g_pacer.MeanLatencyMs());
 		g_frameTimes.Save(options.frameTimes);
 		if(const std::string report = hp2rt::TranslatedCodeReport(); !report.empty()) Log("%s", report.c_str());
 		hp2ref::TraceFinish(*g_vm);

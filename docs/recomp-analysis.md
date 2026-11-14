@@ -432,6 +432,41 @@ Conclusion: inside the reference core a VU1 thread has no overlap to exploit and
 scheduler turn (fewer turns than programs per refresh); it belongs to the own runtime's VIF1/GIF (R2), where programs
 start at `MSCAL` and the game's double buffering can be used. Not built.
 
+## 16. The race-timing question of §14, answered and fixed (2026-11-14)
+
+**Not the translated code.** With the launcher's new `--trace-gs` (every EE write to the GS privileged registers,
+by emulated refresh) the game changes its display buffer (DISPFB1) **exactly every 2 refreshes in the race, 690 of
+690 times, both on the reference core (`r1e-ref`) and on the code package (`r1e-dll`)**: in emulated time the two
+runs are the same.
+
+**The presentation step.** The launcher showed each image at the first half-period point after it was ready
+(P6/R1a design). A new `--frametimes` mark ('R': image ready on the GS thread) shows when that is, relative to the
+end of its refresh:
+
+| Race, 690 images | Ready after the refresh end | Ready after the half-period point | Image intervals (refreshes) |
+|---|---|---|---|
+| Reference core (`r1e-ref2`) | 9-14 ms | 658 | 2: 665, 1: 9, 3: 9 (+5 real VM hitches) |
+| Code package (`r1e-dll2`) | **5-11 ms**: around the point | 345 | 2: 650, **1: 20, 3: 19** |
+
+The translated build is faster, so images became ready right around the presentation point and went out one
+refresh apart, then three: the 17/50 ms pairs. The reference core was consistently late, so its cadence was even
+(at a higher latency).
+
+**Fix** (`engine/src/main.cpp`, `FramePacer`): each refresh's image is shown a time L after that refresh's frame end
+(the VM thread records each refresh's instant; the GS thread counts refreshes through the GS handler's own per-refresh
+signal, which precedes the flip), so the game's cadence reaches the screen unchanged. L follows how late images are
+ready - up at once when one would miss, down by 0.05 ms per image when the last 240 were all earlier - and is capped
+at one refresh (the core keeps at most 2 frames in flight).
+
+| Race, same session | Image intervals | Mean display latency |
+|---|---|---|
+| Code package, measurement build (`r1e-dll3`) | **2 refreshes: 688 of 688** | 6.3 ms |
+| Code package, normal launcher (`r1e-rel`) | **2 refreshes: 688 of 688** | 6.4 ms |
+| Reference core (`r1e-ref3`) | 2: 684 (+5 real VM hitches) | 7.8 ms |
+
+The 3-refresh intervals left in a whole session (76) are in refreshes 1000-2100 and match the game's own buffer
+changes there (79 three-refresh changes in the same range: those screens run at 20 images per second).
+
 ## 8. Reproduce
 
 ```powershell
@@ -467,6 +502,8 @@ python -B tools/frametimes.py .cache\r1c-run\frametimes.csv
 # VIF1 stream (section 15)
 & .\tools\run-launcher.ps1 -RunName r1d-vif -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 3700 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--trace-vif', '3300-3600') -Script "<as above>"
 python -B tools/recon/vifstream.py .cache\r1d-vif\trace\vif1-stream.bin
+# race timing (section 16): game flips by emulated refresh, measured on the code package
+& .\tools\run-launcher.ps1 -RunName r1e-dll -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 4600 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--trace-gs', '--code', '.cache\r1c-game\build\hp2code.dll') -Script "<as above>"
 ```
 (`-Extra` with two values must be passed from inside PowerShell, as shown; through `pwsh -File` the list arrives as one argument.)
 
