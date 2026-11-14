@@ -413,6 +413,25 @@ themselves are on time here, so host speed alone does not explain it. Suspects: 
 the cycles it spends (only backward branches consume the time slice), or the hand-off between the VM thread and the
 graphics thread. To investigate next; it matters for "works well".
 
+## 15. VU1 on its own thread? (2026-11-14)
+
+Measured before building it ([ADR 0010](adr/0010-vu1-thread.md)):
+
+- **Hand-off cost** (two spinning threads on this PC, double-buffered): serial 1,105 ns per item (350 ns VIF-like +
+  650 ns VU-like work), pipelined 710 ns (64 %), strict wait-for-each 1,258 ns (114 %). Other sizes: 64-73 % and
+  103-111 %.
+- **The game's VIF1 stream** (`--trace-vif 3300-3600`, `tools/recon/vifstream.py`, 150 race frames, 575 MB): per
+  frame about 3,400 `MSCAL`, 10,900 `UNPACK` (947 KB), 1,700 `ITOP`, 1,270 `DIRECT`, 550 `FLUSHA`; 87 % of the unpacked
+  data comes between a program start and the next command that must wait for it, 97.5 % of that into the double
+  buffer; the window is ended by the next `MSCAL` (436,458 times), `FLUSHA` (70,938) or `DIRECT` (3,853).
+- **The reference core** starts a program only at the next resuming command (not at `MSCAL`), then stalls VIF1 until
+  the VU is ready; a stalled VIF1 is retried once per scheduler turn (every 4,800 EE cycles, about 1,024 per
+  refresh). The GS register buffer is shared and not thread-safe.
+
+Conclusion: inside the reference core a VU1 thread has no overlap to exploit and would cap VIF1 at one program per
+scheduler turn (fewer turns than programs per refresh); it belongs to the own runtime's VIF1/GIF (R2), where programs
+start at `MSCAL` and the game's double buffering can be used. Not built.
+
 ## 8. Reproduce
 
 ```powershell
@@ -445,6 +464,9 @@ pwsh tools/build.ps1 -Preset release
 .cache\build\release\converter\hp2pc-cli.exe convert --rom "ROM\Need for Speed - Hot Pursuit 2 (USA)" --install-dir .cache\r1c-game --rom-storage reference --no-assets
 .cache\r1c-game\build\HotPursuit2.exe --frames 4600 --mute --size 1280x896 --res 2 --frametimes .cache\r1c-run\frametimes.csv --script "<as above>"   # add --reference for the baseline
 python -B tools/frametimes.py .cache\r1c-run\frametimes.csv
+# VIF1 stream (section 15)
+& .\tools\run-launcher.ps1 -RunName r1d-vif -Preset profile -Rom ".cache\m1-run\game\rom" -Frames 3700 -Mute -Size 1280x896 -Res 2 -Trace -Extra @('--trace-vif', '3300-3600') -Script "<as above>"
+python -B tools/recon/vifstream.py .cache\r1d-vif\trace\vif1-stream.bin
 ```
 (`-Extra` with two values must be passed from inside PowerShell, as shown; through `pwsh -File` the list arrives as one argument.)
 

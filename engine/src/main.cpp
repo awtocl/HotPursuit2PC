@@ -36,6 +36,7 @@
 //                         compare them with the reference core while the game runs (builds with LLVM only)
 //   --run-translated <list>  with --trace: translate the listed game functions and run them instead of the
 //                         reference core (builds with LLVM only)
+//   --trace-vif <a>-<b>   with --trace: record the VIF1 command stream of frames a..b-1 (vif1-stream.bin)
 //   --vu1 check|run       with --trace: translate the VU1 microcode (ADR 0008) and compare every translated
 //                         run with the reference core (check), or run it translated (run) (builds with LLVM only)
 #include <windows.h>
@@ -509,6 +510,7 @@ namespace
 		fs::path liftCheck;        // with --trace: list of functions to translate and compare (lift_check.h)
 		fs::path runTranslated;    // with --trace: list of functions to translate and run instead of the core
 		int vu1 = 0;               // with --trace: VU1 microcode translated, 1 = compared, 2 = run
+		uint32_t vifFrom = 0, vifTo = 0;  // with --trace: frames whose VIF1 command stream is recorded
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -590,6 +592,10 @@ namespace
 			else if(a == L"--trace-counts") options.traceCounts = true;
 			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
 			else if(a == L"--run-translated" && hasValue) options.runTranslated = argv[++i];
+			else if(a == L"--trace-vif" && hasValue)
+			{
+				if(swscanf_s(argv[++i], L"%u-%u", &options.vifFrom, &options.vifTo) != 2) ok = false;
+			}
 			else if(a == L"--vu1" && hasValue)
 			{
 				const std::wstring mode = argv[++i];
@@ -845,7 +851,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			const bool run = !options.runTranslated.empty();
 			const std::string traceError =
 			    hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, run ? options.runTranslated : options.liftCheck,
-			                         options.rom / L"SLUS_203.62", run, options.vu1);
+			                         options.rom / L"SLUS_203.62", run, options.vu1, options.vifFrom, options.vifTo);
 			if(!traceError.empty()) throw std::runtime_error("--trace: " + traceError);
 			Log("step: reference tracing installed");
 		}

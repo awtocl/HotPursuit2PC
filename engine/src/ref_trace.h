@@ -25,9 +25,10 @@ namespace hp2ref
 	// runTranslated: run the listed functions translated instead of comparing them.
 	// vu1Mode: 0, or translate the VU1 microcode of `elf` (ADR 0008) and 1 = compare every translated
 	// time slice with the reference core, 2 = run it translated.
+	// vifFrom/vifTo: record the VIF1 command stream of those frames (vif1-stream.bin).
 	std::string TraceInstall(CPS2VM& vm, const std::filesystem::path& dir, bool countBlocks,
 	                         const std::filesystem::path& liftList, const std::filesystem::path& elf,
-	                         bool runTranslated, int vu1Mode);
+	                         bool runTranslated, int vu1Mode, uint32_t vifFrom = 0, uint32_t vifTo = 0);
 	bool TraceEnabled();
 
 	// VM thread, in the new-frame handler: before and after the pacing wait.

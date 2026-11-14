@@ -18,6 +18,7 @@
 #include "ee/EeBasicBlock.h"
 #include "ee/EeExecutor.h"
 #include "ee/MA_VU.h"
+#include "ee/Vif.h"
 #include "ee/Vpu.h"
 #include "MemoryUtils.h"
 #include "ee/VuBasicBlock.h"
@@ -768,6 +769,32 @@ namespace hp2ref
 			}
 		};
 
+		// ---- VIF1 command stream (--trace-vif <from>-<to>): what the game sends to VU1 ----
+		// Every DMA transfer the VIF1 consumes during the frame window is written to
+		// vif1-stream.bin: a header {frame, consumed bytes, tag included, source address}
+		// followed by the consumed bytes. tools/recon/vifstream.py parses it.
+		FILE* g_vifFile = nullptr;
+		uint32_t g_vifFrom = 0, g_vifTo = 0;
+		CVif* g_vif1 = nullptr;
+		uint8_t* g_vifRam = nullptr;
+		uint8_t* g_vifSpr = nullptr;
+
+		uint32 TraceVifDma(uint32 address, uint32 qwc, uint32 unused, bool tagIncluded)
+		{
+			const uint32 consumed = g_vif1->ReceiveDMA(address, qwc, unused, tagIncluded);
+			const uint32_t frame = g_frame.load(std::memory_order_relaxed);
+			if(g_vifFile && consumed != 0 && frame >= g_vifFrom && frame < g_vifTo)
+			{
+				const uint32_t header[4] = {frame, consumed * 16, tagIncluded ? 1u : 0u, address};
+				fwrite(header, sizeof header, 1, g_vifFile);
+				const bool spr = (address & 0x80000000) != 0;
+				const uint8_t* source = spr ? g_vifSpr : g_vifRam;
+				const uint32_t mask = spr ? (PS2::EE_SPR_SIZE - 1) : (PS2::EE_RAM_SIZE - 1);
+				for(uint32_t i = 0; i < consumed * 16; i += 16) fwrite(source + ((address + i) & mask), 16, 1, g_vifFile);
+			}
+			return consumed;
+		}
+
 		// ---- time per emulated refresh ------------------------------------------------------
 		struct FrameSample
 		{
@@ -850,7 +877,7 @@ namespace hp2ref
 	}
 
 	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
-	                         const fs::path& elf, bool runTranslated, int vu1Mode)
+	                         const fs::path& elf, bool runTranslated, int vu1Mode, uint32_t vifFrom, uint32_t vifTo)
 	{
 		std::error_code ec;
 		fs::create_directories(dir, ec);
@@ -936,6 +963,18 @@ namespace hp2ref
 					return original(address, value);
 				};
 			}
+		}
+
+		if(vifTo > vifFrom)
+		{
+			g_vifFile = _wfopen((dir / L"vif1-stream.bin").c_str(), L"wb");
+			if(!g_vifFile) return "cannot create vif1-stream.bin";
+			g_vifFrom = vifFrom;
+			g_vifTo = vifTo;
+			g_vif1 = &vm.m_ee->m_vpu1->GetVif();
+			g_vifRam = vm.m_ee->m_ram;
+			g_vifSpr = vm.m_ee->m_spr;
+			vm.m_ee->m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_VIF1, &TraceVifDma);
 		}
 
 		g_startQpc = Qpc();
@@ -1122,6 +1161,11 @@ namespace hp2ref
 			}
 		}
 
+		if(g_vifFile)
+		{
+			fclose(g_vifFile);
+			g_vifFile = nullptr;
+		}
 		SaveBytes(g_dir / L"vu1-micro.bin", vm.m_ee->m_microMem1, PS2::MICROMEM1SIZE);
 		SaveBytes(g_dir / L"ee-ram.bin", vm.m_ee->m_ram, PS2::EE_RAM_SIZE);
 		SaveBytes(g_dir / L"ee-bios.bin", vm.m_ee->m_bios, PS2::EE_BIOS_SIZE);
