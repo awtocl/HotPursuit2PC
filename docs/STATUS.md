@@ -3,7 +3,10 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-13 — phase **R1b-1 (game running on translated code)**: 3,692 functions (99.8 % of executed
+**Last update:** 2026-11-13 — phase **R1b-2 (VU0 macro mode translated)**: 0 differences in 1,530 compared calls
+including the VU0 state; in the same race, refreshes over 16.7 ms 138 → 17, worst 46 → 28 ms, game program
+3.6 ms per busy refresh (reference core 6.1). Next: VU1 microprograms.
+Previous: phase **R1b-1 (game running on translated code)**: 3,692 functions (99.8 % of executed
 game instructions) translated; the scripted session runs on them; 0 differences in 1,156 compared calls; menu
 game-program time 14.3 → 5.6 ms per busy refresh, reference-core compilation 29,935 → 6,649 blocks. Next: VU0
 macro mode, then VU1 microprograms, then the converter stage that compiles once and stores the code.
@@ -45,7 +48,8 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1a recompiler analysis** | **done** | this commit; `recomp/` (ELF reader, R5900 decoder, function discovery, `hp2recomp.exe`); launcher `--trace` + `profile` build preset + `tools/profile.py`, `tools/recon/vucheck.py`; `docs/recomp-analysis.md`: 431,681 words all decode, 10,146 functions, 193 switches, **0 of 29,860 executed blocks start anywhere unpredicted**, code not modified at run time, all executed VU1 microcode is in `.vutext`; time shares of a busy race refresh measured; **pacer defect in 60 fps content found and fixed** (evidence §4b); ADR 0007 proposed; 12 CTest tests pass in dev and release. |
 | **R1b-spike translator spike** | **done** | this commit; LLVM 23.1.5 fetched (pinned SHA-256) and built in `.cache`; `recomp/src/lift.cpp` (leaf functions → LLVM → x64); `--trace-counts` fixed (epilogue), `hp2recomp hot` / `lift`; launcher `--lift-check` (profile build); 97 of the 400 hottest functions translated in 0.57 s; 81 compared on 1,864 calls: **0 differences**; **4.1x** faster; 16 trapped on the scratchpad; ADR 0007 accepted; 14 CTest tests pass in dev and release. The VU1 microprogram part of the spike was not done (next). |
 | **R1b-1 calls, hand-over, re-entry, run mode** | **done** | this commit; whole functions with calls, hand-over to the reference core at any uncovered instruction, re-entry at 38,624 places, scratchpad and hardware slow path, time slice and waiting loops; launcher `--run-translated`; `docs/recomp-analysis.md` §10 |
-| **R1b translator (rest)** | **next** | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
+| **R1b-2 VU0 macro mode** | **done** | this commit; VU0 vector, integer, Q and control-register instructions with the reference core's clamping, special cases and flag pipelines; flag writes buffered per straight run; `docs/recomp-analysis.md` §11 |
+| **R1b translator (rest)** | **next** | VU1 microprograms; branch in a delay slot; converter stage that compiles once and stores the code | calls between translated functions, scratchpad, VU0 macro mode, remaining instructions; VU1 microprograms; then whole-program translation as a converter stage, lock-step against the reference |
 
 ## Decisions (ADRs)
 

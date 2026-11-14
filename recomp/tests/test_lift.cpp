@@ -85,9 +85,18 @@ std::vector<std::uint32_t> program() {
       /* 10008C */ 0x0C000000u | (kLoad >> 2), nop, jr(ra), nop,
       // a function that starts with a system call: nothing to translate
       /* 10009C */ 0x0000000Cu, jr(ra), nop,
+      // kVu: VU0 macro mode. vf3 = vf1 * vf2; clip vf3.xyz against |vf2.w|; v0 = clip flags; v1 = MAC flags
+      /* 1000A8 */ 0xD8000000u | (a0 << 21) | (1 << 16),                                   // lqc2 vf1, 0(a0)
+      /* 1000AC */ 0xD8000000u | (a0 << 21) | (2 << 16) | 16,                              // lqc2 vf2, 16(a0)
+      /* 1000B0 */ 0x4A000000u | (0xFu << 21) | (2 << 16) | (1 << 11) | (3 << 6) | 0x2A,  // vmul.xyzw vf3, vf1, vf2
+      /* 1000B4 */ 0x4A000000u | (0xEu << 21) | (2 << 16) | (3 << 11) | (7 << 6) | 0x3F,  // vclip.xyz vf3, vf2.w
+      /* 1000B8 */ 0x48400000u | (v0 << 16) | (18 << 11),                                  // cfc2 v0, vi18 (clip)
+      /* 1000BC */ 0x48400000u | (v1 << 16) | (17 << 11),                                  // cfc2 v1, vi17 (MAC)
+      /* 1000C0 */ 0xF8000000u | (a0 << 21) | (3 << 16) | 32,                              // sqc2 vf3, 32(a0)
+      /* 1000C4 */ jr(ra), nop,
   };
 }
-constexpr std::uint32_t kCaller = 0x10006C, kSys = 0x10009C;
+constexpr std::uint32_t kCaller = 0x10006C, kSys = 0x10009C, kVu = 0x1000A8;
 
 void put16(Bytes& b, std::size_t off, std::uint16_t v) {
   b[off] = static_cast<std::uint8_t>(v);
@@ -132,6 +141,14 @@ struct State {
   std::uint64_t vf[32][2];
   std::int32_t quota;
   std::uint32_t exception;
+  float vacc[4];
+  std::uint32_t vi[16];
+  std::uint32_t q, i, r, cf, mf, df, t;
+  struct Pipe {
+    std::uint32_t index, values[8], times[8];
+  } mac, sticky, clip;
+  std::uint32_t pipe_time;
+  std::uint32_t q_counter, q_held;
 };
 
 StateLayout layout() {
@@ -149,6 +166,20 @@ StateLayout layout() {
   l.vf = offsetof(State, vf);
   l.cycle_quota = offsetof(State, quota);
   l.has_exception = offsetof(State, exception);
+  l.vacc = offsetof(State, vacc);
+  l.vi = offsetof(State, vi);
+  l.vq = offsetof(State, q);
+  l.vi_i = offsetof(State, i);
+  l.vr = offsetof(State, r);
+  l.vcf = offsetof(State, cf);
+  l.vmf = offsetof(State, mf);
+  l.vdf = offsetof(State, df);
+  l.vt = offsetof(State, t);
+  l.pipe_mac = offsetof(State, mac);
+  l.pipe_sticky = offsetof(State, sticky);
+  l.pipe_clip = offsetof(State, clip);
+  l.pipe_time = offsetof(State, pipe_time);
+  l.pipe_q = offsetof(State, q_counter);
   return l;
 }
 
@@ -183,7 +214,7 @@ struct Fixture {
   std::vector<std::uint8_t> spr = std::vector<std::uint8_t>(kScratchpadSize, 0);
   std::optional<std::string> sys_refused;
   Fixture() {
-    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad, kCaller}) {
+    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad, kCaller, kVu}) {
       const auto why = t.add_function(f);
       if (why) std::printf("    could not translate %08X: %s\n", f, why->c_str());
     }
@@ -215,7 +246,7 @@ std::uint32_t bits(float f) {
 
 TEST(lift_all_test_functions) {
   Fixture& f = fixture();
-  CHECK_EQ(f.t.size(), static_cast<std::size_t>(6));
+  CHECK_EQ(f.t.size(), static_cast<std::size_t>(7));
   for (std::uint32_t fn : {kSum, kDiv, kFp, kQuad, kLoad, kCaller}) CHECK(f.t.lookup(fn) != nullptr);
   // A function whose first instruction has to be left to the reference core makes no progress: refused.
   REQUIRE(f.sys_refused.has_value());
@@ -376,6 +407,26 @@ TEST(lift_loops_give_up_their_time_slice) {
     f.t.lookup_entry(s.pc)(reinterpret_cast<std::uint8_t*>(&s), f.ram.data(), f.spr.data(), &kRuntime);
   }
   CHECK_EQ(s.gpr[v0][0], 50ull);
+}
+
+TEST(lift_vu0_macro_mode) {
+  Fixture& f = fixture();
+  const float in[8] = {1, 2, 3, 1, 2, 0.5f, -4, 2};
+  std::memcpy(&f.ram[0x7000], in, sizeof(in));
+  State s{};
+  s.gpr[a0][0] = 0x7000;
+  State r = f.call(kVu, s);
+  CHECK_EQ(r.pc, 0x00100090u);
+  float out[4];
+  std::memcpy(out, &f.ram[0x7020], 16);
+  CHECK_EQ(out[0], 2.0f);
+  CHECK_EQ(out[1], 1.0f);
+  CHECK_EQ(out[2], -12.0f);
+  CHECK_EQ(out[3], 2.0f);
+  CHECK_EQ(r.gpr[v0][0], 0x20ull);  // clip: z below -|w|
+  CHECK_EQ(r.gpr[v1][0], 0x20ull);  // MAC: sign of z
+  CHECK_EQ(r.clip.index, 1u);
+  CHECK_EQ(r.mac.times[0], 4u);  // queued with the latency of 4
 }
 
 TEST(lift_stops_when_a_callee_was_not_translated) {

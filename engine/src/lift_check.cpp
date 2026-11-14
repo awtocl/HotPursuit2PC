@@ -47,6 +47,20 @@ namespace hp2ref
 			l.vf = layout.vf;
 			l.cycle_quota = layout.cycleQuota;
 			l.has_exception = layout.hasException;
+			l.vacc = layout.vacc;
+			l.vi = layout.vi;
+			l.vq = layout.vq;
+			l.vi_i = layout.viI;
+			l.vr = layout.vr;
+			l.vcf = layout.vcf;
+			l.vmf = layout.vmf;
+			l.vdf = layout.vdf;
+			l.vt = layout.vt;
+			l.pipe_mac = layout.pipeMac;
+			l.pipe_sticky = layout.pipeSticky;
+			l.pipe_clip = layout.pipeClip;
+			l.pipe_time = layout.pipeTime;
+			l.pipe_q = layout.pipeQ;
 			g_prepared->translator =
 			    std::make_unique<hp2::Translator>(g_prepared->elf, g_prepared->discovery, l, ramSize);
 

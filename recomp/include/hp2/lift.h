@@ -48,6 +48,14 @@ struct StateLayout {
   std::uint32_t vf = 0;            // VU0 vector registers, 32 x 128 bits
   std::uint32_t cycle_quota = 0;   // int32: decremented by loops; at 0 or below the code stops
   std::uint32_t has_exception = 0; // uint32: non-zero after a hardware access -> stop at the next instruction
+  // VU0 macro mode (the reference core's layout of these is assumed: see lift.cpp)
+  std::uint32_t vacc = 0;          // accumulator, 128 bits
+  std::uint32_t vi = 0;            // 16 integer registers, 32 bits each
+  std::uint32_t vq = 0, vi_i = 0, vr = 0;  // Q, I, R registers (32 bits)
+  std::uint32_t vcf = 0, vmf = 0, vdf = 0, vt = 0;  // clip flags, MAC flags, division flag, temporary
+  std::uint32_t pipe_mac = 0, pipe_sticky = 0, pipe_clip = 0;  // flag pipelines: index, 8 values, 8 times
+  std::uint32_t pipe_time = 0;     // uint32
+  std::uint32_t pipe_q = 0;        // Q pipeline: counter, held value
 };
 
 // Slow path for addresses that are neither main memory nor the scratchpad

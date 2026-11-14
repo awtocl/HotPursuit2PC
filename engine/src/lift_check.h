@@ -16,6 +16,7 @@ namespace hp2ref
 	struct LiftLayout
 	{
 		uint32_t pc, gpr, gprStride, hi, lo, hi1, lo1, fpr, fcsr, fpacc, vf, cycleQuota, hasException;
+		uint32_t vacc, vi, vq, viI, vr, vcf, vmf, vdf, vt, pipeMac, pipeSticky, pipeClip, pipeTime, pipeQ;
 	};
 
 	// Slow path for addresses that are neither main memory nor the scratchpad (same layout as hp2::Runtime).

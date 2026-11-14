@@ -158,6 +158,25 @@ namespace hp2ref
 				for(int w = 0; w < 4; w++)
 					if(ref.nCOP2[r].nV[w] != lifted.nCOP2[r].nV[w])
 						return string_format("vf%d word %d: %08X vs %08X", r, w, ref.nCOP2[r].nV[w], lifted.nCOP2[r].nV[w]);
+			for(int w = 0; w < 4; w++)
+				if(ref.nCOP2A.nV[w] != lifted.nCOP2A.nV[w])
+					return string_format("vu acc word %d: %08X vs %08X", w, ref.nCOP2A.nV[w], lifted.nCOP2A.nV[w]);
+			for(int r = 0; r < 16; r++)
+				if(ref.nCOP2VI[r] != lifted.nCOP2VI[r]) return string_format("vi%d: %08X vs %08X", r, ref.nCOP2VI[r], lifted.nCOP2VI[r]);
+			if(ref.nCOP2Q != lifted.nCOP2Q) return string_format("Q: %08X vs %08X", ref.nCOP2Q, lifted.nCOP2Q);
+			if(ref.nCOP2I != lifted.nCOP2I) return string_format("I: %08X vs %08X", ref.nCOP2I, lifted.nCOP2I);
+			if(ref.nCOP2CF != lifted.nCOP2CF) return string_format("clip flags: %08X vs %08X", ref.nCOP2CF, lifted.nCOP2CF);
+			if(ref.nCOP2MF != lifted.nCOP2MF) return string_format("MAC flags: %08X vs %08X", ref.nCOP2MF, lifted.nCOP2MF);
+			if(ref.nCOP2DF != lifted.nCOP2DF) return string_format("division flag: %08X vs %08X", ref.nCOP2DF, lifted.nCOP2DF);
+			if(ref.pipeQ.counter != lifted.pipeQ.counter || ref.pipeQ.heldValue != lifted.pipeQ.heldValue)
+				return string_format("Q pipeline: %08X/%08X vs %08X/%08X", ref.pipeQ.counter, ref.pipeQ.heldValue,
+				                     lifted.pipeQ.counter, lifted.pipeQ.heldValue);
+			const FLAG_PIPELINE* pipes[3][2] = {{&ref.pipeMac, &lifted.pipeMac}, {&ref.pipeSticky, &lifted.pipeSticky},
+			                                    {&ref.pipeClip, &lifted.pipeClip}};
+			const char* names[3] = {"MAC", "sticky", "clip"};
+			for(int p = 0; p < 3; p++)
+				if(memcmp(pipes[p][0], pipes[p][1], sizeof(FLAG_PIPELINE)) != 0)
+					return string_format("%s flag pipeline differs (index %u vs %u)", names[p], pipes[p][0]->index, pipes[p][1]->index);
 			return {};
 		}
 
@@ -505,6 +524,24 @@ namespace hp2ref
 			layout.vf = offsetof(MIPSSTATE, nCOP2);
 			layout.cycleQuota = offsetof(MIPSSTATE, cycleQuota);
 			layout.hasException = offsetof(MIPSSTATE, nHasException);
+			layout.vacc = offsetof(MIPSSTATE, nCOP2A);
+			layout.vi = offsetof(MIPSSTATE, nCOP2VI);
+			layout.vq = offsetof(MIPSSTATE, nCOP2Q);
+			layout.viI = offsetof(MIPSSTATE, nCOP2I);
+			layout.vr = offsetof(MIPSSTATE, nCOP2R);
+			layout.vcf = offsetof(MIPSSTATE, nCOP2CF);
+			layout.vmf = offsetof(MIPSSTATE, nCOP2MF);
+			layout.vdf = offsetof(MIPSSTATE, nCOP2DF);
+			layout.vt = offsetof(MIPSSTATE, nCOP2T);
+			layout.pipeMac = offsetof(MIPSSTATE, pipeMac);
+			layout.pipeSticky = offsetof(MIPSSTATE, pipeSticky);
+			layout.pipeClip = offsetof(MIPSSTATE, pipeClip);
+			layout.pipeTime = offsetof(MIPSSTATE, pipeTime);
+			layout.pipeQ = offsetof(MIPSSTATE, pipeQ);
+			static_assert(offsetof(FLAG_PIPELINE, index) == 0 && offsetof(FLAG_PIPELINE, values) == 4 &&
+			              offsetof(FLAG_PIPELINE, pipeTimes) == 36, "flag pipeline layout assumed by the translator");
+			static_assert(offsetof(REGISTER_PIPELINE, counter) == 0 && offsetof(REGISTER_PIPELINE, heldValue) == 4,
+			              "register pipeline layout assumed by the translator");
 			std::string error, report;
 			if(!LiftCheckPrepare(elf, liftList, layout, kRamSize, error, report)) return error;
 			if(FILE* file = _wfopen((dir / L"translation.txt").c_str(), L"w"))

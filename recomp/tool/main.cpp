@@ -579,6 +579,20 @@ int cmd_lift(const fs::path& elf_path, const fs::path& trace_dir, std::size_t to
   layout.vf = layout.lo1 + 8;
   layout.cycle_quota = layout.vf + 32 * 16;
   layout.has_exception = layout.cycle_quota + 4;
+  layout.vacc = layout.has_exception + 4;
+  layout.vi = layout.vacc + 16;
+  layout.vq = layout.vi + 64;
+  layout.vi_i = layout.vq + 4;
+  layout.vr = layout.vi_i + 4;
+  layout.vcf = layout.vr + 4;
+  layout.vmf = layout.vcf + 4;
+  layout.vdf = layout.vmf + 4;
+  layout.vt = layout.vdf + 4;
+  layout.pipe_mac = layout.vt + 4;
+  layout.pipe_sticky = layout.pipe_mac + 68;
+  layout.pipe_clip = layout.pipe_sticky + 68;
+  layout.pipe_time = layout.pipe_clip + 68;
+  layout.pipe_q = layout.pipe_time + 4;
   Translator t(elf, d, layout, 0x04000000);
   std::map<std::string, std::pair<std::size_t, std::uint64_t>> reasons;  // kind -> functions, instructions
   std::uint64_t lifted_share = 0;

@@ -258,6 +258,54 @@ function, 7 % of executed instructions, is VU0 geometry) and then VU1.
 show (the comparison mode covers calls that return; run mode adds hand-over, re-entry and real hardware access,
 which are only exercised, not compared); a same-track race comparison; sound (muted).
 
+## 11. R1b, second stage: VU0 macro mode translated (2026-11-13)
+
+The hottest function of the game (7 % of executed instructions, 7.8 million calls in the session) is geometry on the
+EE's vector unit used directly from the main program ("VU0 macro mode"). The translator now covers it:
+
+- vector arithmetic (`vadd`/`vsub`/`vmul`/`vmadd`/`vmsub` with vector, broadcast, I and Q operands, to a register or
+  to the accumulator), `vmax`/`vmini`, `vopmula`/`vopmsub`, `vclip`, `vmove`, `vmr32`, `vabs`, `vftoi*`/`vitof*`,
+  the integer registers (`viadd`... `vmtir`, `vmfir`), `vdiv`/`vsqrt`/`vrsqrt`/`vwaitq`, `cfc2`/`ctc2` for the
+  registers the game uses (integer registers, MAC, clip, R, I, Q);
+- with the reference core's exact behaviour: which operands are clamped depends on the operation (`vadd` clamps only
+  fs, `vsub` and `vmul` both, `vmadd` fs and a broadcast ft, `vmsub` none, `vaddi` none...), its special cases (a
+  broadcast add of vf0's zero is a move; `vsub` of a register from itself is zero), MAC/sticky/clip flags through
+  the same 8-slot pipelines with latency 4, and Q held until `vwaitq`;
+- translated code tells LLVM that denormals are flushed (as the reference core's thread runs), so that no
+  comparison with zero is folded differently;
+- flags queued during a straight run are kept in host registers and written at its end (only the last 8 of a
+  pipeline can ever be seen): the stored state is identical, with fewer memory writes.
+
+Program-wide, hand-over places dropped from 730 to 355; in the 400 hottest functions from 149 to 76 (none for VU0;
+the largest remaining reason is a branch in a delay slot, 38 places).
+
+**Comparison** (`.cache/r1b-vu0check2`, 400 hottest functions): **0 differences** in 1,530 compared calls of 259
+functions, now including the VU0 state: vector and integer registers, accumulator, Q, I, MAC/clip/division flags,
+the three flag pipelines and the Q pipeline.
+
+**Running the game** (`.cache/r1b-runvu0`). The session picked the same car and track as the previous translated run
+(`r1b-runall3`) and reached the same image at the same instant, so these two are directly comparable:
+
+| Race, same race | Before VU0 (`r1b-runall3`) | With VU0 (`r1b-runvu0`) |
+|---|---|---|
+| Calls into translated code (whole session) | 70.5 million | **20.2 million** (fewer hand-overs and re-entries) |
+| Blocks the reference core compiled | 6,649 | **5,847** |
+| Busy refresh, whole VM thread | 13.21 ms | **11.94 ms** |
+| ... game program (EE) | 4.27 ms | **3.63 ms** |
+| ... VU1 + VIF + GIF | 8.25 ms | 7.64 ms |
+| Refreshes over 16.7 ms | 138 | **17** |
+| p99 / worst refresh | 19.43 / 46.5 ms | **17.02 / 28.4 ms** |
+
+Menus: game program 4.49 ms per busy refresh (reference 14.29 ms), 14 refreshes over 16.7 ms (reference 64), worst
+158 ms (reference 554 ms).
+
+Per function, the VU0 geometry functions gain little by themselves (44 vs 60 ns and 39 vs 40 ns per call): the
+reference core's JIT also uses SIMD there and the flag pipelines cost the same in both. The gain comes from no
+longer handing over to the reference core in the middle of the hottest call chains.
+
+**What is left of the busy race refresh:** VU1 microcode 4.78 ms, VIF + GIF 2.86 ms, game program 3.63 ms. The
+next step is the VU1 microprograms (ADR 0007, R1 scope).
+
 ## 8. Reproduce
 
 ```powershell
