@@ -1,0 +1,80 @@
+# HANDOVER — where development was paused (2026-11-16)
+
+The owner paused development in the middle of the first native-runtime step. Read `docs/STATUS.md` first (project
+state, owner requirements, ADRs), then this file (what was in progress and the exact next actions).
+
+## Owner instructions in force (newest last)
+
+1. Requirements 1-4 in `docs/STATUS.md` (native, full use of the PC; graphics settings inside the game's menus;
+   **no emulator layer whatsoever** in the working recompilation).
+2. 2026-11-16: **"Make first a base executable that runs NATIVELY and with no emulation anywhere, behaving like a PC
+   game. First step is to get it running and we go from there."**
+3. 2026-11-16: **"Post the progress in the GitHub repo as a dev build version with the appropriate numeration."**
+   This supersedes the earlier "publish only when it works well" rule for *dev builds*. **Not done yet** (see below).
+4. 2026-11-16: the GitHub README must state that the game was ported because **the PS2 version is the best version
+   of the game, and this way the best version runs on the best platform** (to be written in good style).
+   **Not done yet.**
+5. 2026-11-16: pause; leave everything ready for another agent.
+
+Working rules: explain every command, never delete project files (archive them instead), repo docs in English, no
+game data in git.
+
+## What is in progress: the native runtime (to become ADR 0012 — not written yet)
+
+`native/` → `HotPursuit2Native.exe`: links **none** of the reference core (only `hp2recomp`: ELF reader, helpers).
+
+- Loads `SLUS_203.62` from the ROM folder into its own 32 MB, loads `hp2code.dll` built for **its own state layout**
+  (`recomp/include/hp2/native_state.h`: `NativeState`, `native_code_layout()`, the hook list `kNativeHooks`).
+- Build the package with `hp2recomp package <elf> <out.dll>` (new command; sets `CodePackageOptions::native` and
+  excludes the hooked functions). Translator additions for native mode (`StateLayout::yield_in_idle_loops`):
+  waiting loops are translated and return to the runtime after each pass; `ei/di/mfc0/mtc0` call runtime slot 2
+  (`NativeRuntime::system`); the compiler's division check (`beql; break` in the delay slot) is translated in both
+  modes (this removed all 247 "branch in a delay slot" hand-overs).
+- Runtime (`native/src/main.cpp`): EE threads as Windows fibers, scheduler by priority, kernel services (threads,
+  semaphores, interrupt/DMA handlers, vblank at 59.94 Hz from the host clock, heap), hardware registers (timers,
+  INTC, DMAC with transfers completing at once, GS CSR; others logged once), SIF RPC served at the library's entry
+  functions (`sceSifBindRpc` 00285788, `sceSifCallRpc` 00285958, `sceSifCheckStatRpc` 00285B48) - **all servers
+  still return zeros** (logged on first use), a watchdog that reports where game code is if it does not return.
+- One command builds, repackages and runs it: `pwsh tools/native-run.ps1 -Seconds 6` (`-NoPackage` skips the 26 s
+  package rebuild when only `native/` changed). Log: `.cache/native/native.log`. `--verbose` lists syscalls.
+
+### How far it gets (last run)
+
+The game's start-up code runs natively: crt0, kernel setup, 67 entries into native code, 9 kernel calls. It then
+stops at `break 1` in 00250AB0, called from the assert `"Trouble reserving heap in bInitPlatformMemory()"`
+(`src\bMemory.cpp`, caller 0025763C): the game's `sbrk` (0028BA48) fails for its 30 MB heap request (0x01CB2720).
+
+**Known cause, fix not applied (one line):** in `Syscall()` of `native/src/main.cpp`, service `0x3E` (EndOfHeap)
+currently returns `g_heapStart`; the game's `sbrk` compares `EndOfHeap() < current + size` and fails, so it must
+return the **limit**: `g_heapEnd`. (The main stack is already placed at the top of memory, 01FFC000, which is what
+makes the 30 MB request fit.) Apply, run `tools/native-run.ps1 -Seconds 6 -NoPackage`, continue from what it reports.
+
+### Expected next obstacles (in order of likelihood)
+
+- Kernel service 0x63 (called once at 00100168 with a0=0x15, a1=1) is unknown; 0 is returned.
+- The I/O servers (ADR 0011): module loading `80000006`, file I/O `80000001`, disc `8000059x`, pad `80000100/101`,
+  memory card `80000400`, EA's streamer `00012345`, wheel `046D046D`. Each needs a host service; start with what
+  the log shows first. The reference build can show the real replies (`--trace-calls`).
+- Remaining hand-over instructions the translator does not cover (the package command prints them): `break` 265
+  (asserts and division traps), MMI ops (`pmaxw` 42, `prot3w` 9, `psubb` 8, `pminw` 4 ...), `bc0t/bc0f` 5,
+  `cfc2/ctc2` on other registers, `mfsa/mtsa/mtsab`, `vlqi/vsqi`, and 194 "code outside the analysed function".
+  With no emulator there is no fallback: each must be translated (or shown never to execute).
+- No graphics, sound or input yet: DMA data is discarded. Those are R3/R4 of the plan in ADR 0011's amendment.
+
+## Not done from the owner's latest requests
+
+- **README rationale** (item 4 above): add near the top of `README.md`; also refresh its status block (it still
+  says 2026-11-12 and "embedded emulator core").
+- **ADR 0012** (native runtime) and `docs/recomp-analysis.md` §18: write once the runtime gets past start-up.
+- **GitHub dev build** (item 3): nothing has been pushed (`main` is ahead of `origin/main`; `gh` is logged in as
+  the repo owner). Proposed numbering: tag `v0.2.0-dev.1` (converter is `0.1.0`; the native runtime prints
+  `0.2.0-dev.1`), GitHub pre-release with notes saying exactly how far the native executable gets. Decide with the
+  owner whether to attach binaries (they contain no game data; the converter carries LLVM/LLD, notices included).
+
+## Verified / not verified at the pause
+
+- Verified: release build compiles with the native runtime; the native package builds (10,125 functions, 26 s);
+  the run above. All 15 tests passed before the native work started (commit `587afaa`).
+- **Not verified:** the test suite after the translator changes of this step (run `pwsh tools/build.ps1` first);
+  that the reference-mode package (`.cache/r1c-game`) still behaves identically with the `beql; break` change
+  (re-run the `--vu1 check` / `--lift-check` sessions of `docs/recomp-analysis.md` §8 before trusting it).

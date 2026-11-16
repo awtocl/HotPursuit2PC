@@ -8,6 +8,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "hp2/code_package.h"
 #include "hp2/io.h"
@@ -17,6 +18,8 @@ namespace hp2 {
 struct CodePackageOptions {
   std::string cpu = "x86-64-v3";  // LLVM CPU level of the generated code (AVX2 and earlier extensions)
   unsigned threads = 0;           // 0: one per hardware thread
+  bool native = false;            // for the native runtime: waiting loops yield (StateLayout::yield_in_idle_loops)
+  std::vector<std::uint32_t> exclude;  // functions left untranslated: the runtime provides them (host services)
   std::function<void(std::string_view)> log;
 };
 
@@ -26,6 +29,7 @@ struct CodePackageResult {
   double translate_seconds = 0, compile_seconds = 0, link_seconds = 0;
   std::uint64_t dll_bytes = 0;
   std::map<std::string, std::size_t> refusals;  // why functions were not translated
+  std::map<std::string, std::size_t> stops;     // why translated code hands over, by instruction
   std::string summary;                          // a few lines for logs and the sidecar file
 };
 

@@ -35,6 +35,7 @@ include(CTest)   # defines BUILD_TESTING (ON by default) and enables testing
 add_subdirectory(tests/harness)
 add_subdirectory(assets-pipeline)
 add_subdirectory(recomp)
+add_subdirectory(native)     # the native runtime: no reference-core code
 add_subdirectory(engine)      # before converter/: the converter embeds the launcher when it exists
 add_subdirectory(converter)
 if(BUILD_TESTING)

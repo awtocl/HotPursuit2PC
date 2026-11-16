@@ -188,15 +188,19 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
     sha = h.finish();
   }
   const Discovery d = discover(elf);
-  const StateLayout state = state_layout(layout);
+  StateLayout state = state_layout(layout);
+  state.yield_in_idle_loops = options.native;
 
   // ---- translation ----
   Translator ee(elf, d, state, layout.ram_size, options.threads);
   r.functions_found = d.functions.size();
-  for (const Function& f : d.functions)
+  for (const Function& f : d.functions) {
+    if (std::find(options.exclude.begin(), options.exclude.end(), f.start) != options.exclude.end()) continue;
     if (auto why = ee.add_function(f.start)) ++r.refusals[*why];
+  }
   r.functions_translated = ee.size();
   r.ee_entries = ee.entries();
+  r.stops = ee.stop_reasons();
 
   VuLayout vl;
   vl.delayed_jump = layout.delayed_jump;

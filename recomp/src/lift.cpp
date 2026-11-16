@@ -40,8 +40,10 @@ std::string function_name(std::uint32_t start) {
   return std::format("fn_{:08X}", start);
 }
 
-bool supported(const Insn& in) {
+bool supported(const Insn& in, bool native) {
   switch (in.op) {
+    case Op::EI: case Op::DI: case Op::MFC0: case Op::MTC0:
+      return native;  // the native runtime's own system services (Runtime slot 2)
     case Op::SLL: case Op::SRL: case Op::SRA: case Op::SLLV: case Op::SRLV: case Op::SRAV:
     case Op::DSLL: case Op::DSRL: case Op::DSRA: case Op::DSLL32: case Op::DSRL32: case Op::DSRA32:
     case Op::DSLLV: case Op::DSRLV: case Op::DSRAV:
@@ -219,15 +221,15 @@ class FunctionLifter : public VectorCode {
 
   // Does translated code entered at `pc` execute at least one instruction before it could stop?
   bool can_enter(std::uint32_t pc) const {
-    if (is_idle_loop(pc)) return false;
+    if (is_idle_loop(pc) && !L_.yield_in_idle_loops) return false;
     const Insn& in = insn(pc);
-    if (in.flow == Flow::None) return supported(in);
+    if (in.flow == Flow::None) return supported(in, L_.yield_in_idle_loops);
     if (in.flow == Flow::Syscall || in.flow == Flow::Break || in.flow == Flow::Eret || in.flow == Flow::BranchLink)
       return false;
     if (in.flow == Flow::Branch && !branch_supported(in)) return false;
     if (!inside(pc + 4)) return false;
     const Insn& slot = insn(pc + 4);
-    return slot.flow == Flow::None && supported(slot);
+    return slot.flow == Flow::None && supported(slot, L_.yield_in_idle_loops);
   }
 
   llvm::BasicBlock* block(std::uint32_t pc) {
@@ -393,7 +395,7 @@ class FunctionLifter : public VectorCode {
       }
       const Insn& in = insn(pc);
       if (in.flow == Flow::None) {
-        if (!supported(in)) {
+        if (!supported(in, L_.yield_in_idle_loops)) {
           stop(pc, r5900::mnemonic(in.op));
           return;
         }
@@ -473,7 +475,19 @@ class FunctionLifter : public VectorCode {
       return;
     }
     const Insn& slot = insn(pc + 4);
-    if (slot.flow != Flow::None || !supported(slot)) {
+    // The compiler's division check: "beql divisor, zero, +1; break 7". The trap
+    // sits in the delay slot of a likely branch, so it runs only when the branch
+    // is taken; otherwise execution simply continues after it.
+    if (in.flow == Flow::Branch && in.likely && branch_supported(in) && slot.flow == Flow::Break && pc != f_.start) {
+      llvm::Value* c = condition(in);
+      auto* trap = fresh_block();
+      flush_flags(true);
+      b_.CreateCondBr(c, trap, block(pc + 8));
+      b_.SetInsertPoint(trap);
+      stop(pc, "break");
+      return;
+    }
+    if (slot.flow != Flow::None || !supported(slot, L_.yield_in_idle_loops)) {
       stop(pc, slot.flow != Flow::None ? "branch in a delay slot" : r5900::mnemonic(slot.op));
       return;
     }
@@ -926,6 +940,12 @@ class FunctionLifter : public VectorCode {
           W(rd, pair(low[0], low[1]));
           WH(rd, pair(low[2], low[3]));
         }
+        break;
+      }
+      case Op::EI: case Op::DI: case Op::MFC0: case Op::MTC0: {
+        // Native runtime only: system instructions are carried out by the runtime.
+        auto* type = llvm::FunctionType::get(b_.getVoidTy(), {b_.getPtrTy(), i32_}, false);
+        b_.CreateCall(type, runtime_fn(2), {state_, b_.getInt32(in.raw)});
         break;
       }
       case Op::CFC2: cfc2(in); break;

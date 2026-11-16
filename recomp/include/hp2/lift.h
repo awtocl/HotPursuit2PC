@@ -57,6 +57,10 @@ struct StateLayout {
   std::uint32_t pipe_mac = 0, pipe_sticky = 0, pipe_clip = 0;  // flag pipelines: index, 8 values, 8 times
   std::uint32_t pipe_time = 0;     // uint32
   std::uint32_t pipe_q = 0;        // Q pipeline: counter, held value
+  // Native runtime (ADR 0012): waiting loops are translated too and return to
+  // the runtime after every pass (it runs interrupt handlers and other
+  // threads); with the reference core they are left to it.
+  bool yield_in_idle_loops = false;
 };
 
 // Slow path for addresses that are neither main memory nor the scratchpad
@@ -65,6 +69,13 @@ struct StateLayout {
 struct Runtime {
   std::uint64_t (*read)(std::uint8_t* state, std::uint32_t address, std::uint32_t size);  // size 1, 2, 4 or 8
   void (*write)(std::uint8_t* state, std::uint32_t address, std::uint64_t value, std::uint32_t size);
+};
+
+// The native runtime (StateLayout::yield_in_idle_loops) passes this larger
+// table: `system` carries out ei, di, mfc0 and mtc0 (`raw` is the instruction).
+struct NativeRuntime {
+  Runtime memory;
+  void (*system)(std::uint8_t* state, std::uint32_t raw);
 };
 
 using LiftedFunction = void (*)(std::uint8_t* state, std::uint8_t* ram, std::uint8_t* spr, const Runtime* rt);

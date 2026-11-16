@@ -64,6 +64,10 @@ target_link_libraries(hp2recomp-tool PRIVATE hp2recomp)
 if(LLVM_FOUND)
   target_link_libraries(hp2recomp-tool PRIVATE hp2lift)
   target_compile_definitions(hp2recomp-tool PRIVATE HP2_HAVE_LLVM=1)
+  if(TARGET hp2package)
+    target_link_libraries(hp2recomp-tool PRIVATE hp2package)
+    target_compile_definitions(hp2recomp-tool PRIVATE HP2_HAVE_PACKAGE=1)
+  endif()
 endif()
 
 # --- tests ----------------------------------------------------------------------

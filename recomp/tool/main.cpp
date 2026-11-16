@@ -25,6 +25,10 @@
 #include "hp2/lift.h"
 #include "hp2/vulift.h"
 #endif
+#ifdef HP2_HAVE_PACKAGE
+#include "hp2/native_state.h"
+#include "hp2/package.h"
+#endif
 
 using namespace hp2;
 using r5900::Flow;
@@ -857,6 +861,27 @@ int cmd_vu1_lift(const fs::path& elf_path, const fs::path& ir_out) {
 }
 #endif
 
+#ifdef HP2_HAVE_PACKAGE
+// ---- package -------------------------------------------------------------------------------
+
+// Builds the code package (ADR 0009) for the native runtime's own state layout (ADR 0012).
+int cmd_package(const fs::path& elf_path, const fs::path& dll) {
+  const Bytes elf = read_whole_file(elf_path, kMaxElfSize);
+  CodePackageOptions options;
+  options.log = [](std::string_view line) { std::cout << line << std::endl; };
+  options.native = true;
+  options.exclude.assign(std::begin(kNativeHooks), std::end(kNativeHooks));
+  const CodePackageResult r = build_code_package(elf, native_code_layout(), dll, options);
+  std::cout << r.summary;
+  std::cout << "functions not translated:";
+  for (const auto& [why, n] : r.refusals) std::cout << std::format("  [{} x {}]", n, why);
+  std::cout << "\nplaces where translated code stops (the runtime must handle them):";
+  for (const auto& [why, n] : r.stops) std::cout << std::format("  [{} x {}]", n, why);
+  std::cout << std::endl;
+  return 0;
+}
+#endif
+
 void usage() {
   std::cout << "hp2recomp - stage R1 developer tool (static recompilation)\n"
                "  hp2recomp info <elf>\n"
@@ -902,6 +927,9 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef HP2_HAVE_LLVM
     if (a[0] == L"lift" && (a.size() == 4 || (a.size() == 6 && a[4] == L"--out")))
       return cmd_lift(a[1], a[2], std::stoul(a[3]), a.size() == 6 ? fs::path(a[5]) : fs::path());
+#ifdef HP2_HAVE_PACKAGE
+    if (a[0] == L"package" && a.size() == 3) return cmd_package(a[1], a[2]);
+#endif
     if (a[0] == L"vu1-lift" && (a.size() == 2 || (a.size() == 4 && a[2] == L"--ir")))
       return cmd_vu1_lift(a[1], a.size() == 4 ? fs::path(a[3]) : fs::path());
 #endif
