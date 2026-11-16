@@ -399,6 +399,39 @@ namespace hp2ref
 			uint32 m_slot;
 		};
 
+		// ---- watched game functions (--trace-calls a,b,...): every entry, with arguments ----
+		// calls.tsv: refresh, milliseconds since start, function, a0..a3. Works on the
+		// reference core only (translated code calls functions directly).
+		std::vector<uint32_t> g_watched;
+		FILE* g_callsFile = nullptr;
+		int64_t Qpc();
+		int64_t g_callsOrigin = 0;
+		double g_qpcToMs = 0;
+
+		void RecordCall(CMIPS* context, uint32 function)
+		{
+			if(!g_callsFile) return;
+			const auto& s = context->m_State;
+			fprintf(g_callsFile, "%u\t%.3f\t%08X\t%08X\t%08X\t%08X\t%08X\n", g_frame.load(std::memory_order_relaxed),
+			        (Qpc() - g_callsOrigin) * g_qpcToMs, function, s.nGPR[CMIPS::A0].nV0, s.nGPR[CMIPS::A1].nV0,
+			        s.nGPR[CMIPS::A2].nV0, s.nGPR[CMIPS::A3].nV0);
+		}
+
+		class CWatchedEeBasicBlock : public CEeBasicBlock
+		{
+		public:
+			using CEeBasicBlock::CEeBasicBlock;
+
+		protected:
+			void CompileProlog(CMipsJitter* jitter) override
+			{
+				jitter->PushCtx();
+				jitter->PushCst(m_begin);
+				jitter->Call(reinterpret_cast<void*>(&RecordCall), 2, Jitter::CJitter::RETURN_VALUE_NONE);
+				CEeBasicBlock::CompileProlog(jitter);
+			}
+		};
+
 		class CTracingEeExecutor : public CEeExecutor
 		{
 		public:
@@ -407,6 +440,12 @@ namespace hp2ref
 			BasicBlockPtr BlockFactory(CMIPS& context, uint32 start, uint32 end) override
 			{
 				g_blocks.push_back({start, end, g_frame.load(std::memory_order_relaxed)});
+				if(std::find(g_watched.begin(), g_watched.end(), start) != g_watched.end())
+				{
+					auto block = std::make_shared<CWatchedEeBasicBlock>(context, start, end, m_blockCategory);
+					block->Compile();
+					return block;
+				}
 				if(g_runTranslated)
 					if(const LiftedCode code = LiftCheckLookupEntry(start))
 				{
@@ -884,7 +923,7 @@ namespace hp2ref
 
 	std::string TraceInstall(CPS2VM& vm, const fs::path& dir, bool countBlocks, const fs::path& liftList,
 	                         const fs::path& elf, bool runTranslated, int vu1Mode, uint32_t vifFrom, uint32_t vifTo,
-	                         bool traceGs)
+	                         bool traceGs, const std::vector<uint32_t>& watched)
 	{
 		std::error_code ec;
 		fs::create_directories(dir, ec);
@@ -972,6 +1011,17 @@ namespace hp2ref
 			}
 		}
 
+		if(!watched.empty())
+		{
+			g_callsFile = _wfopen((dir / L"calls.tsv").c_str(), L"w");
+			if(!g_callsFile) return "cannot create calls.tsv";
+			fputs("# refresh\tms\tfunction\ta0\ta1\ta2\ta3\n", g_callsFile);
+			g_watched = watched;
+			LARGE_INTEGER f;
+			QueryPerformanceFrequency(&f);
+			g_qpcToMs = 1000.0 / f.QuadPart;
+			g_callsOrigin = Qpc();
+		}
 		if(traceGs)
 		{
 			g_gsFile = _wfopen((dir / L"gs-priv.tsv").c_str(), L"w");
@@ -1182,6 +1232,11 @@ namespace hp2ref
 			}
 		}
 
+		if(g_callsFile)
+		{
+			fclose(g_callsFile);
+			g_callsFile = nullptr;
+		}
 		if(g_gsFile)
 		{
 			fclose(g_gsFile);

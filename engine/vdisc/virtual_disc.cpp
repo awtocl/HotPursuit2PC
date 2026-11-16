@@ -18,6 +18,7 @@ struct VirtualDisc::Impl {
   Bytes metadata;
   std::vector<Extent> extents;  // ascending start
   std::vector<std::unique_ptr<ReadOnlyFile>> files;
+  std::vector<std::string> names;  // ISO path of each file, same indexing
   std::uint64_t total = 0;
   std::string description;
 };
@@ -70,6 +71,7 @@ std::shared_ptr<VirtualDisc> VirtualDisc::Open(const std::wstring& rom_dir, std:
         fail("'{}' changed size ({} bytes, {} expected)", to_utf8(f.host_path), file->size(), f.size);
       d.extents.push_back({static_cast<std::uint64_t>(f.sector) * kSectorSize, f.size, d.files.size()});
       d.files.push_back(std::move(file));
+      d.names.push_back(f.iso_path);
     }
     d.description = std::format("{} from {} ({} files, {} bytes)", profile.serial, to_utf8(report.root),
                                 d.files.size(), d.total);
@@ -82,6 +84,18 @@ std::shared_ptr<VirtualDisc> VirtualDisc::Open(const std::wstring& rom_dir, std:
 
 std::uint64_t VirtualDisc::Size() const { return m_impl->total; }
 const std::string& VirtualDisc::Description() const { return m_impl->description; }
+
+std::string VirtualDisc::FileAt(std::uint64_t offset) const {
+  const Impl& d = *m_impl;
+  if (offset < d.metadata.size()) return "(metadata)";
+  const auto next = std::upper_bound(d.extents.begin(), d.extents.end(), offset,
+                                     [](std::uint64_t p, const Impl::Extent& e) { return p < e.start; });
+  if (next != d.extents.begin()) {
+    const Impl::Extent& e = *(next - 1);
+    if (offset < e.start + e.size) return d.names[e.file];
+  }
+  return "(gap)";
+}
 
 std::uint64_t VirtualDisc::Read(std::uint64_t offset, void* out, std::uint64_t count) const {
   const Impl& d = *m_impl;

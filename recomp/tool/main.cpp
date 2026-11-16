@@ -204,6 +204,81 @@ int cmd_disasm(const fs::path& elf_path, std::uint32_t address, std::uint32_t co
   return 0;
 }
 
+// ---- refs ----------------------------------------------------------------------------------
+
+// Which functions use given 32-bit constants or the address of given strings
+// (stage R2a: finding the system libraries' functions without symbols - by the
+// RPC server numbers they bind to and the messages they print). A constant is
+// recognised when built by lui + addiu/ori (or used as lui + load/store
+// offset) inside a function, or as gp + offset.
+int cmd_refs(const fs::path& elf_path, const std::vector<std::string>& wanted_text) {
+  const ElfImage elf = load_elf(elf_path);
+  const Discovery d = discover(elf);
+  std::map<std::uint32_t, std::string> wanted;  // value -> label
+  for (const std::string& w : wanted_text) {
+    if (w.starts_with("str:")) {
+      const std::string text = w.substr(4);
+      for (const ElfSection& s : elf.sections()) {
+        if (!s.alloc() || !s.has_file_data() || s.executable() || s.size < text.size()) continue;
+        const ByteView data = elf.bytes(s.addr, s.size);
+        for (std::size_t i = 0; i + text.size() <= data.size(); ++i)
+          if (std::memcmp(data.data() + i, text.data(), text.size()) == 0)
+            wanted.emplace(s.addr + static_cast<std::uint32_t>(i), "\"" + text + "\"");
+      }
+    } else {
+      const std::uint32_t v = parse_address(w);
+      wanted.emplace(v, std::format("{:08X}", v));
+    }
+  }
+  if (wanted.empty()) fail("nothing to look for (no such string in the data sections?)");
+  // Callers per function start.
+  std::map<std::uint32_t, std::size_t> callers;
+  for (std::uint32_t pc = d.text_begin; pc < d.text_end; pc += 4) {
+    const Insn& in = d.insns[d.index_of(pc)];
+    if ((d.flags_at(pc) & kReached) && in.flow == Flow::Call) ++callers[r5900::target_of(pc, in)];
+  }
+  for (const Function& f : d.functions) {
+    std::uint32_t hi[32] = {};
+    bool has_hi[32] = {};
+    std::set<std::string> found;
+    for (std::uint32_t pc = f.start; pc < f.end; pc += 4) {
+      if (!(d.flags_at(pc) & kReached)) continue;
+      const Insn& in = d.insns[d.index_of(pc)];
+      const unsigned rs = in.rs(), rt = in.rt();
+      auto hit = [&](std::uint32_t v) {
+        if (auto it = wanted.find(v); it != wanted.end()) found.insert(std::format("{} at {:08X}", it->second, pc));
+      };
+      switch (in.op) {
+        case Op::LUI:
+          hi[rt] = in.imm() << 16;
+          has_hi[rt] = true;
+          hit(hi[rt]);
+          continue;
+        case Op::ADDIU: case Op::DADDIU:
+          if (rs == 28 && elf.gp()) hit(elf.gp() + static_cast<std::uint32_t>(in.simm()));
+          if (has_hi[rs]) hit(hi[rs] + static_cast<std::uint32_t>(in.simm()));
+          break;
+        case Op::ORI:
+          if (has_hi[rs]) hit(hi[rs] | in.imm());
+          break;
+        case Op::LW: case Op::SW: case Op::LB: case Op::LBU: case Op::LH: case Op::LHU: case Op::SB: case Op::SH:
+        case Op::LD: case Op::SD: case Op::LQ: case Op::SQ: case Op::LWC1: case Op::SWC1:
+          if (has_hi[rs]) hit(hi[rs] + static_cast<std::uint32_t>(in.simm()));
+          if (rs == 28 && elf.gp()) hit(elf.gp() + static_cast<std::uint32_t>(in.simm()));
+          break;
+        default:
+          break;
+      }
+    }
+    if (found.empty()) continue;
+    std::cout << std::format("function {:08X}-{:08X} ({} instructions, {} call sites):", f.start, f.end,
+                             f.instructions, callers[f.start]);
+    for (const std::string& s : found) std::cout << "  " << s;
+    std::cout << '\n';
+  }
+  return 0;
+}
+
 // ---- check-trace ---------------------------------------------------------------------------
 
 struct Block {
@@ -788,6 +863,7 @@ void usage() {
                "  hp2recomp functions <elf> [--out <tsv>]\n"
                "  hp2recomp disasm <elf> <hex address> [count]\n"
                "  hp2recomp check-trace <elf> <trace dir>\n"
+               "  hp2recomp refs <elf> <hex value | str:text>...   (functions that use them)\n"
                "  hp2recomp hot <elf> <trace dir> [how many]     (trace recorded with --trace-counts)\n"
                "  hp2recomp vu1 <elf> [trace dir] [--list]       (VU1 microprograms)\n"
                "  hp2recomp lift <elf> <trace dir> <how many> [--out <list>]   (builds with LLVM)\n"
@@ -811,6 +887,11 @@ int wmain(int argc, wchar_t** argv) {
       return cmd_disasm(a[1], parse_address(narrow(a[2])),
                         a.size() == 4 ? static_cast<std::uint32_t>(std::stoul(a[3])) : 32);
     if (a[0] == L"check-trace" && a.size() == 3) return cmd_check_trace(a[1], a[2]);
+    if (a[0] == L"refs" && a.size() >= 3) {
+      std::vector<std::string> values;
+      for (std::size_t i = 2; i < a.size(); ++i) values.push_back(narrow(a[i]));
+      return cmd_refs(a[1], values);
+    }
     if (a[0] == L"hot" && (a.size() == 3 || a.size() == 4))
       return cmd_hot(a[1], a[2], a.size() == 4 ? std::stoul(a[3]) : 30);
     if (a[0] == L"vu1" && a.size() >= 2 && a.size() <= 4) {

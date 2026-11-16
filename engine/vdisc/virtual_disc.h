@@ -29,6 +29,8 @@ namespace hp2
 		// (less than count only at the end of the disc). Throws std::runtime_error
 		// if a ROM file cannot be read.
 		std::uint64_t Read(std::uint64_t offset, void* out, std::uint64_t count) const;
+		// The disc file that holds the byte at `offset` ("NFSHP2/ZZDATA.BIN"), or "(metadata)" / "(gap)".
+		std::string FileAt(std::uint64_t offset) const;
 		// One line for the log, e.g. "SLUS-20362 from D:\...\rom (27 files, 3120594944 bytes)".
 		const std::string& Description() const;
 

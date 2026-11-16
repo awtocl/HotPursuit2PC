@@ -36,6 +36,8 @@
 //                         compare them with the reference core while the game runs (builds with LLVM only)
 //   --run-translated <list>  with --trace: translate the listed game functions and run them instead of the
 //                         reference core (builds with LLVM only)
+//   --trace-calls <a,b..> with --trace: list every call of these game functions with arguments (calls.tsv)
+//   --trace-disc <file>   every read of the virtual disc: ms, thread, offset, size, disc file
 //   --trace-gs            with --trace: GS privileged register writes per refresh (gs-priv.tsv)
 //   --code <dll>          with --trace: run on this code package (measuring the converter's output)
 //   --trace-vif <a>-<b>   with --trace: record the VIF1 command stream of frames a..b-1 (vif1-stream.bin)
@@ -469,6 +471,24 @@ namespace
 	};
 
 	// The ROM folder as a read-only stream of disc sectors.
+	// --trace-disc <file>: every read of the virtual disc (development): time, offset, size, disc file.
+	struct DiscTrace
+	{
+		FILE* file = nullptr;
+		LARGE_INTEGER origin{}, frequency{};
+		std::mutex mutex;
+		void Record(uint64 offset, uint64 size, const hp2::VirtualDisc& disc)
+		{
+			LARGE_INTEGER now;
+			QueryPerformanceCounter(&now);
+			std::lock_guard<std::mutex> lock(mutex);
+			fprintf(file, "%.3f\t%u\t%llu\t%llu\t%s\n", (now.QuadPart - origin.QuadPart) * 1000.0 / frequency.QuadPart,
+			        GetCurrentThreadId(), static_cast<unsigned long long>(offset), static_cast<unsigned long long>(size),
+			        disc.FileAt(offset).c_str());
+		}
+	};
+	DiscTrace* g_discTrace = nullptr;
+
 	class CVirtualDiscStream : public Framework::CStream
 	{
 	public:
@@ -491,6 +511,7 @@ namespace
 		}
 		uint64 Read(void* buffer, uint64 size) override
 		{
+			if(g_discTrace) g_discTrace->Record(m_position, size, *m_disc);
 			const uint64 got = m_disc->Read(m_position, buffer, size);
 			m_position += got;
 			return got;
@@ -557,7 +578,9 @@ namespace
 		int vu1 = 0;               // with --trace: VU1 microcode translated, 1 = compared, 2 = run
 		uint32_t vifFrom = 0, vifTo = 0;  // with --trace: frames whose VIF1 command stream is recorded
 		bool traceGs = false;             // with --trace: GS privileged register writes per refresh
+		std::vector<uint32_t> watched;    // with --trace: game functions whose calls are listed
 		fs::path code;                    // with --trace: a code package to run on (build/hp2code.dll)
+		fs::path discTrace;               // every virtual-disc read (development)
 		int resolutionFactor = 2;
 		int width = 1280, height = 896;  // 2x the PS2's 640x448
 		bool fullscreen = false;
@@ -640,6 +663,17 @@ namespace
 			else if(a == L"--lift-check" && hasValue) options.liftCheck = argv[++i];
 			else if(a == L"--run-translated" && hasValue) options.runTranslated = argv[++i];
 			else if(a == L"--trace-gs") options.traceGs = true;
+			else if(a == L"--trace-disc" && hasValue) options.discTrace = argv[++i];
+			else if(a == L"--trace-calls" && hasValue)
+			{
+				for(const wchar_t* p = argv[++i]; *p;)
+				{
+					wchar_t* next = nullptr;
+					options.watched.push_back(static_cast<uint32_t>(wcstoul(p, &next, 16)));
+					if(next == p) break;
+					p = *next == L',' ? next + 1 : next;
+				}
+			}
 			else if(a == L"--code" && hasValue) options.code = argv[++i];
 			else if(a == L"--trace-vif" && hasValue)
 			{
@@ -836,6 +870,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			            L"\nRun the converter again on this game folder to repair it.");
 		}
 		Log("Virtual disc: %s", g_disc->Description().c_str());
+		if(!options.discTrace.empty())
+		{
+			static DiscTrace trace;
+			trace.file = _wfopen(options.discTrace.c_str(), L"w");
+			if(trace.file)
+			{
+				fputs("ms\tthread\toffset\tsize\tfile\n", trace.file);
+				QueryPerformanceFrequency(&trace.frequency);
+				QueryPerformanceCounter(&trace.origin);
+				g_discTrace = &trace;
+			}
+		}
 	}
 	if(!options.shots.empty()) fs::create_directories(options.shots, ec);
 
@@ -902,7 +948,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 			const std::string traceError =
 			    hp2ref::TraceInstall(*g_vm, options.trace, options.traceCounts, run ? options.runTranslated : options.liftCheck,
 			                         options.rom / L"SLUS_203.62", run, options.vu1, options.vifFrom, options.vifTo,
-			                         options.traceGs);
+			                         options.traceGs, options.watched);
 			if(!traceError.empty()) throw std::runtime_error("--trace: " + traceError);
 			Log("step: reference tracing installed");
 			// Measuring on a code package: its executors replace the tracing ones (block lists are then not recorded).
@@ -1002,6 +1048,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		gsRefreshConnection.reset();
 		if(g_pacer.Enabled()) Log("presentation: images shown %.1f ms after their refresh on average", g_pacer.MeanLatencyMs());
 		g_frameTimes.Save(options.frameTimes);
+		if(g_discTrace)
+		{
+			std::lock_guard<std::mutex> lock(g_discTrace->mutex);
+			fclose(g_discTrace->file);
+			g_discTrace = nullptr;
+		}
 		if(const std::string report = hp2rt::TranslatedCodeReport(); !report.empty()) Log("%s", report.c_str());
 		hp2ref::TraceFinish(*g_vm);
 		g_vm->DestroyPadHandler();

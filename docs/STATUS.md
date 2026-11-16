@@ -3,7 +3,12 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**Last update:** 2026-11-14 — **race timing fixed.** The extra 50 ms image intervals with translated code were not
+**Last update:** 2026-11-16 — **R2a (system libraries measured), ADR 0011 proposed.** The game's Sony libraries and
+its 12 IOP servers are located without symbols (`hp2recomp refs`); they are 1.95 % of executed instructions, so R2's
+gain is not CPU time but loading: the race load reads 14.5 MB in 11.7 s through one-sector requests issued every 3
+refreshes. Proposed: host services at the library entry functions in translated code, disc reads first.
+Next: decode the reader's request block and implement disc reads (R2b).
+Previous: 2026-11-14 — **race timing fixed.** The extra 50 ms image intervals with translated code were not
 the game: it flips every 2 refreshes in both builds (690/690, `--trace-gs`). The launcher showed each image at the
 first half-period point after it was ready; the faster translated build made images ready right at that point, so
 they alternated 17/50 ms. Images are now shown a measured, adaptive time after their own refresh: race intervals
@@ -52,6 +57,14 @@ Owner requirements added on 2026-11-12 (they bind every later stage):
    is in. Nothing is pushed before that. When both seem met, show the owner the evidence first ("works well" is
    the owner's judgement, as the Milestone 1 trial showed), then push.
 
+4. **(2026-11-16) The working recompilation must run with NO emulator layer whatsoever.** The Play! core may remain
+   only as a development oracle (measurement builds, comparisons); the build the owner plays and the one published
+   must not contain or depend on it. What still runs on the reference core today and therefore has to be replaced
+   by own code (ADR 0011, amended): the EE kernel services (threads, semaphores, interrupt handlers, timers), the
+   whole IOP side (disc, pad, memory card, the game's sound streamer and SPU2 audio), DMA, VIF1 and GIF, the GS
+   renderer, the frame scheduler; and the 23 functions and 355 places where translated code still hands over to
+   the reference core's JIT must reach zero.
+
 R1a result in one line: function-level static recompilation of this game is practical (every block the reference
 core executed starts where the analysis predicted), and the cost to remove is one third game program, one third
 vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recomp-analysis.md),
@@ -79,7 +92,9 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | **R1c code built once** | **done** | this commit; [ADR 0009](adr/0009-code-package.md); `recomp/src/package.cpp`, `codegen.cpp` (parallel compilation), `hp2/code_package.h`; converter stage "code" (`converter/code/`); launcher `engine/src/translated.cpp`, `--reference`; LLD added to `tools/fetch-llvm.ps1` / `build-llvm.ps1`; `docs/recomp-analysis.md` §14. **Not verified:** other PCs/CPUs, antivirus reaction to a locally made DLL, GUI run by a person. |
 | **VU1 thread study** | **done** | this commit; [ADR 0010](adr/0010-vu1-thread.md): deferred to R2 with measurements (`docs/recomp-analysis.md` §15) |
 | **Race timing (R1c open point)** | **done** | this commit; presentation tied to each image's own refresh with adaptive latency (`FramePacer`); launcher `--trace-gs`, `--code`, `--frametimes` mark 'R'; `docs/recomp-analysis.md` §16. **Not verified:** played by a person; other PCs and monitors. |
-| **R1 rest** | **next** | owner's play-test of the converter-made build; branch in a delay slot; then R2 (own runtime, with VU1 on its own thread per ADR 0010) |
+| **R2a system libraries** | **done** | this commit; `hp2recomp refs`, launcher `--trace-calls`, `--trace-disc`, `tools/recon/irxinfo.py`; `docs/recomp-analysis.md` §17; [ADR 0011](adr/0011-host-services.md) proposed |
+| **R2b disc reads as a host service** | **next** | decode the request block of 0028D620; translator hook table; compare every buffer with the reference; measure the race load |
+| **R1 rest** | **open** | owner's play-test of the converter-made build; branch in a delay slot; then R2 (own runtime, with VU1 on its own thread per ADR 0010) |
 
 ## Decisions (ADRs)
 
@@ -91,6 +106,7 @@ vector-unit microcode — so R1 translates both ([docs/recomp-analysis.md](recom
 | [0004](adr/0004-asset-pipeline.md) | Asset pipeline | Names from a table recovered from the dump; unpack = exact 1:1 extents + manifest with SHA-256; resumable; ROM read-only. |
 | [0006](adr/0006-recompilation-main-line.md) | Direction after the M1 trial | **Static recompilation + purpose-built runtime is the product (stages R0–R4); the Play!-based launcher is the reference oracle and fallback.** No game code is ever distributed: translation happens in the converter on the user's machine. |
 | [0008](adr/0008-vu1-microcode.md) | VU1 microcode | Translate each microprogram with LLVM keeping only what this game's microcode can observe (clip flags, Q, R and the timing they depend on); no MAC/status flags (never read; the translator refuses microcode that reads them); verify at each end bit; later run it on its own thread. |
+| [0011](adr/0011-host-services.md) | R2 host services (proposed) | Replace the statically linked Sony library entry functions by host services in translated code; disc reads first (loading time is their real cost), then pad, memory card, timers; streamer left to R4. |
 | [0010](adr/0010-vu1-thread.md) | VU1 on its own thread | Measured: no overlap to exploit inside the reference core's VIF model (and its GS buffer is not thread-safe); deferred to the own runtime (R2), where the game's double-buffered stream allows it. |
 | [0009](adr/0009-code-package.md) | Translated code built once | The converter's "code" stage translates everything and links a native DLL with LLD (x86-64-v3); the launcher loads it after checking executable hash, state-layout fingerprint and CPU; nothing compiled while playing. |
 | [0007](adr/0007-code-generator.md) | Code generator, translation model, scope of R1 | **Accepted 2026-11-13 (spike: 0 differences, 4.1x):** LLVM embedded in the converter (x86 back end only); one host function per game function, re-enterable at resume points, running on the reference machine model with fallback; R1 covers the game program **and** VU1 microcode; acceptance restated (EE + VU ≤ 3 ms per busy refresh, nothing compiled while playing; "3×" moves to R3). Fallback if LLVM is refused: own x64 emitter. |

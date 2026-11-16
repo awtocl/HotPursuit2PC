@@ -467,6 +467,30 @@ at one refresh (the core keeps at most 2 frames in flight).
 The 3-refresh intervals left in a whole session (76) are in refreshes 1000-2100 and match the game's own buffer
 changes there (79 three-refresh changes in the same range: those screens run at 20 images per second).
 
+## 17. R2a: the game's system libraries and what they cost (2026-11-16)
+
+Tools: `hp2recomp refs <elf> <value | str:text>...` (functions that build a constant or use a string),
+launcher `--trace-calls <addresses>` (every entry of those functions with a0-a3, `calls.tsv`, reference core) and
+`--trace-disc <file>` (every read of the virtual disc with the disc file it falls in), `tools/recon/irxinfo.py`.
+
+- **Libraries linked into the executable:** `libgraph`, `libdma`, `libpad` (2500), `libkernl`, `libcdvd`, `libmc`
+  (2530), `libscf`. **IOP modules on the disc:** `sio2man`, `padman` 4.3, `multitap_manager`, `mcman`, `mcserv`,
+  `Sound_Device_Library`, `sdr_driver`, `USB_driver`, a Logitech wheel driver, and EA's `multi_streamer` (343 KB).
+- **IOP servers the game binds:** `80000001` file I/O, `80000006` module loading, `80000100/101` pad, `80000400`
+  memory card, `80000592/593/595/597/59A` disc, `00012345` the streamer, `046D046D` the wheel driver.
+- **Functions located** (by server number and message): disc `sceCdRead` 0028D938, reader 0028D620, `sceCdSearchFile`
+  0028CBF8, `sceCdSync` 0028CE00, init 0028C8C0; file API `sceOpen` 00286980, `sceClose` 00286C08, `sceRead` 00286FC0,
+  `sceLseek` 00286D88 (used once, at boot); pad init 00281CF8; memory card init 0028DD40; streamer command 0026CA40.
+- **CPU share:** everything at 00270000-002A0000 is 1.95 % of executed game instructions.
+- **Calls in the 77 s session:** `sceCdSync` 1,431,071 (polling), pad 30,810 + 30,166, `sceCdSearchFile` 1,120,
+  reader 0028D620 533, `sceCdRead` 27 (87 sectors), streamer commands about 30-60 per second all session.
+- **Disc reads:** 19,351 reads of 2048 bytes = 39.6 MB (`ZZDATA.BIN` 36.4 MB, the executable 2.3 MB, modules 0.8 MB).
+  Boot 10.7 MB at 5.3 MB/s; menus 0.3-0.6 MB/s; **race load 14.5 MB in 11.7 s (1.2 MB/s) plus 7.3 MB at 5.2 MB/s**.
+  During the slow phases the game issues about 20 read requests per second - one per 3 refreshes.
+
+Consequence: [ADR 0011](adr/0011-host-services.md) (proposed) - replace the library entry functions by host
+services in translated code, disc reads first, because loading time is where these libraries cost.
+
 ## 8. Reproduce
 
 ```powershell
