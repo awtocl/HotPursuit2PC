@@ -50,8 +50,12 @@ inline constexpr std::uint32_t kHookSifBindRpc = 0x00285788, kHookSifCallRpc = 0
 // I/O processor: it marks the layer as started (the game's own "already initialised" word, 0x00327F7C).
 // (0x0028511C is where discovery places the function start: both are left out.)
 inline constexpr std::uint32_t kHookSifInitRpc = 0x00285118;
+// The game's file API (found by its use of the RPC server 80000001): C signatures, served by the runtime from the disc.
+inline constexpr std::uint32_t kHookOpen = 0x00286980, kHookClose = 0x00286C08, kHookLseek = 0x00286D88,
+                               kHookRead = 0x00286FC0;
 inline constexpr std::uint32_t kNativeHooks[] = {kHookSifBindRpc, kHookSifCallRpc, kHookSifCheckStatRpc, kHookSifInitRpc,
-                                                  0x0028511C};
+                                                  0x0028511C,      kHookOpen,       kHookClose,          kHookLseek,
+                                                  kHookRead};
 
 // Code the game copies into kernel memory at start-up (found at 0x0028B73C-0x0028B748: it passes the
 // source 0x00328E58, 1856 bytes, and the destination 0x80076000 to its own kernel-copy system call).

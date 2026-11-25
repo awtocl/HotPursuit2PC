@@ -2,7 +2,57 @@
 
 > Development resumed 2026-11-25 (owner: "continue the native port, document so other models can resume when I say *timeout*"). The section "Progress 2026-11-25" below is the newest; the rest is the 2026-11-16 pause note and is partly superseded.
 
-## Progress 2026-11-25 (read this first)
+## Stage 2, 2026-11-25 evening (newest: read this first, then the section below it)
+
+Owner request: "continue everything and get a playable build with the QoL I asked for". **Not reached; the honest
+distance is below.** What this stage achieved (all in the native runtime, no emulator code):
+
+- The game runs its start-up, **opens `ZDIR.BIN` from the disc, searches `ZZDATA.BIN`, reads 39 times**, syncs VIF1
+  (MARK `ABCD`, 105 packets), and runs 15+ s stable (900+ refreshes) in its own state loop at `0x00245830`.
+- Host services now in `native/src/main.cpp`: disc (`g_disc` = project's `hp2vdisc` + a mini ISO 9660 reader
+  `DiscFind`), the game's file API as C-level hooks (`kHookOpen/Close/Lseek/Read` = 0x286980/0x286C08/0x286D88/0x286FC0),
+  libcdvd RPCs (`80000593` fn 3 disk type = 0x14, fn 4 error = 0; `80000597` fn 0 search file, result written to the first
+  36 bytes of the send buffer, path at +36; `80000595` fn 1 read, fn 15 read chain = (sector, count, address) x n ended
+  by -1), EA streamer (`00012345` fn 0, `StreamerService`: protocol decoded from the reference core, see below), pad
+  fn 1 reply copied from the reference, SIF RPC *end functions* are now called, VU1/VU0 memory windows are real
+  arrays (`VuMemory`, MPG microprograms are stored in `g_vu1Micro`), VIF1 parser fixed (no alignment before MPG/DIRECT).
+- Translator: `pexcw`, `pmfhi`; development switch `HP2_TRACE_ENTRIES=1` when building the package makes every function
+  entry call the runtime; the run then writes `.cache/native/functions.txt` (functions in order of first entry with
+  counts). Compare with the reference's `blocks.tsv` to find where the native run diverges (script idea in this stage:
+  map block -> function with `hp2recomp functions <elf> --out`, list functions the reference ran by refresh N that the
+  native run never entered). `entries.txt` lists runtime re-entry places.
+- Reference tooling: `engine/src/ref_trace.cpp` now dumps the streamer command/reply buffers to `rpc.bin`
+  (`--trace-calls 26A1F0,26A1B8`, record = tag 'S'|'R', frame u32, 2048 bytes; written to the launcher's working
+  directory). `--trace-calls 285958` lists every `sceSifCallRpc` (a0 client, a1 function). The launcher works only with
+  `--disc .cache\p4a\hp2.iso` (the `--rom` path of `tools/run-launcher.ps1` produced no output in this stage).
+- Tests: `pwsh tools/build.ps1 -Preset dev` = 15/15 after all of this. Reference-mode session checks NOT re-run.
+
+**EA streamer protocol (decoded, in `StreamerService`):** request = u16 array `[count][id, nargs, args...]`; reply =
+u32 words: w1 = batch counter, w2 = -1, w4 = result of the last command 0x0E `(a0<<16)|a1`, after the first command 0x34
+words 66/67/68/70 = 2, 3, `(a0<<16)|a1`, that + 0x20000. Streams (w0 > 0, 6-word entries) are not modelled (no sound).
+
+**Where the native run is stuck now:** in the loop at `0x00245830` (a state machine on an object whose state word at
++376 is 16/15/2; virtual call through the object's table). The reference calls `sceSifCallRpc` on client `0x33A700`
+(server `80000006`, module loader) **10 times with function 0 at refresh 3** and on `0x33A440` (server `80000001`)
+functions 0/4/2/1 (open, seek, read, close of the IRX files); the native run only makes the function-255 init call and
+never loads modules. Functions the reference runs by refresh 37 and the native run never enters: libpad
+`0x281E38, 0x2822A8, 0x282708, 0x2823D8, 0x282840, 0x282440`. Next: find why the game does not request the modules
+(compare `0x00289720` init and the loader functions, reply words of function 255), serve `80000006` fn 0 (return a
+positive module id; for `80000001` fn 0/4/2/1 serve the IRX from the disc), then pad (`80000100/101`), memory card
+(`80000400`: fn 254, then 1/2/3), wheel (`046D046D` fn 11 every frame).
+
+**Honest distance to "playable with the owner's QoL"** (not a promise, my estimate of the missing blocks):
+1. Finish the I/O hosts above so the game leaves its loading state (hours to days).
+2. Run the VU1 microprograms (translator exists, ADR 0008/0010; the native runtime must start them on MSCAL/MSCNT,
+   run XGKICK output into GIF).
+3. **A GS renderer of our own** (GIF packet decoder, texture/CLUT/local-memory handling, a D3D11/OpenGL back end). This is
+   the largest block and is also what makes owner requirement 2 (modern graphics settings inside the game's menus)
+   possible. 4. Sound: EA's IOP streamer + SPU2 (own implementation of the streamer protocol and a mixer).
+5. Input (XInput/keyboard through the pad structure), memory card as host files, wheel (optional).
+The playable build today is still the reference-core launcher (`HotPursuit2.exe`, Play! core), which does not meet
+requirement 4.
+
+## Progress 2026-11-25 (earlier the same day)
 
 Run: `pwsh tools/native-run.ps1 -Seconds 15` (builds, rebuilds the 30 s code package, runs; `-NoPackage` when only `native/` changed). Log: `.cache/native/native.log`.
 

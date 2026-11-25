@@ -408,10 +408,28 @@ namespace hp2ref
 		int64_t g_callsOrigin = 0;
 		double g_qpcToMs = 0;
 
-		void RecordCall(CMIPS* context, uint32 function)
+		// Development: EA's streamer RPC (server 00012345). When the game's command sender (0026A1F0) or its
+			// reply handler (0026A1B8) is watched, the command buffer (00323080) or reply buffer (00327080) is
+			// copied to rpc.bin as: 'S'|'R', frame u32, 2048 bytes. (Measures the protocol for the native runtime.)
+			FILE* g_rpcFile = nullptr;
+			void RecordRpc(uint32 function)
+			{
+				if(function != 0x0026A1F0 && function != 0x0026A1B8) return;
+				if(!g_rpcFile) g_rpcFile = fopen("rpc.bin", "wb");
+				if(!g_rpcFile) return;
+				const char tag = function == 0x0026A1F0 ? 'S' : 'R';
+				const uint32 frame = g_frame.load(std::memory_order_relaxed);
+				fwrite(&tag, 1, 1, g_rpcFile);
+				fwrite(&frame, 4, 1, g_rpcFile);
+				fwrite(g_ram + (tag == 'S' ? 0x00323080 : 0x00327080), 1, 2048, g_rpcFile);
+				fflush(g_rpcFile);
+			}
+
+			void RecordCall(CMIPS* context, uint32 function)
 		{
 			if(!g_callsFile) return;
-			const auto& s = context->m_State;
+			RecordRpc(function);
+				const auto& s = context->m_State;
 			fprintf(g_callsFile, "%u\t%.3f\t%08X\t%08X\t%08X\t%08X\t%08X\n", g_frame.load(std::memory_order_relaxed),
 			        (Qpc() - g_callsOrigin) * g_qpcToMs, function, s.nGPR[CMIPS::A0].nV0, s.nGPR[CMIPS::A1].nV0,
 			        s.nGPR[CMIPS::A2].nV0, s.nGPR[CMIPS::A3].nV0);
@@ -929,6 +947,7 @@ namespace hp2ref
 		fs::create_directories(dir, ec);
 		g_dir = dir;
 		g_countBlocks = countBlocks;
+		g_ram = vm.m_ee->m_ram;
 		if(!liftList.empty())
 		{
 			const LiftLayout layout = ReferenceLayout();

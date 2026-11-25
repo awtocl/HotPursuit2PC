@@ -4,4 +4,4 @@
 # for this runtime's own state layout by `hp2recomp package`.
 add_executable(hp2-native src/main.cpp)
 set_target_properties(hp2-native PROPERTIES OUTPUT_NAME HotPursuit2Native)
-target_link_libraries(hp2-native PRIVATE hp2recomp)
+target_link_libraries(hp2-native PRIVATE hp2recomp hp2vdisc)  # hp2vdisc: our own ISO 9660 view of the ROM folder

@@ -190,6 +190,7 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
   const Discovery d = discover(elf);
   StateLayout state = state_layout(layout);
   state.yield_in_idle_loops = options.native;
+  state.trace_entries = options.native && std::getenv("HP2_TRACE_ENTRIES") != nullptr;  // development only
 
   // ---- translation ----
   Translator ee(elf, d, state, layout.ram_size, options.threads);

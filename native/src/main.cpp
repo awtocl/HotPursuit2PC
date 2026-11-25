@@ -19,6 +19,11 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <unordered_map>
+#include <memory>
+#include <algorithm>
+
+#include "virtual_disc.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -134,6 +139,8 @@ std::uint32_t g_heapStart = 0, g_heapEnd = 0;
 std::deque<std::pair<std::uint32_t, std::uint32_t>> g_pendingDmac;  // channel, unused
 std::map<std::uint32_t, std::uint32_t> g_hw;                       // hardware registers as last written
 std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
+std::unordered_map<std::uint32_t, std::uint64_t> g_funcCount;  // function -> entries (traced packages)
+std::vector<std::uint32_t> g_funcOrder;                        // functions in order of their first entry
 LARGE_INTEGER g_qpf, g_nextVblank;
 std::uint32_t g_lastEntry = 0, g_sinceCheck = 0;
 std::map<int, std::uint32_t> g_userSyscalls;  // system calls installed by the game (SetSyscall)
@@ -161,6 +168,16 @@ std::uint32_t g_intcPending = 0;  // INTC causes raised, waiting for the schedul
 std::uint32_t g_vifCycle = 0x0101;  // CL | WL << 8 (STCYCL)
 std::uint64_t g_vifCodes = 0, g_vifInterrupts = 0, g_vifStarts = 0;
 std::uint32_t g_vifMark = 0;
+std::uint8_t g_vu1Micro[0x4000], g_vu1Data[0x4000], g_vu0Micro[0x1000], g_vu0Data[0x1000];  // vector unit memories
+
+// The CPU sees the vector units' memories at 11000000 (VU0 code), 11004000 (VU0 data), 11008000 (VU1 code), 1100C000 (VU1 data).
+std::uint8_t* VuMemory(std::uint32_t a) {
+  if (a < 0x11000000 || a >= 0x11010000) return nullptr;
+  if (a >= 0x1100C000) return g_vu1Data + (a - 0x1100C000);
+  if (a >= 0x11008000) return g_vu1Micro + (a - 0x11008000);
+  if (a >= 0x11005000 || (a >= 0x11001000 && a < 0x11004000)) return nullptr;
+  return a >= 0x11004000 ? g_vu0Data + (a - 0x11004000) : g_vu0Micro + (a - 0x11000000);
+}
 
 void ParseVif1(const std::vector<std::uint8_t>& d) {
   std::size_t pos = 0;
@@ -175,13 +192,20 @@ void ParseVif1(const std::vector<std::uint8_t>& d) {
       g_intcPending |= 1u << 5;
       g_intcStat |= 1u << 5;
     }
+    static int unknown = 0;
+    if (!(cmd <= 0x07 || cmd == 0x10 || cmd == 0x11 || cmd == 0x13 || cmd == 0x14 || cmd == 0x15 || cmd == 0x17 || cmd == 0x20 ||
+          cmd == 0x30 || cmd == 0x31 || cmd == 0x4A || cmd == 0x50 || cmd == 0x51 || cmd >= 0x60) && unknown++ < 20)
+      Log("hw: VIF1 stream: unknown code %08X at byte %zu of %zu", code, pos - 4, d.size());
     if (cmd == 0x07) g_vifMark = imm;                                    // MARK: the game polls VIF1_MARK for it
     else if (cmd == 0x01) g_vifCycle = imm;
     else if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) ++g_vifStarts;  // MSCAL, MSCALF, MSCNT: VU1 programs (not run yet)
     else if (cmd == 0x20) pos += 4;                                      // STMASK
     else if (cmd == 0x30 || cmd == 0x31) pos += 16;                      // STROW, STCOL
-    else if (cmd == 0x4A) pos = ((pos + 7) & ~std::size_t{7}) + (num ? num : 256) * 8;  // MPG
-    else if (cmd == 0x50 || cmd == 0x51) pos = ((pos + 15) & ~std::size_t{15}) + (imm ? imm : 0x10000) * 16;  // DIRECT(HL)
+    else if (cmd == 0x4A) {                                                // MPG: microprogram into VU1 code memory
+      const std::size_t bytes = static_cast<std::size_t>(num ? num : 256) * 8;
+      for (std::size_t i = 0; i < bytes && pos + i < d.size(); ++i) g_vu1Micro[(imm * 8 + i) & 0x3FFF] = d[pos + i];
+      pos += bytes;
+    } else if (cmd == 0x50 || cmd == 0x51) pos += static_cast<std::size_t>(imm ? imm : 0x10000) * 16;  // DIRECT(HL)
     else if (cmd >= 0x60) {                                              // UNPACK
       const std::uint32_t cl = g_vifCycle & 0xFF, wl = (g_vifCycle >> 8) & 0xFF, vn = (cmd >> 2) & 3, vl = cmd & 3;
       std::uint32_t count = num ? num : 256;
@@ -226,6 +250,11 @@ void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
 std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
   const std::uint32_t a = Phys(address);
   if (a >= 0x1FC00000 && a < 0x20000000) return 0;  // boot ROM area
+  if (std::uint8_t* p = VuMemory(a)) {  // vector unit code/data memories are plain memory to the CPU
+    std::uint64_t v = 0;
+    memcpy(&v, p, size > 8 ? 8 : size);
+    return v;
+  }
   switch (a) {
     case 0x1000F000: return g_intcStat;
     case 0x1000F010: return g_intcMask;
@@ -255,6 +284,10 @@ std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
 void HwWrite(std::uint8_t*, std::uint32_t address, std::uint64_t value, std::uint32_t size) {
   const std::uint32_t a = Phys(address);
   const std::uint32_t v = static_cast<std::uint32_t>(value);
+  if (std::uint8_t* p = VuMemory(a)) {
+    memcpy(p, &value, size > 8 ? 8 : size);
+    return;
+  }
   switch (a) {
     case 0x1000F000: g_intcStat &= ~v; return;
     case 0x1000F010: g_intcMask ^= v; return;
@@ -286,6 +319,10 @@ void HwWrite(std::uint8_t*, std::uint32_t address, std::uint64_t value, std::uin
 // ei, di, mfc0, mtc0 (translated code calls this for them).
 void System(std::uint8_t* state, std::uint32_t raw) {
   auto& s = *reinterpret_cast<NativeState*>(state);
+  if ((raw >> 26) != 0x10) {  // not a COP0 instruction: a function entry (package built with HP2_TRACE_ENTRIES)
+    if (++g_funcCount[raw] == 1) g_funcOrder.push_back(raw);
+    return;
+  }
   if (raw == 0x42000038) { g_status |= 0x10000; return; }   // ei
   if (raw == 0x42000039) { g_status &= ~0x10000u; return; }  // di
   const unsigned rt = (raw >> 16) & 31, rd = (raw >> 11) & 31;
@@ -599,6 +636,130 @@ void Syscall(NativeState& s) {
 }
 
 // ---- I/O processor services (host services at the library's RPC functions, ADR 0011) ----
+bool g_profile = true;
+
+// ---- the disc (R2b): the owner's ROM folder as an ISO 9660 disc, read through the project's own virtual disc ----
+std::shared_ptr<hp2::VirtualDisc> g_disc;
+bool DiscRead(std::uint64_t offset, void* out, std::uint64_t count) {
+  if (!g_disc) return false;
+  try {
+    return g_disc->Read(offset, out, count) == count;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+// Finds a file by its path ("cdrom:\NFSHP2\FILE.BIN;1"): first sector and size.
+bool DiscFind(std::string path, std::uint32_t& lsn, std::uint32_t& size) {
+  if (const auto colon = path.find(':'); colon != std::string::npos) path.erase(0, colon + 1);
+  std::vector<std::string> parts;
+  std::string part;
+  for (char c : path + "\\") {
+    if (c == '\\' || c == '/') {
+      if (!part.empty()) {
+        if (const auto semi = part.find(';'); semi != std::string::npos) part.erase(semi);
+        parts.push_back(part);
+        part.clear();
+      }
+    } else {
+      part += c;
+    }
+  }
+  std::uint8_t sector[2048];
+  if (!DiscRead(16 * 2048ull, sector, 2048)) return false;
+  auto le32 = [](const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0] | p[1] << 8 | p[2] << 16 | static_cast<std::uint32_t>(p[3]) << 24); };
+  lsn = le32(sector + 156 + 2);
+  size = le32(sector + 156 + 10);
+  for (std::size_t k = 0; k < parts.size(); ++k) {
+    std::vector<std::uint8_t> dir(size);
+    if (!DiscRead(lsn * 2048ull, dir.data(), size)) return false;
+    bool found = false;
+    for (std::size_t o = 0; o < dir.size();) {
+      const std::uint8_t len = dir[o];
+      if (len == 0) {  // records do not cross sectors
+        o = (o / 2048 + 1) * 2048;
+        continue;
+      }
+      std::string name(reinterpret_cast<const char*>(&dir[o + 33]), dir[o + 32]);
+      if (const auto semi = name.find(';'); semi != std::string::npos) name.erase(semi);
+      if (name.size() == parts[k].size() &&
+          std::equal(name.begin(), name.end(), parts[k].begin(), [](char a, char b) { return toupper(a) == toupper(b); })) {
+        lsn = le32(&dir[o + 2]);
+        size = le32(&dir[o + 10]);
+        found = true;
+        break;
+      }
+      o += len;
+    }
+    if (!found) return false;
+  }
+  return !parts.empty();
+}
+struct OpenFile {
+  std::uint32_t lsn = 0, size = 0, pos = 0;
+};
+std::map<int, OpenFile> g_files;
+std::uint64_t g_discReads = 0;
+int g_nextFd = 3;
+int FileOpen(std::uint32_t path_address) {
+  const std::string path = GuestString(path_address, 300);
+  OpenFile f;
+  if (!DiscFind(path, f.lsn, f.size)) {
+    Log("io: sceOpen(\"%s\") - not on the disc", path.c_str());
+    return -2;
+  }
+  Log("io: sceOpen(\"%s\") -> fd %d (sector %u, %u bytes)", path.c_str(), g_nextFd, f.lsn, f.size);
+  g_files[g_nextFd] = f;
+  return g_nextFd++;
+}
+int FileSeek(int fd, std::int32_t offset, int whence) {
+  const auto it = g_files.find(fd);
+  if (it == g_files.end()) return -9;
+  OpenFile& f = it->second;
+  const std::int64_t base = whence == 0 ? 0 : whence == 1 ? f.pos : f.size;
+  f.pos = static_cast<std::uint32_t>(std::clamp<std::int64_t>(base + offset, 0, f.size));
+  return static_cast<int>(f.pos);
+}
+int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
+  const auto it = g_files.find(fd);
+  if (it == g_files.end()) return -9;
+  OpenFile& f = it->second;
+  const std::uint32_t n = std::min(size, f.size - f.pos);
+  if (n == 0 || !InRam(buffer, n)) return 0;
+  if (!DiscRead(f.lsn * 2048ull + f.pos, g_ram + Phys(buffer), n)) return -5;
+  f.pos += n;
+  return static_cast<int>(n);
+}
+
+// EA's streamer (IOP server 00012345, function 0): a batch of 16-bit commands [count][id, nargs, args...]... in,
+// a status block out. Modelled from the reference core's traffic (docs/recomp-analysis.md section 18): word 1 counts the
+// batches, word 2 is -1, word 4 holds the result of the last command 0x0E ((a0 << 16) | a1) and, once command 0x34 has
+// been seen, words 66-70 describe two buffers. Streams (word 0 > 0) are not modelled yet: no sound.
+void StreamerService(std::uint32_t send, std::uint32_t recv) {
+  static std::uint32_t batch = 0, result = 0, buf = 0;
+  static bool have34 = false;
+  const std::uint16_t* c = reinterpret_cast<const std::uint16_t*>(g_ram + Phys(send));
+  std::uint32_t i = 1;
+  for (std::uint32_t n = c[0]; n > 0 && i + 1 < 2048; --n) {
+    const std::uint16_t id = c[i], na = c[i + 1];
+    if (id == 0x0E && na >= 2) result = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
+    if (id == 0x34 && na >= 2 && !have34) {
+      have34 = true;
+      buf = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
+    }
+    i += 2u + na;
+  }
+  std::uint32_t* w = reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv));
+  w[1] = ++batch;
+  w[2] = 0xFFFFFFFFu;
+  w[4] = result;
+  if (have34) {
+    w[66] = 2;
+    w[67] = 3;
+    w[68] = buf;
+    w[70] = buf + 0x20000;
+  }
+}
+std::map<std::uint32_t, std::uint64_t> g_entryCount;  // entry place -> times entered (what is the game doing?)
 std::map<std::uint32_t, std::uint32_t> g_rpcServer;  // client structure -> server number
 std::map<std::uint64_t, std::uint64_t> g_rpcCount;   // (server, function) -> calls
 
@@ -618,10 +779,82 @@ void Hook(NativeState& s) {
     const std::uint32_t server = g_rpcServer[A(s, 0)], fn = A(s, 1), recv = A(s, 5), rsize = A(s, 6);
     ++g_rpcCalls;
     if (++g_rpcCount[(static_cast<std::uint64_t>(server) << 32) | fn] == 1)
-      Log("io: first call of server %08X function %u (send %u bytes, receive %u) - no host service yet, zeros returned", server,
-          fn, A(s, 4), rsize);
+      Log("io: first call of server %08X function %u (send %u bytes at %08X, receive %u at %08X) - no host service yet, zeros returned",
+          server, fn, A(s, 4), A(s, 3), rsize, recv);
+    if (g_rpcCount[(static_cast<std::uint64_t>(server) << 32) | fn] == 1 && A(s, 3) && A(s, 4) && InRam(A(s, 3), std::min<std::uint32_t>(A(s, 4), 96))) {
+      char hex[400] = {};
+      const std::uint32_t n = std::min<std::uint32_t>(A(s, 4), 96);
+      for (std::uint32_t i = 0; i < n; ++i) snprintf(hex + i * 3, 4, "%02X ", g_ram[Phys(A(s, 3)) + i]);
+      Log("io:   send data of server %08X function %u: %s", server, fn, hex);
+    }
+    if (server == 0x00012345 && g_rpcCount[(static_cast<std::uint64_t>(server) << 32) | fn] <= 3 && InRam(A(s, 3), 64)) {
+      char hex[200] = {};
+      for (int i = 0; i < 64; ++i) snprintf(hex + i * 3, 4, "%02X ", g_ram[Phys(A(s, 3)) + i]);
+      Log("io:   streamer command #%llu: %s", static_cast<unsigned long long>(g_rpcCount[(static_cast<std::uint64_t>(server) << 32) | fn]), hex);
+    }
     if (recv && rsize && InRam(recv, rsize)) memset(g_ram + Phys(recv), 0, rsize);
+    if (server == 0x80000100 && fn == 1 && recv && rsize >= 24 && InRam(recv, 24)) {  // pad library, function 1: the reference's answer
+      static const std::uint32_t reply[6] = {0x0A, 1, 0, 0x0FFF, 1, 1};
+      memcpy(g_ram + Phys(recv), reply, sizeof reply);
+    }
+    if (server == 0x80000593 && recv && InRam(recv, 4)) {  // libcdvd system commands
+      if (fn == 3) Wr<std::uint32_t>(recv, 0x14);          // sceCdGetDiskType: PS2 DVD
+      else if (fn == 4) Wr<std::uint32_t>(recv, 0);        // sceCdGetError: none
+      else if (fn == 34) Wr<std::uint32_t>(recv, 1);       // (unidentified command: success)
+    }
+    if (server == 0x80000597 && fn == 0 && A(s, 3) && InRam(A(s, 3), 300) && recv && InRam(recv, 4)) {  // sceCdSearchFile
+      const std::uint32_t buffer = A(s, 3);
+      const std::string path = GuestString(buffer + 36, 250);
+      std::uint32_t lsn = 0, size = 0;
+      const bool found = DiscFind(path, lsn, size);
+      Log("io: sceCdSearchFile(\"%s\") -> %s (sector %u, %u bytes)", path.c_str(), found ? "found" : "NOT FOUND", lsn, size);
+      if (found) {
+        Wr<std::uint32_t>(buffer, lsn);
+        Wr<std::uint32_t>(buffer + 4, size);
+        std::string name = path.substr(path.find_last_of("\\/") + 1);
+        if (const auto semi = name.find(';'); semi != std::string::npos) name.erase(semi);
+        for (int i = 0; i < 16; ++i) g_ram[Phys(buffer) + 8 + i] = i < static_cast<int>(name.size()) && i < 15 ? static_cast<std::uint8_t>(name[i]) : 0;
+        memset(g_ram + Phys(buffer) + 24, 0, 12);
+      }
+      Wr<std::uint32_t>(recv, found ? 1 : 0);
+    }
+    if (server == 0x80000595 && fn == 15 && A(s, 3) && InRam(A(s, 3), 788)) {  // sceCdReadChain: (sector, count, address) x n, ended by -1
+      const std::uint32_t tags = A(s, 3);
+      for (std::uint32_t i = 0; i < 64; ++i) {
+        const std::uint32_t lsn = Rd<std::uint32_t>(tags + 12 * i), count = Rd<std::uint32_t>(tags + 12 * i + 4);
+        const std::uint32_t address = Rd<std::uint32_t>(tags + 12 * i + 8) & ~1u;
+        if (lsn == 0xFFFFFFFFu) break;
+        if (static_cast<std::int32_t>(lsn) < 0 || !InRam(address, count * 2048) || !DiscRead(lsn * 2048ull, g_ram + Phys(address), count * 2048ull))
+          Log("io: sceCdReadChain entry (sector %d, %u sectors, %08X) not served", static_cast<std::int32_t>(lsn), count, address);
+        else
+          ++g_discReads;
+      }
+    }
+    if (server == 0x80000595 && fn == 1 && A(s, 4) >= 12 && InRam(A(s, 3), 12)) {  // sceCdRead(lsn, sectors, buffer, ...)
+      const std::uint32_t lsn = Rd<std::uint32_t>(A(s, 3)), sectors = Rd<std::uint32_t>(A(s, 3) + 4), buf = Rd<std::uint32_t>(A(s, 3) + 8);
+      if (InRam(buf, sectors * 2048) && DiscRead(lsn * 2048ull, g_ram + Phys(buf), sectors * 2048ull))
+        ++g_discReads;
+      else
+        Log("io: sceCdRead(lsn %u, %u sectors, %08X) failed", lsn, sectors, buf);
+    }
+    if (server == 0x00012345 && fn == 0 && recv && rsize >= 0x120 && InRam(recv, rsize) && InRam(A(s, 3), 4096)) StreamerService(A(s, 3), recv);
+    if (const std::uint32_t endfn = A(s, 7)) {  // asynchronous call: the I/O processor's answer runs the end function
+      const std::uint32_t sp = static_cast<std::uint32_t>(s.gpr[29][0]);
+      const std::uint32_t endarg = InRam(sp, 4) ? Rd<std::uint32_t>(sp) : 0;  // ninth argument: first stack word
+      NativeState tmp = s;
+      tmp.gpr[29][0] -= 0x80;
+      CallGuest(tmp, endfn, endarg, 0);
+    }
     Ret(s, 0);
+  } else if (pc == kHookOpen) {  // sceOpen(path, flags)
+    Ret(s, FileOpen(A(s, 0)));
+  } else if (pc == kHookClose) {  // sceClose(fd)
+    g_files.erase(static_cast<int>(A(s, 0)));
+    Ret(s, 0);
+  } else if (pc == kHookLseek) {  // sceLseek(fd, offset, whence)
+    Ret(s, FileSeek(static_cast<int>(A(s, 0)), static_cast<std::int32_t>(A(s, 1)), static_cast<int>(A(s, 2))));
+  } else if (pc == kHookRead) {  // sceRead(fd, buffer, size)
+    Ret(s, FileRead(static_cast<int>(A(s, 0)), A(s, 1), A(s, 2)));
   } else {  // sceSifCheckStatRpc(client): never busy, calls complete at once
     Ret(s, 0);
   }
@@ -635,6 +868,7 @@ void Step(NativeState& s) {
   if (void* code = FindCode(pc)) {
     s.cycle_quota = kSliceQuota;
     g_lastEntry = pc;
+    if (g_profile) ++g_entryCount[pc];
     reinterpret_cast<EeCode>(code)(reinterpret_cast<std::uint8_t*>(&s), g_ram, g_spr, &g_runtime);
     bool due = false;
     if (++g_sinceCheck >= 64) {
@@ -711,6 +945,12 @@ int wmain(int argc, wchar_t** argv) {
     for (const ElfSegment& seg : elf.segments())
       if (seg.loadable() && seg.filesz) memcpy(g_ram + Phys(seg.vaddr), elf.file().data() + seg.offset, seg.filesz);
     Log("Executable loaded: %ls (entry %08X)", (rom / L"SLUS_203.62").c_str(), elf.entry());
+    {
+      std::string error;
+      g_disc = hp2::VirtualDisc::Open(rom.wstring(), error);
+      if (!g_disc) fail("cannot open the disc from the ROM folder: {}", error);
+      Log("Disc: %s", g_disc->Description().c_str());
+    }
 
     // ---- the translated code ----
     HMODULE module = LoadLibraryW(dll.c_str());
@@ -797,6 +1037,30 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<double>(end.QuadPart - start.QuadPart) / g_qpf.QuadPart, static_cast<unsigned long long>(g_vblanks),
         static_cast<unsigned long long>(g_steps), static_cast<unsigned long long>(g_syscalls),
         static_cast<unsigned long long>(g_rpcCalls));
+    {
+      std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
+      for (const auto& [pc, n] : g_entryCount) top.emplace_back(n, pc);
+      std::sort(top.rbegin(), top.rend());
+      if (FILE* f = fopen(".cache/native/entries.txt", "w")) {  // every entry place, for comparisons with the reference traces
+        for (const auto& [n, pc] : top) fprintf(f, "%08X\t%llu\n", pc, static_cast<unsigned long long>(n));
+        fclose(f);
+      }
+      if (!g_funcOrder.empty())
+        if (FILE* f = fopen(".cache/native/functions.txt", "w")) {  // functions in order of first entry, with entry counts
+          for (std::uint32_t fn : g_funcOrder) fprintf(f, "%08X\t%llu\n", fn, static_cast<unsigned long long>(g_funcCount[fn]));
+          fclose(f);
+        }
+      Log("  distinct entry places: %zu; most entered:", top.size());
+      for (std::size_t i = 0; i < top.size() && i < 24; ++i)
+        Log("    %08X: %llu", top[i].second, static_cast<unsigned long long>(top[i].first));
+    }
+    Log("  VIF1: %llu codes, %llu interrupts requested, %llu VU1 starts (not run), mark %04X; INTC stat %04X mask %04X pending %04X; disc reads %llu",
+        static_cast<unsigned long long>(g_vifCodes), static_cast<unsigned long long>(g_vifInterrupts),
+        static_cast<unsigned long long>(g_vifStarts), g_vifMark, g_intcStat, g_intcMask, g_intcPending,
+        static_cast<unsigned long long>(g_discReads));
+    for (const auto& [key, n] : g_rpcCount)
+      Log("  rpc server %08X function %u: %llu calls", static_cast<std::uint32_t>(key >> 32), static_cast<std::uint32_t>(key),
+          static_cast<unsigned long long>(n));
     for (std::size_t i = 1; i < g_threads.size(); ++i) {
       const Thread& t = *g_threads[i];
       if (t.used)

@@ -68,7 +68,7 @@ bool supported(const Insn& in, bool native) {
     case Op::CVT_W_S: case Op::CVT_S_W: case Op::C_F_S: case Op::C_EQ_S: case Op::C_LT_S: case Op::C_LE_S:
     case Op::POR: case Op::PAND: case Op::PXOR: case Op::PNOR: case Op::PCPYLD: case Op::PCPYUD:
     case Op::PEXTLW: case Op::PEXTUW: case Op::PADDW: case Op::PSUBW: case Op::PMULTH:
-    case Op::PMAXW: case Op::PMINW: case Op::PSUBB: case Op::PCPYH: case Op::PEXEW: case Op::PROT3W: case Op::PMFLO:
+    case Op::PMAXW: case Op::PMINW: case Op::PSUBB: case Op::PCPYH: case Op::PEXEW: case Op::PROT3W: case Op::PMFLO: case Op::PEXCW: case Op::PMFHI:
     case Op::LQC2: case Op::SQC2: case Op::QMFC2: case Op::QMTC2:
     case Op::SYNC: case Op::PREF: case Op::CACHE:
     // VU0 macro mode
@@ -145,6 +145,10 @@ class FunctionLifter : public VectorCode {
     // core re-enters translated code there after it ran something itself).
     auto* entry = llvm::BasicBlock::Create(ctx_, "entry", fn_);
     b_.SetInsertPoint(entry);
+    if (L_.trace_entries) {
+      auto* type = llvm::FunctionType::get(b_.getVoidTy(), {b_.getPtrTy(), i32_}, false);
+      b_.CreateCall(type, runtime_fn(2), {state_, b_.getInt32(f_.start)});
+    }
     auto* sw = b_.CreateSwitch(ld(i32_, L_.pc), block(f_.start));
     for (std::uint32_t pc = f_.start + 4; pc < f_.end; pc += 4)
       if ((d_.flags_at(pc) & kLeader) && inside(pc) && can_enter(pc)) {
@@ -949,6 +953,8 @@ class FunctionLifter : public VectorCode {
       case Op::PEXEW: W(rd, pair(word(rt, 2), word(rt, 1))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
       case Op::PROT3W: W(rd, pair(word(rt, 1), word(rt, 2))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
       case Op::PMFLO: W(rd, ld(i64_, L_.lo)); WH(rd, ld(i64_, L_.lo1)); break;
+      case Op::PMFHI: W(rd, ld(i64_, L_.hi)); WH(rd, ld(i64_, L_.hi1)); break;
+      case Op::PEXCW: W(rd, pair(word(rt, 0), word(rt, 2))); WH(rd, pair(word(rt, 1), word(rt, 3))); break;
       case Op::PADDW: case Op::PSUBW: {
         llvm::Value* w[4];
         for (int i = 0; i < 4; ++i)
