@@ -154,6 +154,74 @@ void Stop(const char* format, ...) {
   g_stop = true;
 }
 
+// ---- DMA ---------------------------------------------------------------------------------
+// Transfers complete at once. The data is walked, so that what the game waits for happens: for VIF1 the
+// command stream is parsed (interrupt bit -> INTC VIF1 interrupt). Graphics and VU1 programs come later.
+std::uint32_t g_intcPending = 0;  // INTC causes raised, waiting for the scheduler to deliver them
+std::uint32_t g_vifCycle = 0x0101;  // CL | WL << 8 (STCYCL)
+std::uint64_t g_vifCodes = 0, g_vifInterrupts = 0, g_vifStarts = 0;
+std::uint32_t g_vifMark = 0;
+
+void ParseVif1(const std::vector<std::uint8_t>& d) {
+  std::size_t pos = 0;
+  auto word = [&](std::size_t at) { std::uint32_t v = 0; if (at + 4 <= d.size()) memcpy(&v, d.data() + at, 4); return v; };
+  while (pos + 4 <= d.size()) {
+    const std::uint32_t code = word(pos);
+    const std::uint32_t cmd = (code >> 24) & 0x7F, num = (code >> 16) & 0xFF, imm = code & 0xFFFF;
+    pos += 4;
+    ++g_vifCodes;
+    if ((code & 0x80000000u) && cmd != 0x07) {  // the interrupt bit (MARK excepted)
+      ++g_vifInterrupts;
+      g_intcPending |= 1u << 5;
+      g_intcStat |= 1u << 5;
+    }
+    if (cmd == 0x07) g_vifMark = imm;                                    // MARK: the game polls VIF1_MARK for it
+    else if (cmd == 0x01) g_vifCycle = imm;
+    else if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) ++g_vifStarts;  // MSCAL, MSCALF, MSCNT: VU1 programs (not run yet)
+    else if (cmd == 0x20) pos += 4;                                      // STMASK
+    else if (cmd == 0x30 || cmd == 0x31) pos += 16;                      // STROW, STCOL
+    else if (cmd == 0x4A) pos = ((pos + 7) & ~std::size_t{7}) + (num ? num : 256) * 8;  // MPG
+    else if (cmd == 0x50 || cmd == 0x51) pos = ((pos + 15) & ~std::size_t{15}) + (imm ? imm : 0x10000) * 16;  // DIRECT(HL)
+    else if (cmd >= 0x60) {                                              // UNPACK
+      const std::uint32_t cl = g_vifCycle & 0xFF, wl = (g_vifCycle >> 8) & 0xFF, vn = (cmd >> 2) & 3, vl = cmd & 3;
+      std::uint32_t count = num ? num : 256;
+      if (wl > cl && cl > 0) count = (count / wl) * cl + (std::min)(count % wl, cl);
+      const std::uint32_t bits = (vn == 3 && vl == 3) ? 16 : (32u >> vl) * (vn + 1);
+      pos += (static_cast<std::size_t>(count) * bits + 31) / 32 * 4;
+    }
+  }
+}
+
+void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
+  std::vector<std::uint8_t> data;
+  auto take = [&](std::uint32_t address, std::uint32_t qwc) {
+    const bool spr = (address & 0x80000000u) != 0;
+    for (std::uint32_t i = 0; i < qwc; ++i) {
+      const std::uint32_t a = (address & 0x7FFFFFFFu) + i * 16;
+      const std::uint8_t* src = spr ? g_spr + (a & 0x3FFF) : g_ram + (InRam(a, 16) ? Phys(a) : 0);
+      data.insert(data.end(), src, src + 16);
+    }
+  };
+  if (((chcr >> 2) & 3) == 0) {
+    take(g_hw[base + 0x10], g_hw[base + 0x20] & 0xFFFF);
+  } else {
+    std::uint32_t tadr = g_hw[base + 0x30];
+    for (int guard = 0; guard < 100000; ++guard) {
+      const std::uint64_t tag = Rd<std::uint64_t>(tadr);
+      const std::uint32_t id = (tag >> 28) & 7, qwc = tag & 0xFFFF, addr = static_cast<std::uint32_t>(tag >> 32);
+      if (chcr & 0x40) {  // TTE: the tag's upper half (two VIF codes) goes along
+        const std::uint8_t* hi = g_ram + Phys(tadr) + 8;
+        data.insert(data.end(), hi, hi + 8);
+      }
+      if (id == 1 || id == 7 || id == 2 || id == 5 || id == 6) take(tadr + 16, qwc);
+      else take(addr, qwc);  // refe, ref, refs
+      if (id == 0 || id == 7) break;
+      tadr = (id == 2 || id == 5) ? addr : tadr + 16 + (id == 1 || id == 6 ? qwc * 16 : 0);
+    }
+  }
+  if (channel == 1) ParseVif1(data);
+}
+
 // ---- hardware registers (slow path of the translated code) -----------------------
 std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
   const std::uint32_t a = Phys(address);
@@ -166,6 +234,7 @@ std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
     case 0x12001000: return 0x00000008 | ((g_vblanks & 1) << 13);  // GS CSR: FIFO empty, field
     case 0x10003020: return 0;  // GIF_STAT: idle
     case 0x10003C00: return 0;  // VIF1_STAT: idle
+    case 0x10003C30: return g_vifMark;  // VIF1_MARK
     case 0x10003800: return 0;  // VIF0_STAT
     case 0x1000F520: return g_hw[0x1000F590];  // D_ENABLER
     default: break;
@@ -200,6 +269,7 @@ void HwWrite(std::uint8_t*, std::uint32_t address, std::uint64_t value, std::uin
                                             0x1000C000, 0x1000C400, 0x1000C800, 0x1000D000, 0x1000D400};
     for (std::uint32_t ch = 0; ch < 10; ++ch)
       if (bases[ch] == a) {
+        RunDma(ch, a, v);
         g_dmacStat |= 1u << ch;
         g_pendingDmac.emplace_back(ch, 0);
         LogOnce("dma" + std::to_string(ch), "hw: first DMA transfer on channel %u (data not consumed yet)", ch);
@@ -298,6 +368,11 @@ void DeliverInterrupts() {
       if (enabled && (g_intcMask & (1u << cause))) RunHandlers(g_intc, cause);
     }
   }
+  for (std::uint32_t cause = 0; cause < 16 && enabled && !g_stop; ++cause)  // raised by devices (VIF1 ...)
+    if ((g_intcPending & (1u << cause)) && (g_intcMask & (1u << cause))) {
+      g_intcPending &= ~(1u << cause);
+      RunHandlers(g_intc, cause);
+    }
 }
 
 // ---- kernel services ---------------------------------------------------------------

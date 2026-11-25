@@ -10,6 +10,10 @@
 
 namespace hp2 {
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)  // padded because of alignas: intended, the vector registers are 16-byte aligned
+#endif
 struct alignas(16) NativeState {
   std::uint32_t pc = 0;
   std::uint32_t delayed_jump = 1;
@@ -30,6 +34,9 @@ struct alignas(16) NativeState {
   alignas(16) std::uint32_t fmac_write[12] = {};
   std::uint32_t saved_next_index = 0, saved_next_value = 0, xgkick_address = 0;
 };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 inline constexpr std::uint32_t kNativeRamSize = 32u << 20;
 // has_exception values used by VU1 microcode in the native runtime.
