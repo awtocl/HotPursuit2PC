@@ -1,4 +1,30 @@
-# HANDOVER — where development was paused (2026-11-16)
+# HANDOVER — current state of the native runtime (updated 2026-11-25)
+
+> Development resumed 2026-11-25 (owner: "continue the native port, document so other models can resume when I say *timeout*"). The section "Progress 2026-11-25" below is the newest; the rest is the 2026-11-16 pause note and is partly superseded.
+
+## Progress 2026-11-25 (read this first)
+
+Run: `pwsh tools/native-run.ps1 -Seconds 15` (builds, rebuilds the 30 s code package, runs; `-NoPackage` when only `native/` changed). Log: `.cache/native/native.log`.
+
+**The game now runs natively through its whole start-up** (no emulator code anywhere): kernel set-up, heap, the game's own kernel-mode layer, SIF/RPC set-up, the I/O servers it binds, pad/wheel/streamer set-up, first DMA, timed waits. It stops waiting for an interrupt from VIF1 (see Next).
+
+Fixed this session (all in `native/src/main.cpp` or `recomp/`):
+- `EndOfHeap` (service 0x3E) returns the limit `g_heapEnd` (was the start).
+- **Kernel syscall table at 0x80002000**: `SetSyscall` (0x74) writes there; any syscall whose table entry is set runs that *game* function (the game installs its own syscalls 8,84-91,131,252-255,300 and searches kernel memory for them).
+- **Relocated code** (ADR-worthy, `recomp/include/hp2/native_state.h` `kNativeOverlays`): the game copies two blocks of its own code into kernel memory: 1856 B from 0x00328E58 to 0x80076000 (interrupt/exception helper layer, `mfc0/eret`) and 816 B from 0x00328020 to 0x80075000 (TLB manager, `tlbwi`...). They are translated as extra images (`ElfImage::code_blob`, `CodeOverlay`, second `Translator` per blob with its own `dispatch_symbol`). A third blob of 40 bytes (0x00329598 -> 0x80082000, thread-exit stub) is NOT translated (not needed: threads end at the runtime's return address).
+- Translator additions: MMI `pmaxw pminw psubb pcpyh pexew prot3w pmflo`; `cfc2/ctc2` on VU control regs 27-31 (native only: VPU_STAT reads 0).
+- `sceSifInitRpc` (0x00285118/0x0028511C) is a host service (sets the game's init word 0x00327F7C); `sceSifBindRpc/CallRpc/CheckStatRpc` hooks as before.
+- COP0 Count (`mfc0 c0r9`) follows the host clock at 294.912 MHz (the game's timed waits).
+
+### Next (in order)
+1. **VIF1/GIF/DMA minimum (R3 start).** Thread 1 spins at 0x00111E00 (function 0x00111DD8) waiting for words at gp-25248/-25244 that the INTC handler 0x00111FD8 (cause 5 = VIF1) clears. The game marks its VIF1 packets with the interrupt bit and waits. Implement in `HwWrite` (DMA CHCR start): walk the DMA tag chain (source chain mode), for channel 1 parse VIF codes (I bit -> raise INTC cause 5 and run the handler; MSCAL/MSCNT -> VU1 microcode via the translated image, see ADR 0008/0010; UNPACK -> VU1 memory), for channel 2 GIF packets (discard for now, later the renderer).
+2. I/O host services (ADR 0011): servers `80000592/593/597/595/59A` (disc), `80000006` (module load: report success), `80000001` (files), `80000100/101` (pad), `80000400` (memory card), `00012345` (EA streamer), `046D046D` (wheel). All still return zeros.
+3. Remaining translator gaps printed by `hp2recomp package` (`break` 266 = asserts, `bc0t/bc0f`, `tlb*`, `eret` in the kernel layer, `mfsa/mtsa/mtsab`, `pexcw`, `pmfhi`, `vcallmsr`, `vlqi/vsqi`, 193 'code outside the analysed function', 168 `syscall` sites handled by the runtime).
+4. Still owed to the owner: **GitHub dev build `v0.2.0-dev.1`** (nothing pushed; `gh` is logged in as the repo owner); ADR 0012 (native runtime) + `docs/recomp-analysis.md` section 18; re-run `pwsh tools/build.ps1` (tests) and the reference-mode checks (translator changed: beql/break pattern, MMI ops).
+
+---
+
+## (older) 2026-11-16 pause note
 
 The owner paused development in the middle of the first native-runtime step. Read `docs/STATUS.md` first (project
 state, owner requirements, ADRs), then this file (what was in progress and the exact next actions).

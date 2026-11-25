@@ -61,6 +61,9 @@ struct StateLayout {
   // the runtime after every pass (it runs interrupt handlers and other
   // threads); with the reference core they are left to it.
   bool yield_in_idle_loops = false;
+  // Symbol of the function that calls through a pointer. A second translator in the
+  // same package (code the program relocates, ADR 0012) needs its own.
+  std::string dispatch_symbol = "hp2_dispatch";
 };
 
 // Slow path for addresses that are neither main memory nor the scratchpad

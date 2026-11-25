@@ -136,6 +136,7 @@ std::map<std::uint32_t, std::uint32_t> g_hw;                       // hardware r
 std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
 LARGE_INTEGER g_qpf, g_nextVblank;
 std::uint32_t g_lastEntry = 0, g_sinceCheck = 0;
+std::map<int, std::uint32_t> g_userSyscalls;  // system calls installed by the game (SetSyscall)
 bool g_stop = false;
 std::string g_stopReason;
 
@@ -219,7 +220,14 @@ void System(std::uint8_t* state, std::uint32_t raw) {
   if (raw == 0x42000039) { g_status &= ~0x10000u; return; }  // di
   const unsigned rt = (raw >> 16) & 31, rd = (raw >> 11) & 31;
   if (((raw >> 21) & 31) == 0) {  // mfc0
-    const std::uint32_t v = rd == 12 ? g_status : rd == 15 ? 0x2E20 /* processor id */ : s.cop0[rd];
+    std::uint32_t v = rd == 12 ? g_status : rd == 15 ? 0x2E20 /* processor id */ : s.cop0[rd];
+    if (rd == 9) {  // Count: CPU cycles at 294.912 MHz, from the host clock
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      const std::uint64_t whole = static_cast<std::uint64_t>(now.QuadPart / g_qpf.QuadPart);
+      const std::uint64_t rest = static_cast<std::uint64_t>(now.QuadPart % g_qpf.QuadPart);
+      v = static_cast<std::uint32_t>(whole * 294912000ull + rest * 294912000ull / static_cast<std::uint64_t>(g_qpf.QuadPart));
+    }
     if (rt) s.gpr[rt][0] = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(v)));
   } else {  // mtc0
     if (rd == 12) g_status = static_cast<std::uint32_t>(s.gpr[rt][0]);
@@ -310,6 +318,17 @@ void Syscall(NativeState& s) {
   if (g_verbose && g_syscalls < 2000)
     Log("  syscall %d at %08X (a0 %08X a1 %08X a2 %08X) from %08X", raw, s.pc - 4, A(s, 0), A(s, 1), A(s, 2),
         static_cast<std::uint32_t>(s.gpr[31][0]));
+  // The kernel's syscall table lives at 0x80002000 (one word per number, as on the console): entries the
+  // game installed itself - or patched there, it searches kernel memory for them - are game functions.
+  if (const std::uint32_t handler = n < 256 ? Rd<std::uint32_t>(0x80002000u + 4u * n) : 0) {
+    const std::uint32_t resume = s.pc, saved_ra = static_cast<std::uint32_t>(s.gpr[31][0]);
+    s.pc = handler;
+    s.gpr[31][0] = kReturn;
+    while (s.pc != kReturn && !g_stop) Step(s);
+    s.pc = resume;
+    s.gpr[31][0] = saved_ra;
+    return;
+  }
   auto thread = [&](std::uint32_t id) -> Thread* {
     return id < g_threads.size() && id > 0 && g_threads[id]->used ? g_threads[id] : nullptr;
   };
@@ -429,7 +448,7 @@ void Syscall(NativeState& s) {
       Ret(s, static_cast<std::int32_t>(g_heapEnd));
       return;
     }
-    case 0x3E: Ret(s, static_cast<std::int32_t>(g_heapStart)); return;  // EndOfHeap: where the C library's heap begins
+    case 0x3E: Ret(s, static_cast<std::int32_t>(g_heapEnd)); return;  // EndOfHeap: the limit the game's sbrk (0028BA48) compares with
     case 0x40: {  // CreateSema(param)
       const std::uint32_t p = A(s, 0);
       int id = 0;
@@ -477,6 +496,14 @@ void Syscall(NativeState& s) {
       Ret(s, 0);
       return;
     }
+    case 0x74: {  // SetSyscall(number, function): the game's own system call
+      const int num = static_cast<int>(A(s, 0));
+      const std::uint32_t slot = 0x80002000u + 4u * static_cast<std::uint32_t>(num & 255);
+      Ret(s, static_cast<std::int32_t>(Rd<std::uint32_t>(slot)));
+      Wr<std::uint32_t>(slot, A(s, 1));
+      Log("kernel: game system call %d installed at %08X", num, A(s, 1));
+      return;
+    }
     case 0x7C: Ret(s, -1); return;  // Deci2Call: no debugger attached
     case 0x64: case 0x68: Ret(s, 0); return;  // FlushCache: nothing to flush in translated code
     case 0x70: Ret(s, static_cast<std::int32_t>(g_hw[0x12001010])); return;  // GsGetIMR
@@ -502,7 +529,11 @@ std::map<std::uint64_t, std::uint64_t> g_rpcCount;   // (server, function) -> ca
 
 void Hook(NativeState& s) {
   const std::uint32_t pc = s.pc;
-  if (pc == kHookSifBindRpc) {  // sceSifBindRpc(client, server number, mode)
+  if (pc == kHookSifInitRpc || pc == 0x0028511C) {  // sceSifInitRpc(mode)
+    Wr<std::uint32_t>(0x00327F7C, 1);
+    LogOnce("sifinit", "io: sceSifInitRpc served by the runtime (no I/O processor to wait for)");
+    Ret(s, 0);
+  } else if (pc == kHookSifBindRpc) {  // sceSifBindRpc(client, server number, mode)
     const std::uint32_t client = A(s, 0);
     g_rpcServer[client] = A(s, 1);
     Wr<std::uint32_t>(client + 0x24, 0x00001000);  // "server" pointer: bound

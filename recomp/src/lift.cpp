@@ -68,6 +68,7 @@ bool supported(const Insn& in, bool native) {
     case Op::CVT_W_S: case Op::CVT_S_W: case Op::C_F_S: case Op::C_EQ_S: case Op::C_LT_S: case Op::C_LE_S:
     case Op::POR: case Op::PAND: case Op::PXOR: case Op::PNOR: case Op::PCPYLD: case Op::PCPYUD:
     case Op::PEXTLW: case Op::PEXTUW: case Op::PADDW: case Op::PSUBW: case Op::PMULTH:
+    case Op::PMAXW: case Op::PMINW: case Op::PSUBB: case Op::PCPYH: case Op::PEXEW: case Op::PROT3W: case Op::PMFLO:
     case Op::LQC2: case Op::SQC2: case Op::QMFC2: case Op::QMTC2:
     case Op::SYNC: case Op::PREF: case Op::CACHE:
     // VU0 macro mode
@@ -88,7 +89,10 @@ bool supported(const Insn& in, bool native) {
       return true;
     case Op::CFC2: case Op::CTC2: {
       const unsigned reg = in.rd();
-      return reg < 16 || reg == 17 || reg == 18 || reg == 20 || reg == 21 || reg == 22;
+      // 27 CMSAR0, 28 FBRST, 29 VPU_STAT, 31 CMSAR1: control registers of the vector units (native runtime:
+      // VU0 macro code runs inline, so nothing is ever "running"; the others are written and ignored).
+      return reg < 16 || reg == 17 || reg == 18 || reg == 20 || reg == 21 || reg == 22 ||
+             (native && (reg == 27 || reg == 28 || reg == 29 || reg == 31));
     }
     default:
       return false;
@@ -447,7 +451,7 @@ class FunctionLifter : public VectorCode {
   }
   void call_dispatch() {
     flush_flags(true);
-    b_.CreateCall(declare_function(m_, "hp2_dispatch"), {state_, ram_, spr_, rt_});
+    b_.CreateCall(declare_function(m_, L_.dispatch_symbol), {state_, ram_, spr_, rt_});
   }
   // After a call: continue at `back` if execution came back there, else stop
   // (the state is already current).
@@ -587,7 +591,8 @@ class FunctionLifter : public VectorCode {
     const unsigned rt = in.rt(), reg = in.rd();
     if (rt == 0) return;
     llvm::Value* v = nullptr;
-    if (reg < 16) v = b_.CreateAnd(ld(i32_, L_.vi + reg * 4), b_.getInt32(0xFFFF));
+    if (reg >= 27) v = b_.getInt32(0);  // VU control registers of the native runtime: VPU_STAT = idle
+    else if (reg < 16) v = b_.CreateAnd(ld(i32_, L_.vi + reg * 4), b_.getInt32(0xFFFF));
     else if (reg == 17) { pipe_check(L_.pipe_mac, L_.vmf); v = ld(i32_, L_.vmf); }
     else if (reg == 18) { pipe_check(L_.pipe_clip, L_.vcf); v = ld(i32_, L_.vcf); }
     else if (reg == 20) v = ld(i32_, L_.vr);
@@ -598,7 +603,7 @@ class FunctionLifter : public VectorCode {
   void ctc2(const Insn& in) {
     const unsigned reg = in.rd();
     llvm::Value* v = R32(in.rt());
-    if (reg == 0 || reg == 17) return;
+    if (reg == 0 || reg == 17 || reg >= 27) return;
     if (reg < 16) { st(b_.CreateAnd(v, b_.getInt32(0xFFFF)), L_.vi + reg * 4); return; }
     if (reg == 18) {
       v = b_.CreateAnd(v, b_.getInt32(0xFFFFFF));
@@ -912,6 +917,38 @@ class FunctionLifter : public VectorCode {
         WH(rd, hi);
         break;
       }
+      case Op::PMAXW: case Op::PMINW: {
+        llvm::Value* w[4];
+        for (int i = 0; i < 4; ++i)
+          w[i] = b_.CreateBinaryIntrinsic(in.op == Op::PMAXW ? llvm::Intrinsic::smax : llvm::Intrinsic::smin, word(rs, i), word(rt, i));
+        W(rd, pair(w[0], w[1]));
+        WH(rd, pair(w[2], w[3]));
+        break;
+      }
+      case Op::PSUBB: {
+        auto* v8 = llvm::FixedVectorType::get(b_.getInt8Ty(), 8);
+        auto sub = [&](llvm::Value* a, llvm::Value* c) {
+          return b_.CreateBitCast(b_.CreateSub(b_.CreateBitCast(a, v8), b_.CreateBitCast(c, v8)), i64_);
+        };
+        llvm::Value* lo = sub(R(rs), R(rt));
+        llvm::Value* hi = sub(RH(rs), RH(rt));
+        W(rd, lo);
+        WH(rd, hi);
+        break;
+      }
+      case Op::PCPYH: {  // halfword 0 of each 64-bit half, four times
+        auto rep = [&](llvm::Value* half) {
+          return b_.CreateMul(b_.CreateAnd(half, b_.getInt64(0xFFFF)), b_.getInt64(0x0001000100010001ull));
+        };
+        llvm::Value* lo = rep(R(rt));
+        llvm::Value* hi = rep(RH(rt));
+        W(rd, lo);
+        WH(rd, hi);
+        break;
+      }
+      case Op::PEXEW: W(rd, pair(word(rt, 2), word(rt, 1))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
+      case Op::PROT3W: W(rd, pair(word(rt, 1), word(rt, 2))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
+      case Op::PMFLO: W(rd, ld(i64_, L_.lo)); WH(rd, ld(i64_, L_.lo1)); break;
       case Op::PADDW: case Op::PSUBW: {
         llvm::Value* w[4];
         for (int i = 0; i < 4; ++i)
@@ -988,7 +1025,7 @@ struct Translator::Impl {
       llvm::Module& mod = *shards[0].module;
       llvm::LLVMContext& ctx = *shards[0].context;
       llvm::IRBuilder<> b(ctx);
-      llvm::Function* dispatch = declare_function(mod, "hp2_dispatch");
+      llvm::Function* dispatch = declare_function(mod, layout.dispatch_symbol);
       auto* entry = llvm::BasicBlock::Create(ctx, "entry", dispatch);
       auto* none = llvm::BasicBlock::Create(ctx, "none", dispatch);
       b.SetInsertPoint(none);

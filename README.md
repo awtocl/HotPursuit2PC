@@ -4,14 +4,32 @@ A converter that takes **your own dump** of *Need for Speed: Hot Pursuit 2*
 for the PlayStation 2 (NTSC-U, `SLUS-20362`) and builds a folder you can play
 from on Windows 10/11 x64 — the PS2 game itself, not the separate 2003 PC port.
 
-> **Status (2026-11-12): work in progress — it runs, but it is not good enough yet.**
-> The converter is complete for what it does, and the game boots to menus and
-> races. The runtime that plays it is currently an *embedded emulator core*,
-> and the project owner's verdict after playing it is that it stutters and
-> shows rendering defects (details under [Known problems](#known-problems)).
-> The main line of work is now a **static recompilation** of the game with a
-> purpose-built runtime. Nothing here is a finished port.
-> Live state of the project: [`docs/STATUS.md`](docs/STATUS.md).
+## Why this exists
+
+> **The best version of this game is the PlayStation 2 one — so that is the
+> version this project brings to the best platform.**
+
+*Hot Pursuit 2* shipped on several systems, and the PS2 release is the one
+worth keeping: its handling, its cars, its tracks and its feel are the
+reference. This project is not interested in a lookalike; it takes that exact
+game and makes it a first-class citizen on a modern PC: native code, your
+monitor's resolution, your controller, your hardware — with nothing of the
+original console left in the way.
+
+## Status
+
+> **Development build — work in progress (2026-11-25).** Two things exist today:
+>
+> 1. **A converter and a launcher** that play the game on top of an embedded
+>    emulator core. This is the *reference*, kept to compare against; it is not the goal.
+> 2. **The native runtime** (`native/`, `HotPursuit2Native.exe`), the real goal:
+>    the game's program recompiled to x64 and run with **no emulator code at
+>    all**. It boots the game's own start-up and kernel layer natively and is
+>    being brought up step by step: still missing are graphics, sound, input and
+>    disc streaming, so **it does not play yet**.
+>
+> The honest way to follow progress: [`docs/STATUS.md`](docs/STATUS.md) and
+> [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
 ---
 

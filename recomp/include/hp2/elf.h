@@ -27,6 +27,10 @@ class ElfImage {
  public:
   // Throws hp2::Error with the reason when the file is not a usable MIPS ELF.
   static ElfImage parse(Bytes file);
+  // A one-segment image of code the program copies to `load_address` at run time
+  // (the game puts a kernel-mode helper layer of its own at 0x80076000): the same
+  // discovery and translation then apply to it.
+  static ElfImage code_blob(std::uint32_t load_address, ByteView code);
 
   std::uint32_t entry() const { return entry_; }
   std::uint32_t gp() const { return gp_; }  // from .reginfo; 0 when absent

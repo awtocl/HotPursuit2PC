@@ -39,7 +39,21 @@ inline constexpr std::uint32_t kNativeVuDbit = 8, kNativeVuTbit = 9, kNativeVuEb
 // out of the code package, so calls to them return to the runtime.
 inline constexpr std::uint32_t kHookSifBindRpc = 0x00285788, kHookSifCallRpc = 0x00285958,
                                kHookSifCheckStatRpc = 0x00285B48;
-inline constexpr std::uint32_t kNativeHooks[] = {kHookSifBindRpc, kHookSifCallRpc, kHookSifCheckStatRpc};
+// sceSifInitRpc: starts the SIF command layer and waits for the I/O processor's answer. The runtime has no
+// I/O processor: it marks the layer as started (the game's own "already initialised" word, 0x00327F7C).
+// (0x0028511C is where discovery places the function start: both are left out.)
+inline constexpr std::uint32_t kHookSifInitRpc = 0x00285118;
+inline constexpr std::uint32_t kNativeHooks[] = {kHookSifBindRpc, kHookSifCallRpc, kHookSifCheckStatRpc, kHookSifInitRpc,
+                                                  0x0028511C};
+
+// Code the game copies into kernel memory at start-up (found at 0x0028B73C-0x0028B748: it passes the
+// source 0x00328E58, 1856 bytes, and the destination 0x80076000 to its own kernel-copy system call).
+// It is EA's kernel-mode helper layer; translated like the rest, at its load address.
+// A second blob goes to 0x80075000 (found at 0x0028A8B4-0x0028A8C4: source 0x00328020, 816 bytes).
+inline constexpr std::uint32_t kNativeOverlays[][3] = {  // source, size, load
+    {0x00328E58, 0x740, 0x80076000},
+    {0x00328020, 0x330, 0x80075000},
+};
 
 inline Hp2CodeLayout native_code_layout() {
   Hp2CodeLayout l = {};

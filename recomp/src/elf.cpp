@@ -97,6 +97,32 @@ ElfImage ElfImage::parse(Bytes file) {
   return e;
 }
 
+ElfImage ElfImage::code_blob(std::uint32_t load_address, ByteView code) {
+  // A minimal ELF32 little-endian MIPS file: header, one executable PT_LOAD segment, the code.
+  Bytes f(84 + code.size(), 0);
+  auto put16 = [&](std::size_t o, std::uint16_t v) { f[o] = v & 0xFF; f[o + 1] = v >> 8; };
+  auto put32 = [&](std::size_t o, std::uint32_t v) { for (int i = 0; i < 4; ++i) f[o + i] = (v >> (8 * i)) & 0xFF; };
+  f[0] = 0x7F; f[1] = 'E'; f[2] = 'L'; f[3] = 'F'; f[4] = 1; f[5] = 1; f[6] = 1;
+  put16(16, 2);                 // executable
+  put16(18, 8);                 // MIPS
+  put32(20, 1);
+  put32(24, load_address);      // entry: the start of the blob
+  put32(28, 52);                // program headers right after the header
+  put16(40, 52);
+  put16(42, 32);
+  put16(44, 1);
+  put32(52, 1);                 // PT_LOAD
+  put32(56, 84);                // offset of the code
+  put32(60, load_address);
+  put32(64, load_address);
+  put32(68, static_cast<std::uint32_t>(code.size()));
+  put32(72, static_cast<std::uint32_t>(code.size()));
+  put32(76, 5);                 // R + X
+  put32(80, 4);
+  std::copy(code.begin(), code.end(), f.begin() + 84);
+  return parse(std::move(f));
+}
+
 const ElfSection* ElfImage::section(std::string_view name) const {
   for (const ElfSection& s : sections_)
     if (s.name == name) return &s;

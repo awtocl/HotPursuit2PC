@@ -15,7 +15,15 @@
 
 namespace hp2 {
 
+// Code the program copies elsewhere at run time (found by reading the program: the game
+// installs a kernel-mode helper layer of its own at 0x80076000): `size` bytes at `source`
+// in the executable's image are translated as if they were located at `load`.
+struct CodeOverlay {
+  std::uint32_t source = 0, size = 0, load = 0;
+};
+
 struct CodePackageOptions {
+  std::vector<CodeOverlay> overlays;
   std::string cpu = "x86-64-v3";  // LLVM CPU level of the generated code (AVX2 and earlier extensions)
   unsigned threads = 0;           // 0: one per hardware thread
   bool native = false;            // for the native runtime: waiting loops yield (StateLayout::yield_in_idle_loops)

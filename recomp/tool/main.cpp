@@ -870,6 +870,7 @@ int cmd_package(const fs::path& elf_path, const fs::path& dll) {
   CodePackageOptions options;
   options.log = [](std::string_view line) { std::cout << line << std::endl; };
   options.native = true;
+  for (const auto& o : kNativeOverlays) options.overlays.push_back({o[0], o[1], o[2]});
   options.exclude.assign(std::begin(kNativeHooks), std::end(kNativeHooks));
   const CodePackageResult r = build_code_package(elf, native_code_layout(), dll, options);
   std::cout << r.summary;

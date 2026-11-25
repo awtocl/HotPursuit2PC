@@ -202,6 +202,31 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
   r.ee_entries = ee.entries();
   r.stops = ee.stop_reasons();
 
+  // Relocated code (see CodeOverlay): each blob is its own image with its own translator.
+  struct Overlay {
+    explicit Overlay(ElfImage e) : elf(std::move(e)) {}
+    ElfImage elf;
+    Discovery d;
+    std::unique_ptr<Translator> t;
+  };
+  std::vector<std::unique_ptr<Overlay>> overlays;
+  for (const CodeOverlay& o : options.overlays) {
+    auto ov = std::make_unique<Overlay>(ElfImage::code_blob(o.load, elf.bytes(o.source, o.size)));
+    ov->d = discover(ov->elf);
+    StateLayout os = state;
+    os.dispatch_symbol = std::format("hp2_dispatch_{:08X}", o.load);
+    ov->t = std::make_unique<Translator>(ov->elf, ov->d, os, layout.ram_size, options.threads);
+    for (const Function& f : ov->d.functions) {
+      ++r.functions_found;
+      if (auto why = ov->t->add_function(f.start)) ++r.refusals[*why];
+    }
+    r.functions_translated += ov->t->size();
+    for (const auto& [why, n] : ov->t->stop_reasons()) r.stops[why] += n;
+    log(std::format("Relocated code at {:08X} ({} bytes from {:08X}): {} functions translated", o.load, o.size, o.source,
+                    ov->t->size()));
+    overlays.push_back(std::move(ov));
+  }
+
   VuLayout vl;
   vl.delayed_jump = layout.delayed_jump;
   vl.fmac_write = layout.fmac_write;
@@ -228,6 +253,8 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
   // ---- compilation (parallel) ----
   const auto t1 = std::chrono::steady_clock::now();
   std::vector<std::vector<char>> objects = ee.emit_objects(options.cpu);
+  for (auto& ov : overlays)
+    for (auto& o : ov->t->emit_objects(options.cpu)) objects.push_back(std::move(o));
   for (auto& o : vu.emit_objects(options.cpu, options.threads)) objects.push_back(std::move(o));
   r.vu_images = vu.images();
   r.vu_block_starts = vu.stats().blocks;
@@ -238,6 +265,12 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
     std::vector<std::pair<std::uint32_t, std::string>> functions, entries;
     for (std::uint32_t start : ee.functions()) functions.emplace_back(start, Translator::symbol(start));
     for (const auto& [address, start] : ee.entry_functions()) entries.emplace_back(address, Translator::symbol(start));
+    for (auto& ov : overlays) {
+      for (std::uint32_t start : ov->t->functions()) functions.emplace_back(start, Translator::symbol(start));
+      for (const auto& [address, start] : ov->t->entry_functions()) entries.emplace_back(address, Translator::symbol(start));
+    }
+    std::sort(functions.begin(), functions.end());  // the loader searches these tables by address
+    std::sort(entries.begin(), entries.end());
     std::vector<llvm::Constant*> images;
     for (std::size_t i = 0; i < vu.images(); ++i) {
       std::vector<std::pair<std::uint32_t, std::string>> list(vu.entry_symbols(i).begin(), vu.entry_symbols(i).end());
