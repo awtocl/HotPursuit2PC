@@ -157,3 +157,15 @@ makes the 30 MB request fit.) Apply, run `tools/native-run.ps1 -Seconds 6 -NoPac
 - **Not verified:** the test suite after the translator changes of this step (run `pwsh tools/build.ps1` first);
   that the reference-mode package (`.cache/r1c-game`) still behaves identically with the `beql; break` change
   (re-run the `--vu1 check` / `--lift-check` sessions of `docs/recomp-analysis.md` §8 before trusting it).
+
+## Stage 3, 2026-11-25 night
+
+The state loop at 0x00245830 was NOT the module loader: it ran the file manager's start (0x0012AA40 -> 0x0028E8A0), which returned -100
+because the manager's client (0x0033C0C0, server `80000400`) was dropped by its init (0x0028DD40): the reply of function 254 must have
+word 1 >= 522 and word 2 >= 526 (version words). Now answered in `Hook()` with {0, 522, 526}. Also fixed in the lifter: `can_enter` accepts
+the `beql divisor,zero; break 7` block, so a quota yield there can be re-entered (it stopped the run at 0x00236DA8).
+Result (40 s): the game runs without stopping, ~60 refreshes/s, 984 disc reads (ReadChain from ZZDATA.BIN), 33816 VU1 starts (not run),
+memory card calls (80000400 fn 1/2/3/5, answered with zeros = no card). Thread 1 idles at 0x00111E00 (frame sync). Tests 15/15 (dev).
+The 80000006 loader is still only called with fn 255 (the game does not need IRX loading in this path).
+Next: see what the game does now (add logging of the first calls of each new server function and of GIF/VIF1 packets), then VU1 execution
+from `g_vu1Micro` on MSCAL/MSCNT, XGKICK -> GIF, own GS renderer, input (pad 80000100/101), sound.
