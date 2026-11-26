@@ -1065,7 +1065,7 @@ void PadOpen(int port, std::uint32_t address) {
     const std::uint32_t frame = static_cast<std::uint32_t>(i), n = 32;
     memcpy(b + (type == 2 ? 0x58 : 0), &frame, 4);
     memcpy(b + len, &n, 4);
-    if (type == 2 && i == 1) { b[0x65] = 0x70; b[0x68] = 4; b[0x69] = 0; const std::uint16_t m = 7; memcpy(b + 0x50, &m, 2); }
+    if (type == 2) { b[0x65] = 0x70; b[0x68] = 4; b[0x69] = 0; const std::uint16_t m = 7; memcpy(b + 0x50, &m, 2); }
   }
   PadWrite(g_pad[port], 0);
   PadWrite(g_pad[port], 1);
@@ -1156,6 +1156,7 @@ void PadPoll() {
     const std::uint8_t* b = g_ram + Phys(g_pad[0].address);
     char hex[3 * 0x100 + 1] = {};
     for (int i = 0; i < 0x100; ++i) snprintf(hex + i * 3, 4, "%02X ", b[i]);
+    Log("pad: vblank %llu game pad-setup states (gp-23776): port0 %d port1 %d", static_cast<unsigned long long>(g_vblanks), static_cast<int>(Rd<std::uint32_t>(0x0032FC10)), static_cast<int>(Rd<std::uint32_t>(0x0032FC14)));
     Log("pad: vblank %llu area of port 0: %s", static_cast<unsigned long long>(g_vblanks), hex);
   }
   g_padButtons = static_cast<std::uint16_t>(~pressed);
