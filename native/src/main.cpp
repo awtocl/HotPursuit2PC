@@ -1041,6 +1041,10 @@ void PadWrite(const PadPort& p, int index) {  // fill struct `index` of the pad 
   b[data + 2] = static_cast<std::uint8_t>(g_padButtons >> 8);
   b[data + 3] = static_cast<std::uint8_t>(g_padButtons);
   for (int i = 0; i < 4; ++i) b[data + 4 + i] = g_padAxes[i];
+  {  // pressure bytes (DualShock): right, left, up, down, triangle, circle, cross, square, L1, R1, L2, R2: 0xFF while pressed
+    static const std::uint16_t order[12] = {0x20, 0x80, 0x10, 0x40, 0x1000, 0x2000, 0x4000, 0x8000, 0x400, 0x800, 0x100, 0x200};
+    for (int i = 0; i < 12; ++i) b[data + 8 + i] = (g_padButtons & order[i]) ? 0x00 : 0xFF;
+  }
   const std::size_t state = p.type == 2 ? 0x70 : 4;
   b[state] = 6;      // stable
   b[state + 1] = 0;  // no request pending
@@ -1144,10 +1148,30 @@ void PadPoll() {
     static const int dumpEvery = [] { const char* e = getenv("HP2_DUMP_EVERY"); return e ? atoi(e) : 0; }();
     if (dumpEvery > 0 && g_vblanks % static_cast<std::uint64_t>(dumpEvery * 60) == 0) gs::DumpFrame((".cache/native/frame_" + std::to_string(g_vblanks / 60) + ".bmp").c_str());
   }
+  if (static_cast<std::uint16_t>(~pressed) != g_padButtons) {  // log each change of the button mask (0 = pressed)
+    static int logged = 0;
+    if (logged++ < 60) Log("pad: vblank %llu buttons %04X -> %04X (ports opened: %llu)", static_cast<unsigned long long>(g_vblanks), g_padButtons, static_cast<std::uint16_t>(~pressed), static_cast<unsigned long long>(g_padOpens));
+  }
+  if (g_vblanks % 1800 == 0 && g_pad[0].address && InRam(g_pad[0].address, 0x100)) {  // diagnostic: does the game touch the pad area?
+    const std::uint8_t* b = g_ram + Phys(g_pad[0].address);
+    char hex[3 * 0x100 + 1] = {};
+    for (int i = 0; i < 0x100; ++i) snprintf(hex + i * 3, 4, "%02X ", b[i]);
+    Log("pad: vblank %llu area of port 0: %s", static_cast<unsigned long long>(g_vblanks), hex);
+  }
   g_padButtons = static_cast<std::uint16_t>(~pressed);
   memcpy(g_padAxes, axes, 4);
-  PadWrite(g_pad[0], 1);  // (the reference's pad module also updates only the second struct)
-  PadWrite(g_pad[1], 1);
+  {  // like the real pad library: every vblank the I/O side fills the other of the two structs and gives it a newer frame number
+    static std::uint32_t frame = 2;
+    ++frame;
+    for (int port = 0; port < 2; ++port) {
+      const PadPort& p = g_pad[port];
+      if (!p.address || !InRam(p.address, 0x100)) continue;
+      const int idx = static_cast<int>(frame & 1);
+      PadWrite(p, idx);
+      std::uint8_t* b = g_ram + Phys(p.address) + static_cast<std::size_t>(idx) * (p.type == 0 ? 0x40 : 0x80) + (p.type == 2 ? 0x58 : 0);
+      memcpy(b, &frame, 4);
+    }
+  }
 }
 
 std::map<std::uint32_t, std::uint64_t> g_entryCount;  // entry place -> times entered (what is the game doing?)
