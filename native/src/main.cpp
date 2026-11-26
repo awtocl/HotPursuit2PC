@@ -379,12 +379,43 @@ void VifUnpack(std::uint32_t cmd, std::uint32_t num, std::uint32_t imm, const st
   pos += (static_cast<std::size_t>(consumed) * bits + 31) / 32 * 4;
 }
 
-void ParseVif1(const std::vector<std::uint8_t>& d) {
+// Bytes a VIF command takes in the stream, its code word included. The stream is continuous: a command whose data is
+// not all there yet (the DMA packet ended) waits in g_vifCarry for the next transfer.
+std::vector<std::uint8_t> g_vifCarry;
+std::uint64_t g_vifCarried = 0;
+std::size_t VifCommandBytes(std::uint32_t code) {
+  const std::uint32_t cmd = (code >> 24) & 0x7F, num = (code >> 16) & 0xFF, imm = code & 0xFFFF;
+  if (cmd == 0x20) return 8;                                                   // STMASK
+  if (cmd == 0x30 || cmd == 0x31) return 20;                                   // STROW, STCOL
+  if (cmd == 0x4A) return 4 + static_cast<std::size_t>(num ? num : 256) * 8;   // MPG
+  if (cmd == 0x50 || cmd == 0x51) return 4 + static_cast<std::size_t>(imm ? imm : 0x10000) * 16;  // DIRECT(HL)
+  if (cmd >= 0x60) {                                                           // UNPACK
+    const std::uint32_t cl = g_vifCycle & 0xFF, wl = (g_vifCycle >> 8) & 0xFF, vn = (cmd >> 2) & 3, vl = cmd & 3;
+    const std::uint32_t total = num ? num : 256;
+    const std::uint32_t read = (wl > cl && wl) ? (total / wl) * cl + (std::min)(total % wl, cl) : total;  // vectors taken from the stream
+    const std::uint32_t bits = (vn == 3 && vl == 3) ? 16 : (32u >> vl) * (vn + 1);
+    return 4 + (static_cast<std::size_t>(read) * bits + 31) / 32 * 4;
+  }
+  return 4;
+}
+
+void ParseVif1(const std::vector<std::uint8_t>& incoming) {
+  std::vector<std::uint8_t> joined;
+  if (!g_vifCarry.empty()) {  // continue the command that was cut at the end of the previous transfer
+    joined.swap(g_vifCarry);
+    joined.insert(joined.end(), incoming.begin(), incoming.end());
+    ++g_vifCarried;
+  }
+  const std::vector<std::uint8_t>& d = joined.empty() ? incoming : joined;
   std::size_t pos = 0;
   auto word = [&](std::size_t at) { std::uint32_t v = 0; if (at + 4 <= d.size()) memcpy(&v, d.data() + at, 4); return v; };
   while (pos + 4 <= d.size()) {
     const std::uint32_t code = word(pos);
     const std::uint32_t cmd = (code >> 24) & 0x7F, num = (code >> 16) & 0xFF, imm = code & 0xFFFF;
+    if (pos + VifCommandBytes(code) > d.size()) {  // incomplete: keep it (no side effect yet) for the next transfer
+      g_vifCarry.assign(d.begin() + static_cast<std::ptrdiff_t>(pos), d.end());
+      return;
+    }
     pos += 4;
     ++g_vifCodes;
     if ((code & 0x80000000u) && cmd != 0x07) {  // the interrupt bit (MARK excepted)
@@ -1424,6 +1455,7 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(g_vifCodes), static_cast<unsigned long long>(g_vifInterrupts),
         static_cast<unsigned long long>(g_vifStarts), g_vifMark, g_intcStat, g_intcMask, g_intcPending,
         static_cast<unsigned long long>(g_discReads));
+    Log("  VIF1: %llu commands continued across DMA transfers, %zu bytes still waiting", static_cast<unsigned long long>(g_vifCarried), g_vifCarry.size());
     Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
         static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
     gs::DumpFrame(".cache/native/frame.bmp");

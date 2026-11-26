@@ -330,26 +330,65 @@ Rgba Unpack16(u32 v, int a1, int a0) {
 }
 int Clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-Rgba ClutLookup(const Ctx& c, u32 index) {
-  const u32 cbp = static_cast<u32>((c.tex0 >> 37) & 0x3FFF), cpsm = static_cast<u32>((c.tex0 >> 51) & 15), csa = static_cast<u32>((c.tex0 >> 56) & 31);
-  const u32 psm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
+// ---- CLUT buffer ---------------------------------------------------------------------------------
+// The GS keeps a 256-entry palette buffer that is filled from local memory when TEX0/TEX2 is written with CLD != 0;
+// later changes to the memory do not reach it until the next load. Entries are kept raw (32-bit, or 16-bit in the low half).
+u32 g_clut[256] = {};
+bool g_clut16 = false;        // the buffer holds 16-bit entries (CPSM CT16/CT16S)
+u64 g_clutVersion = 1;        // bumped at every load (texture cache)
+u64 g_texclut = 0;            // TEXCLUT: CBW [0:5], COU [6:11], COV [12:21] (CSM2 only)
+u32 g_lastCbp[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+
+bool IsIndexed(u32 psm) { return psm == T8 || psm == T4 || psm == T8H || psm == T4HL || psm == T4HH; }
+
+void LoadClut(u64 tex0) {
+  const u32 psm = static_cast<u32>((tex0 >> 20) & 0x3F);
+  if (!IsIndexed(psm)) return;
+  const u32 cbp = static_cast<u32>((tex0 >> 37) & 0x3FFF), cpsm = static_cast<u32>((tex0 >> 51) & 15), csa = static_cast<u32>((tex0 >> 56) & 31);
+  const bool csm2 = ((tex0 >> 55) & 1) != 0;
   const bool is4 = KindOf(psm) == Kind::I4;
-  u32 i = index;
-  const bool csm2 = ((c.tex0 >> 55) & 1) != 0;
-  u32 x, y;
-  if (csm2) {  // CSM2: a line of the buffer, linear
-    x = (is4 ? csa * 16 : 0) + i;
-    y = 0;
-    const u32 bw = 1;
-    const u32 v = ReadPixel(cpsm == 0 ? CT32 : CT16, cbp, bw, x & 15, 0);
-    (void)y;
-    return cpsm == 0 ? Unpack32(v) : Unpack16(v, 128, 0);
+  const bool c16 = cpsm == CT16 || cpsm == CT16S;
+  const u32 entries = is4 ? 16 : 256;
+  g_clut16 = c16;
+  const u32 fmt = cpsm == CT16S ? CT16S : (c16 ? CT16 : CT32);
+  for (u32 e = 0; e < entries; ++e) {
+    u32 x, y, bw = 1;
+    if (csm2) {  // CSM2: entries in a line of a buffer whose width and start come from TEXCLUT
+      bw = static_cast<u32>(g_texclut & 63);
+      x = static_cast<u32>((g_texclut >> 6) & 63) * 16 + e;
+      y = static_cast<u32>((g_texclut >> 12) & 0x3FF);
+    } else if (is4) {  // CSM1, 4-bit: 16 entries; CT32 as 8x2 groups tiled in a 16x16 area, CT16 as one row of 16 per group
+      if (c16) { x = e; y = csa; }
+      else { x = (csa & 1) * 8 + (e & 7); y = (csa >> 1) * 2 + (e >> 3); }
+    } else {  // CSM1, 8-bit: 16x16 entries, index bits 3 and 4 swapped
+      const u32 i = (e & 0xE7) | ((e & 8) << 1) | ((e & 16) >> 1);
+      x = i & 15; y = i >> 4;
+    }
+    g_clut[((is4 ? csa * 16 : 0) + e) & 255] = ReadPixel(fmt, cbp, bw, x, y);
   }
-  if (!is4) i = (i & 0xE7) | ((i & 8) << 1) | ((i & 16) >> 1);  // 8-bit CLUT: entry index bits 3 and 4 swap
-  if (is4) i += csa * 16 & 0xFF;
-  if (cpsm == 0) { x = i & 15; y = i >> 4; return Unpack32(ReadPixel(CT32, cbp, 1, x, y)); }
-  x = i & 15; y = i >> 4;
-  return Unpack16(ReadPixel(CT16, cbp, 1, x, y), 128, 0);
+  ++g_clutVersion;
+}
+
+// CLD: 0 keep the buffer, 1 load, 2 load and remember CBP as CBP0, 3 load and remember it as CBP1,
+// 4 load if CBP differs from CBP0 (and remember), 5 the same with CBP1.
+void ApplyCld(u64 tex0) {
+  const u32 cld = static_cast<u32>(tex0 >> 61) & 7;
+  const u32 cbp = static_cast<u32>((tex0 >> 37) & 0x3FFF);
+  switch (cld) {
+    case 1: LoadClut(tex0); break;
+    case 2: g_lastCbp[0] = cbp; LoadClut(tex0); break;
+    case 3: g_lastCbp[1] = cbp; LoadClut(tex0); break;
+    case 4: if (g_lastCbp[0] != cbp) { g_lastCbp[0] = cbp; LoadClut(tex0); } break;
+    case 5: if (g_lastCbp[1] != cbp) { g_lastCbp[1] = cbp; LoadClut(tex0); } break;
+    default: break;
+  }
+}
+
+Rgba ClutLookup(const Ctx& c, u32 index) {
+  const u32 psm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
+  const u32 csa = static_cast<u32>((c.tex0 >> 56) & 31);
+  const u32 i = (KindOf(psm) == Kind::I4 ? csa * 16 + (index & 15) : index) & 255;
+  return g_clut16 ? Unpack16(g_clut[i], static_cast<int>((g_texa >> 32) & 255), static_cast<int>(g_texa & 255)) : Unpack32(g_clut[i]);
 }
 
 Rgba TexelRaw(const Ctx& c, u32 x, u32 y) {  // texel (x, y) of the texture of context `c`, no wrapping (inside the texture)
@@ -402,8 +441,8 @@ const TexCache& GetTexture(const Ctx& c) {
   const u32 first = tbp * 256 / 8192, pages = perRow * ((th + pg.h - 1) / pg.h) + 1;
   const u32 cbp = static_cast<u32>((c.tex0 >> 37) & 0x3FFF);
   const bool indexed = psm == T8 || psm == T4 || psm == T8H || psm == T4HL || psm == T4HH;
-  const u32 clutPage = cbp * 256 / 8192;
-  const u64 ver = PageVersionSum(first, pages) + (indexed ? PageVersionSum(clutPage, 2) * 7 : 0);
+  const u32 clutPage = cbp * 256 / 8192;  // (kept for reference; the buffer version decides)
+  const u64 ver = PageVersionSum(first, pages) + (indexed ? g_clutVersion * 7 : 0);
   const u64 key = c.tex0 & ~(0x7ull << 61);  // CLD (clut load control) does not change the pixels
   for (TexCache& e : g_texCache)
     if (e.tex0 == key && e.texa == g_texa && e.version == ver) { e.used = ++g_texClock; return e; }
@@ -747,8 +786,16 @@ void RegWrite(std::uint32_t reg, std::uint64_t v) {
     case 0x0C: Kick(true, v, false); break;
     case 0x05: Kick(false, v, true); break;
     case 0x0D: Kick(false, v, false); break;
-    case 0x06: g_ctx[0].tex0 = v; break;
-    case 0x07: g_ctx[1].tex0 = v; break;
+    case 0x06: g_ctx[0].tex0 = v; ApplyCld(v); break;
+    case 0x07: g_ctx[1].tex0 = v; ApplyCld(v); break;
+    case 0x16: case 0x17: {  // TEX2: only PSM, CBP, CPSM, CSM, CSA and CLD of TEX0 change
+      Ctx& c = g_ctx[reg - 0x16];
+      const u64 mask = (0x3Full << 20) | (0x7FFFFFull << 37);  // bits 20-25 and 37-63
+      c.tex0 = (c.tex0 & ~mask) | (v & mask);
+      ApplyCld(c.tex0);
+      break;
+    }
+    case 0x1C: g_texclut = v; break;
     case 0x08: g_ctx[0].clamp = v; break;
     case 0x09: g_ctx[1].clamp = v; break;
     case 0x14: g_ctx[0].tex1 = v; break;
