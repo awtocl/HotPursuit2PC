@@ -942,7 +942,12 @@ void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool f
   const double inv = 1.0 / static_cast<double>(area < 0 ? -area : area);
   const int minx = std::max((std::min({a.x, b.x, d.x}) >> 4), p.sx0), maxx = std::min((std::max({a.x, b.x, d.x}) + 15) >> 4, p.sx1);
   const int miny = std::max((std::min({a.y, b.y, d.y}) >> 4), p.sy0), maxy = std::min((std::max({a.y, b.y, d.y}) + 15) >> 4, p.sy1);
-  if (minx > maxx || miny > maxy) return;
+  if (minx > maxx || miny > maxy) {  // outside the scissor: logged with its unclipped bounds (pixels, offset removed)
+    if (g_primLog)
+      PrimLogLine("offtri", p, std::min({a.x, b.x, d.x}) >> 4, std::max({a.x, b.x, d.x}) >> 4, std::min({a.y, b.y, d.y}) >> 4,
+                  std::max({a.y, b.y, d.y}) >> 4, 0);
+    return;
+  }
   auto bias = [](const Vertex& s, const Vertex& e) {  // top-left rule
     const i32 dx = e.x - s.x, dy = e.y - s.y;
     return (dy > 0 || (dy == 0 && dx < 0)) ? 0 : -1;
@@ -1074,6 +1079,12 @@ void Kick(bool hasF, u64 xyz, bool draw) {
   const u32 type = static_cast<u32>(g_prim & 7);
   const bool flat = ((g_prim >> 3) & 1) == 0;
   Vertex v = MakeVertex(xyz, hasF);
+  if (g_primLog && !draw && g_primLogText.size() < 2000000) {  // diagnostic: no-draw vertices (VU1 clipping marks them with ADC)
+    char line[96];
+    snprintf(line, sizeof line, "adc prim %u fb %u %d,%d z %08X\n", type, static_cast<u32>(g_ctx[(g_prim >> 9) & 1].frame & 0x1FF),
+             v.x >> 4, v.y >> 4, v.z);
+    g_primLogText += line;
+  }
   switch (type) {
     case 0: ++g_stats.points; break;
     case 1: case 2: ++g_stats.lines; break;  // lines are not drawn yet

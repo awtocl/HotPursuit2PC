@@ -953,8 +953,19 @@ class FunctionLifter : public VectorCode {
         WH(rd, hi);
         break;
       }
-      case Op::PEXEW: W(rd, pair(word(rt, 2), word(rt, 1))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
-      case Op::PROT3W: W(rd, pair(word(rt, 1), word(rt, 2))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
+      // Word permutations: every source word is read before rd is written (rd may be rt: `pexew v0, v0` in the game's
+      // unit-matrix routine 0025AC68 - reading after the first write turned its rows 1 and 2 into zeros).
+      case Op::PEXEW: case Op::PROT3W: case Op::PEXCW: {
+        static constexpr int kOrder[3][4] = {{2, 1, 0, 3}, {1, 2, 0, 3}, {0, 2, 1, 3}};  // result word i = rt word kOrder[i]
+        const int* o = kOrder[in.op == Op::PEXEW ? 0 : in.op == Op::PROT3W ? 1 : 2];
+        llvm::Value* w[4];
+        for (int i = 0; i < 4; ++i) w[i] = word(rt, o[i]);
+        llvm::Value* lo = pair(w[0], w[1]);
+        llvm::Value* hi = pair(w[2], w[3]);
+        W(rd, lo);
+        WH(rd, hi);
+        break;
+      }
       case Op::PMFLO: W(rd, ld(i64_, L_.lo)); WH(rd, ld(i64_, L_.lo1)); break;
       case Op::PMFHI: W(rd, ld(i64_, L_.hi)); WH(rd, ld(i64_, L_.hi1)); break;
       case Op::MTSAB: case Op::MTSAH: case Op::MTSA: case Op::MFSA: case Op::QFSRV: {
@@ -983,7 +994,6 @@ class FunctionLifter : public VectorCode {
         }
         break;
       }
-      case Op::PEXCW: W(rd, pair(word(rt, 0), word(rt, 2))); WH(rd, pair(word(rt, 1), word(rt, 3))); break;
       case Op::PADDW: case Op::PSUBW: {
         llvm::Value* w[4];
         for (int i = 0; i < 4; ++i)

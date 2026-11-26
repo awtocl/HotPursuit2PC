@@ -94,9 +94,25 @@ std::vector<std::uint32_t> program() {
       /* 1000BC */ 0x48400000u | (v1 << 16) | (17 << 11),                                  // cfc2 v1, vi17 (MAC)
       /* 1000C0 */ 0xF8000000u | (a0 << 21) | (3 << 16) | 32,                              // sqc2 vf3, 32(a0)
       /* 1000C4 */ jr(ra), nop,
+      // kMmi: the game's unit-matrix routine (0025AC68: word permutations with rd = rt) into a0..a0+63, then
+      // prot3w v1, v1 on the quadword at a0+64, stored at a0+80
+      /* 1000CC */ 0x700014A9u,  // por v0, zero, zero
+      /* 1000D0 */ 0x3C023F80u,  // lui v0, 0x3F80
+      /* 1000D4 */ 0x70001CA9u,  // por v1, zero, zero
+      /* 1000D8 */ sq(v0, 0, a0),
+      /* 1000DC */ 0x70021789u,  // pexew v0, v0
+      /* 1000E0 */ sq(v0, 32, a0),
+      /* 1000E4 */ 0x700217A9u,  // pexcw v0, v0
+      /* 1000E8 */ sq(v0, 16, a0),
+      /* 1000EC */ 0x70431488u,  // pextlw v0, v0, v1
+      /* 1000F0 */ sq(v0, 48, a0),
+      /* 1000F4 */ lq(v1, 64, a0),
+      /* 1000F8 */ 0x70031FC9u,  // prot3w v1, v1
+      /* 1000FC */ sq(v1, 80, a0),
+      /* 100100 */ jr(ra), nop,
   };
 }
-constexpr std::uint32_t kCaller = 0x10006C, kSys = 0x10009C, kVu = 0x1000A8;
+constexpr std::uint32_t kCaller = 0x10006C, kSys = 0x10009C, kVu = 0x1000A8, kMmi = 0x1000CC;
 
 void put16(Bytes& b, std::size_t off, std::uint16_t v) {
   b[off] = static_cast<std::uint8_t>(v);
@@ -214,7 +230,7 @@ struct Fixture {
   std::vector<std::uint8_t> spr = std::vector<std::uint8_t>(kScratchpadSize, 0);
   std::optional<std::string> sys_refused;
   Fixture() {
-    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad, kCaller, kVu}) {
+    for (std::uint32_t f : {kSum, kDiv, kFp, kQuad, kLoad, kCaller, kVu, kMmi}) {
       const auto why = t.add_function(f);
       if (why) std::printf("    could not translate %08X: %s\n", f, why->c_str());
     }
@@ -246,7 +262,7 @@ std::uint32_t bits(float f) {
 
 TEST(lift_all_test_functions) {
   Fixture& f = fixture();
-  CHECK_EQ(f.t.size(), static_cast<std::size_t>(7));
+  CHECK_EQ(f.t.size(), static_cast<std::size_t>(8));
   for (std::uint32_t fn : {kSum, kDiv, kFp, kQuad, kLoad, kCaller}) CHECK(f.t.lookup(fn) != nullptr);
   // A function whose first instruction has to be left to the reference core makes no progress: refused.
   REQUIRE(f.sys_refused.has_value());
@@ -322,6 +338,26 @@ TEST(lift_128_bit_load_and_store) {
   s.gpr[a0][0] = 0x2008;  // lq/sq ignore the low four address bits
   f.call(kQuad, s);
   CHECK(std::memcmp(&f.ram[0x2000], &f.ram[0x2010], 16) == 0);
+}
+
+TEST(lift_word_permutations_in_place) {
+  // pexew / pexcw / prot3w with rd = rt: every source word must be read before the destination changes (a unit
+  // matrix with zero rows 1 and 2 left the race camera without up and forward axes: no 3D world was drawn).
+  Fixture& f = fixture();
+  const std::uint32_t in[4] = {0x11111111, 0x22222222, 0x33333333, 0x44444444};
+  std::memcpy(&f.ram[0x4040], in, sizeof in);
+  State s{};
+  s.gpr[a0][0] = 0x4000;
+  f.call(kMmi, s);
+  std::uint32_t m[24];
+  std::memcpy(m, &f.ram[0x4000], sizeof m);
+  const std::uint32_t one = bits(1.0f);
+  const std::uint32_t unit[16] = {one, 0, 0, 0, 0, one, 0, 0, 0, 0, one, 0, 0, 0, 0, one};
+  for (int i = 0; i < 16; ++i) CHECK_EQ(m[i], unit[i]);
+  CHECK_EQ(m[20], 0x22222222u);  // prot3w: (w1, w2, w0, w3)
+  CHECK_EQ(m[21], 0x33333333u);
+  CHECK_EQ(m[22], 0x11111111u);
+  CHECK_EQ(m[23], 0x44444444u);
 }
 
 TEST(lift_memory_regions) {

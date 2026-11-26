@@ -30,7 +30,8 @@ param(
   [switch]$NoBuild,
   [double]$RealSeconds = 0,  # real-time safety limit (default: twice the game time plus a minute)
   [string]$Grep = '',
-  [hashtable]$Env = @{}
+  [hashtable]$Env = @{},
+  [string]$Code = ''  # another code package (e.g. one built with HP2_TRACE_ENTRIES=1 for function-entry traces)
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -62,7 +63,8 @@ $watch = [Diagnostics.Stopwatch]::StartNew()
 try {
   Push-Location $repo
   # real-time limit as a safety net: the game-time limit (--until) ends the run
-  & (Join-Path $out 'HotPursuit2Native-test.exe') --rom $rom --until $Until --seconds $(if ($RealSeconds -gt 0) { $RealSeconds } else { [math]::Max(60, $Until * 2 + 60) }) 2>&1 | Out-Null
+  $codeArgs = if ($Code) { @('--code', (Resolve-Path $Code).Path) } else { @() }
+  & (Join-Path $out 'HotPursuit2Native-test.exe') --rom $rom @codeArgs --until $Until --seconds $(if ($RealSeconds -gt 0) { $RealSeconds } else { [math]::Max(60, $Until * 2 + 60) }) 2>&1 | Out-Null
   $code = $LASTEXITCODE
 } finally {
   Pop-Location

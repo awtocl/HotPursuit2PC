@@ -640,8 +640,21 @@ void GiveUp() {
   SwitchToFiber(g_mainFiber);
 }
 
+// VU0 is one unit shared by every thread: the console's kernel saves the CPU and FPU registers on a thread switch, not
+// COP2 (vf/vi registers, ACC, Q, flags and their pipelines), so whatever one thread or handler leaves in VU0 the next
+// one sees. Each NativeState carries its own copy; the state about to run takes over the current contents first.
+NativeState* g_vu0Owner = nullptr;
+void Vu0TakeOver(NativeState& to) {
+  if (g_vu0Owner && g_vu0Owner != &to) {
+    constexpr std::size_t from = offsetof(NativeState, vf), size = offsetof(NativeState, saved_next_index) - from;
+    memcpy(reinterpret_cast<std::uint8_t*>(&to) + from, reinterpret_cast<const std::uint8_t*>(g_vu0Owner) + from, size);
+  }
+  g_vu0Owner = &to;
+}
+
 void Step(NativeState& s);
 void CallGuest(NativeState& s, std::uint32_t function, std::uint32_t a0, std::uint32_t a1) {
+  Vu0TakeOver(s);
   s.pc = function;
   s.gpr[4][0] = a0;
   s.gpr[5][0] = a1;
@@ -1083,10 +1096,11 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
       g_music.active = false;
       audio::MusicStop();
     }
-    if ((id == 0x01 || id == 0x05 || id == 0x1E) && c[i + 2] == 0) {
+    if (id != 0x0E && id != 0x34 && id != 0x09 && id != 0x1C) {
       static int logged = 0;
-      if (logged++ < 80) Log("streamer: vblank %llu cmd %02X stream 0 args %04X %04X %04X %04X", static_cast<unsigned long long>(g_vblanks), id,
-                             na > 1 ? c[i + 3] : 0, na > 2 ? c[i + 4] : 0, na > 6 ? c[i + 8] : 0, na > 7 ? c[i + 9] : 0);
+      if (logged++ < 400) Log("streamer: vblank %llu cmd %02X stream %u args %04X %04X %04X %04X", static_cast<unsigned long long>(g_vblanks), id,
+                              na > 0 ? c[i + 2] : 0xFFFFu, na > 1 ? c[i + 3] : 0, na > 2 ? c[i + 4] : 0, na > 6 ? c[i + 8] : 0,
+                              na > 7 ? c[i + 9] : 0);
     }
     i += 2u + na;
   }
@@ -1569,6 +1583,7 @@ void Hook(NativeState& s) {
       NativeState tmp = s;
       tmp.gpr[29][0] -= 0x80;
       CallGuest(tmp, endfn, endarg, 0);
+      Vu0TakeOver(s);  // (tmp is about to go away: the caller keeps what the end function left in VU0)
       if (server == 0x80000400 && fn == 1) {
         static int logged = 0;
         if (logged++ < 6)
@@ -1777,6 +1792,7 @@ int wmain(int argc, wchar_t** argv) {
         rotate = static_cast<std::size_t>(best->id) + 1;
         g_current = best;
         best->status = kRun;
+        Vu0TakeOver(best->s);
         SwitchToFiber(best->fiber);
         if (best->status == kRun) best->status = kReady;
         g_current = nullptr;
