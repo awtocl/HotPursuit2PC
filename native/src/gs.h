@@ -27,11 +27,14 @@ void SetInterruptCallback(void (*callback)());
 // Vertical blank: show the display buffer.
 void Present();
 bool WindowClosed();
+void Shutdown();  // before leaving main: closes the window, joins its thread
 bool WindowFocused();
 // Settings overlay (ADR 0013): while it is open the game gets no pad input. `pressed` = buttons held this vblank in libpad's bit
 // order (0x0001 select, 0x0008 start, 0x0010 up, 0x0020 right, 0x0040 down, 0x0080 left, 0x2000 circle, 0x4000 cross).
 bool OverlayVisible();
 void OverlayPad(std::uint16_t pressed);
+// Opens the graphics settings (from the game's Options > Display menu); no effect if already open.
+void OpenSettings();
 // Development: writes the last presented frame as a BMP file (kept out of git: .cache).
 bool DumpFrame(const char* path);
 

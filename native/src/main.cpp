@@ -25,7 +25,9 @@
 #include <algorithm>
 
 #include "virtual_disc.h"
+#include "audio.h"
 #include "gs.h"
+#include "memcard.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -1006,8 +1008,17 @@ int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
 // e6 = buffer wraps << 16; the words above follow at 6N + 1. A stream missing from a reply counts as finished, so the music
 // player skipped to the next track every frame. Modelled (reference rpc.bin): commands 01/2C start stream 0 on voices
 // 2E/2F (PS-ADPCM, pitch 0x0AC7 = 32332 Hz, 0x10000-byte ring per voice at 0x5010/0x15010), command 05 stops it.
-// No audio is produced yet: the play position advances in game time (vblanks).
-struct StreamerMusic { bool active = false; std::uint64_t start = 0; std::uint16_t voice[2] = {0x2E, 0x2F}; } g_music;
+// Command 1E: [stream, LSN hi, lo, file size hi, lo, 1, offset hi, lo]; 29: [stream, offset hi, lo, length hi, lo];
+// 01: [stream, voice, volume (0x3FFF = full), interleave / 0x4000, pitch (0x1000 = 48 kHz), ...]. The music is PS-ADPCM
+// stereo (interleave 0x8000, measured) that audio.cpp plays from the disc; when it ends the stream leaves the reply and
+// the game moves to the next track. Without an audio device the position advances in game time and the track ends after
+// its length.
+struct StreamerMusic {
+  bool active = false, audioStarted = false;
+  std::uint64_t start = 0, durationVblanks = 0;
+  std::uint16_t voice[2] = {0x2E, 0x2F};
+  std::uint32_t lsn = 0, offset = 0, length = 0, rate = 32332;
+} g_music;
 void StreamerService(std::uint32_t send, std::uint32_t recv) {
   static std::uint32_t batch = 0, result = 0, buf = 0;
   static bool have34 = false;
@@ -1020,13 +1031,33 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
       have34 = true;
       buf = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
     }
-    if (id == 0x01 && na >= 2 && c[i + 2] == 0) {  // stream 0 (music), first voice
+    const auto word = [&](std::uint32_t k) { return (static_cast<std::uint32_t>(c[i + k]) << 16) | c[i + k + 1]; };
+    if (id == 0x1E && na >= 8 && c[i + 2] == 0) {  // stream 0: the file and where the track starts in it
+      g_music.lsn = word(3);
+      g_music.offset = word(8);
+      g_music.length = word(5) > g_music.offset ? word(5) - g_music.offset : 0;
+    }
+    if (id == 0x29 && na >= 5 && c[i + 2] == 0) {  // stream 0: track offset and length
+      g_music.offset = word(3);
+      g_music.length = word(5);
+    }
+    if (id == 0x01 && na >= 5 && c[i + 2] == 0) {  // stream 0 (music) starts on its first voice
       g_music.active = true;
       g_music.start = g_vblanks;
       g_music.voice[0] = c[i + 3];
+      const std::uint32_t interleave = std::max<std::uint32_t>(c[i + 5], 1) * 0x4000u;
+      g_music.rate = std::max<std::uint32_t>(static_cast<std::uint32_t>(c[i + 6]) * 48000u / 4096u, 4000);
+      g_music.durationVblanks = g_music.length ? static_cast<std::uint64_t>(g_music.length) / 2 / 16 * 28 * 60000 / 1001 / g_music.rate : ~0ull;
+      g_music.audioStarted = audio::Available() && g_music.lsn && g_music.length;
+      if (g_music.audioStarted)
+        audio::MusicStart(&DiscRead, g_music.lsn * 2048ull + g_music.offset, g_music.length, interleave, g_music.rate,
+                          static_cast<float>(c[i + 4]) / 16383.0f);
     }
     if (id == 0x2C && na >= 2 && (c[i + 2] & 0xFF) == 0) g_music.voice[1] = c[i + 3];  // second voice of stream 0
-    if (id == 0x05 && na >= 1 && c[i + 2] == 0) g_music.active = false;
+    if (id == 0x05 && na >= 1 && c[i + 2] == 0) {
+      g_music.active = false;
+      audio::MusicStop();
+    }
     if ((id == 0x01 || id == 0x05 || id == 0x1E) && c[i + 2] == 0) {
       static int logged = 0;
       if (logged++ < 80) Log("streamer: vblank %llu cmd %02X stream 0 args %04X %04X %04X %04X", static_cast<unsigned long long>(g_vblanks), id,
@@ -1036,8 +1067,14 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
   }
   std::uint32_t* w = reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv));
   std::uint32_t t = 1;  // first word after the stream entries
+  if (g_music.active && (g_music.audioStarted ? audio::MusicFinished() : g_vblanks - g_music.start >= g_music.durationVblanks)) {
+    g_music.active = false;  // the track ended: the stream leaves the reply
+    static int logged = 0;
+    if (logged++ < 40) Log("streamer: vblank %llu stream 0 ended", static_cast<unsigned long long>(g_vblanks));
+  }
   if (g_music.active) {
-    const std::uint64_t bytes = (g_vblanks - g_music.start) * 32332ull * 16 / 28 * 1001 / 60000;  // 32332 Hz PS-ADPCM, 59.94 Hz
+    const std::uint64_t bytes = g_music.audioStarted ? audio::MusicFramesPlayed() * 16 / 28  // per voice, PS-ADPCM bytes
+                                                   : (g_vblanks - g_music.start) * g_music.rate * 16 / 28 * 1001 / 60000;
     const std::uint32_t pos = static_cast<std::uint32_t>(bytes & 0xFFFF), wraps = static_cast<std::uint32_t>(bytes >> 16);
     w[0] = 2;
     for (std::uint32_t ch = 0; ch < 2; ++ch) {
@@ -1191,6 +1228,14 @@ void PadPoll() {
     static const int dumpEvery = [] { const char* e = getenv("HP2_DUMP_EVERY"); return e ? atoi(e) : 0; }();
     if (dumpEvery > 0 && g_vblanks % static_cast<std::uint64_t>(dumpEvery * 60) == 0) gs::DumpFrame((".cache/native/frame_" + std::to_string(g_vblanks / 60) + ".bmp").c_str());
   }
+  if (g_vblanks % 600 == 0) {  // speed: refreshes per real second over the last 600 (60 = full speed)
+    static LARGE_INTEGER last = {};
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (last.QuadPart) Log("perf: vblank %llu, %.1f refreshes/s", static_cast<unsigned long long>(g_vblanks),
+                           600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart));
+    last = now;
+  }
   gs::OverlayPad(static_cast<std::uint16_t>(pressed));  // settings overlay (Select+Start opens it); the game gets no input while it is open
   if (gs::OverlayVisible()) pressed = 0;
   if (static_cast<std::uint16_t>(~pressed) != g_padButtons) {  // log each change of the button mask (0 = pressed)
@@ -1265,7 +1310,24 @@ void Hook(NativeState& s) {
     }
     std::uint32_t padArgs[8] = {};  // the pad server answers in the buffer it was called with: read the arguments first
     if (server == 0x80000100 && A(s, 3) && InRam(A(s, 3), 32)) memcpy(padArgs, g_ram + Phys(A(s, 3)), 32);
+    std::vector<std::uint32_t> mcSend;  // memory card command, copied before the reply buffer is cleared
+    if (server == 0x80000400 && fn != 254 && A(s, 3) && A(s, 4) >= 32 && InRam(A(s, 3), A(s, 4))) {
+      mcSend.resize((std::min<std::uint32_t>(A(s, 4), 0x1000) + 3) / 4);
+      memcpy(mcSend.data(), g_ram + Phys(A(s, 3)), std::min<std::uint32_t>(A(s, 4), 0x1000));
+    }
     if (recv && rsize && InRam(recv, rsize)) memset(g_ram + Phys(recv), 0, rsize);
+    if (!mcSend.empty() && recv && rsize >= 4 && InRam(recv, rsize)) {
+      const bool served = mc::Service(fn, mcSend.data(), static_cast<std::uint32_t>(mcSend.size() * 4), reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv)),
+                                      rsize, g_ram, kNativeRamSize);
+      static int logged = 0;
+      if (logged++ < 200) {
+        const std::string name = mcSend.size() > 5 ? GuestString(A(s, 3) + 20, 64) : std::string();
+        Log("mc: fn %02X %s -> %d%s%s", fn, served ? "served" : "UNKNOWN", static_cast<int>(Rd<std::uint32_t>(recv)), name.empty() ? "" : " ", name.c_str());
+        if (fn == 1 && mcSend.size() >= 8)
+          Log("mc:   GetInfo want f/free/type %u %u %u buffer %08X: type %u free %u formatted %u", mcSend[3], mcSend[4], mcSend[5], mcSend[7],
+              Rd<std::uint32_t>(mcSend[7]), Rd<std::uint32_t>(mcSend[7] + 4), Rd<std::uint32_t>(mcSend[7] + 0x90));
+      }
+    }
     if (server == 0x80000100 && fn == 1) PadService(padArgs, recv, rsize);
     if (server == 0x80000400 && fn == 254 && recv && rsize >= 12 && InRam(recv, 12)) {
       // The game's file manager (0x0028DD40) checks the I/O side's version words: word 1 >= 522 and word 2 >= 526,
@@ -1316,10 +1378,19 @@ void Hook(NativeState& s) {
     if (server == 0x00012345 && fn == 0 && recv && rsize >= 0x120 && InRam(recv, rsize) && InRam(A(s, 3), 4096)) StreamerService(A(s, 3), recv);
     if (const std::uint32_t endfn = A(s, 7)) {  // asynchronous call: the I/O processor's answer runs the end function
       const std::uint32_t sp = static_cast<std::uint32_t>(s.gpr[29][0]);
-      const std::uint32_t endarg = InRam(sp, 4) ? Rd<std::uint32_t>(sp) : 0;  // ninth argument: first stack word
+      std::uint32_t endarg = 0;  // ninth argument: first stack word (the stack may be in the scratchpad)
+      if ((sp >> 28) == 7) memcpy(&endarg, g_spr + (sp & 0x3FFC), 4);
+      else if (InRam(sp, 4)) endarg = Rd<std::uint32_t>(sp);
+      if (server == 0x80000400 && fn == 1) LogOnce("mcsp", "mc:   RPC caller stack %08X", sp);
       NativeState tmp = s;
       tmp.gpr[29][0] -= 0x80;
       CallGuest(tmp, endfn, endarg, 0);
+      if (server == 0x80000400 && fn == 1) {
+        static int logged = 0;
+        if (logged++ < 6)
+          Log("mc:   end function %08X(arg %08X): game variables type %u free %u format %u", endfn, endarg, Rd<std::uint32_t>(Rd<std::uint32_t>(0x0033C0E8)),
+              Rd<std::uint32_t>(Rd<std::uint32_t>(0x0033C0EC)), Rd<std::uint32_t>(Rd<std::uint32_t>(0x0033C0F0)));
+      }
     }
     Ret(s, 0);
   } else if (pc == kHookOpen) {  // sceOpen(path, flags)
@@ -1331,6 +1402,19 @@ void Hook(NativeState& s) {
     Ret(s, FileSeek(static_cast<int>(A(s, 0)), static_cast<std::int32_t>(A(s, 1)), static_cast<int>(A(s, 2))));
   } else if (pc == kHookRead) {  // sceRead(fd, buffer, size)
     Ret(s, FileRead(static_cast<int>(A(s, 0)), A(s, 1), A(s, 2)));
+  } else if (pc == kHookCalibrateDisplay) {  // menu item handler (event, item): same results as the game's, but
+    const std::uint32_t ev = A(s, 0), item = A(s, 1);  // activation (19) opens the native graphics settings
+    Wr<std::uint32_t>(item + 12, ev == 17 ? 6u : 0u);
+    std::int32_t v = ev == 17 ? 6 : ev < 18 ? 11 : 19;
+    if (ev == 11) {
+      v = static_cast<std::int32_t>(Rd<std::uint32_t>(item));
+      Wr<std::uint32_t>(static_cast<std::uint32_t>(s.gpr[28][0]) - 13360, static_cast<std::uint32_t>(v));
+    }
+    if (ev == 19) {
+      gs::OpenSettings();
+      v = 0;
+    }
+    Ret(s, v);
   } else {  // sceSifCheckStatRpc(client): never busy, calls complete at once
     Ret(s, 0);
   }
@@ -1427,6 +1511,14 @@ int wmain(int argc, wchar_t** argv) {
       g_disc = hp2::VirtualDisc::Open(rom.wstring(), error);
       if (!g_disc) fail("cannot open the disc from the ROM folder: {}", error);
       Log("Disc: %s", g_disc->Description().c_str());
+      {  // memory card: <folder of the executable>\saves\mc0
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const std::filesystem::path saves = std::filesystem::path(exe).parent_path() / L"saves";
+        mc::SetRoot(saves);
+        Log("Memory card: %s", (saves / L"mc0").string().c_str());
+      }
+      if (!std::getenv("HP2_MUTE")) Log("Audio: %s", audio::Init() ? "XAudio2 ready (music stream)" : audio::LastError());
     }
 
     // ---- the translated code ----
@@ -1539,6 +1631,7 @@ int wmain(int argc, wchar_t** argv) {
     Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
         static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
     gs::DumpFrame(".cache/native/frame.bmp");
+    audio::Shutdown();
     if (std::getenv("HP2_DUMP_RAM")) {  // diagnostic: EE RAM at the end of the run, same layout as the reference launcher's ee-ram.bin
       if (FILE* f = nullptr; fopen_s(&f, ".cache/native/ee-ram.bin", "wb") == 0 && f) { fwrite(g_ram, 1, kNativeRamSize, f); fclose(f); }
     }
@@ -1574,10 +1667,12 @@ int wmain(int argc, wchar_t** argv) {
         }
       }
     }
+    gs::Shutdown();
     if (g_log) fclose(g_log);
     return 0;
   } catch (const std::exception& e) {
     Log("error: %s", e.what());
+    gs::Shutdown();
     return 3;
   }
 }

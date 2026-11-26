@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -72,8 +74,16 @@ PageGeometry PageOf(Kind k) {
 }
 
 // Offset of a pixel inside its 8 KB page, in bytes (for 4-bit pixels: in nibbles). Built once per format.
+// (All eight tables are built together on the first use, once: several threads read them while drawing.)
 std::vector<u32> g_pageOffset[8];
-void BuildOffsets(Kind k) {
+void BuildOffsetsOf(Kind k);
+void BuildOffsets(Kind) {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    for (int i = 0; i < 8; ++i) BuildOffsetsOf(static_cast<Kind>(i));
+  });
+}
+void BuildOffsetsOf(Kind k) {
   const PageGeometry pg = PageOf(k);
   std::vector<u32>& t = g_pageOffset[static_cast<int>(k)];
   if (!t.empty()) return;
@@ -228,9 +238,11 @@ inline u32 SurfRead(const Surf& s, u32 x, u32 y) {
   memcpy(&h, &g_mem[a & ~1u], 2);
   return h;
 }
+// Primitive drawing writes through SurfWrite from several threads (rows split between them): the page versions of the
+// texture cache are bumped once per primitive over its rectangle (BumpRect) instead of per pixel. Writes are whole 16/32-bit
+// units, so pixels of different rows never share a word.
 inline void SurfWrite(const Surf& s, u32 x, u32 y, u32 value, u32 mask) {
   const u32 a = SurfAddr(s, x, y);
-  ++g_pageVersion[a >> 13];
   if (s.kind == Kind::C32 || s.kind == Kind::Z32) {
     if (s.psm == CT24 || s.psm == Z24) mask &= 0x00FFFFFFu;
     u32 old;
@@ -244,6 +256,96 @@ inline void SurfWrite(const Surf& s, u32 x, u32 y, u32 value, u32 mask) {
     memcpy(&g_mem[a & ~1u], &old, 2);
   }
 }
+void BumpRect(const Surf& s, int x0, int x1, int y0, int y1) {  // every page of `s` that the rectangle touches
+  if (x1 < x0 || y1 < y0) return;
+  for (u32 py = static_cast<u32>(y0) / s.ph; py <= static_cast<u32>(y1) / s.ph; ++py)
+    for (u32 px = static_cast<u32>(x0) / s.pw; px <= static_cast<u32>(x1) / s.pw; ++px)
+      ++g_pageVersion[((s.base + (px + py * s.perRow) * 8192) & (kRamSize - 1)) >> 13];
+}
+
+// ---- row-parallel rasterisation ------------------------------------------------------------------------
+// Large primitives are split into blocks of rows shared by a pool of worker threads (one per extra core, up to 15)
+// and the calling thread. Small ones run on the calling thread: the hand-off costs more than they do.
+class RowPool {
+ public:
+  RowPool() {
+    const unsigned n = std::thread::hardware_concurrency();
+    const char* env = std::getenv("HP2_GS_THREADS");
+    const unsigned want = env ? static_cast<unsigned>(std::atoi(env)) : (n > 1 ? n - 1 : 0);
+    for (unsigned i = 0; i < std::min(want, 15u); ++i) m_workers.emplace_back([this] { Worker(); });
+  }
+  ~RowPool() {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_quit = true;
+      ++m_generation;
+    }
+    m_wake.notify_all();
+    for (auto& t : m_workers) t.join();
+  }
+  // Calls fn(y) for every row in [y0, y1]; returns once all rows are done.
+  template <class Fn>
+  void Run(int y0, int y1, Fn&& fn) {
+    if (m_workers.empty()) {
+      for (int y = y0; y <= y1; ++y) fn(y);
+      return;
+    }
+    std::function<void(int)> f = std::forward<Fn>(fn);
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_fn = &f;
+      m_next = y0;
+      m_end = y1;
+      m_busy = static_cast<int>(m_workers.size());
+      ++m_generation;
+    }
+    m_wake.notify_all();
+    Take();
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_done.wait(lock, [this] { return m_busy == 0; });
+    m_fn = nullptr;
+  }
+
+ private:
+  static constexpr int kBlock = 4;  // rows per grab
+  void Take() {
+    for (;;) {
+      const int y = m_next.fetch_add(kBlock);
+      if (y > m_end) return;
+      for (int r = y; r < y + kBlock && r <= m_end; ++r) (*m_fn)(r);
+    }
+  }
+  void Worker() {
+    u64 seen = 0;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_wake.wait(lock, [&] { return m_generation != seen; });
+        seen = m_generation;
+        if (m_quit) return;
+      }
+      Take();
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (--m_busy == 0) m_done.notify_one();
+      }
+    }
+  }
+  std::vector<std::thread> m_workers;
+  std::mutex m_mutex;
+  std::condition_variable m_wake, m_done;
+  const std::function<void(int)>* m_fn = nullptr;
+  std::atomic<int> m_next{0};
+  int m_end = 0, m_busy = 0;
+  u64 m_generation = 0;
+  bool m_quit = false;
+};
+RowPool& Pool() {
+  static RowPool pool;
+  return pool;
+}
+constexpr i64 kParallelArea = 4096;  // bounding-box pixels from which a primitive is split between threads
+std::atomic<u64> g_pixelCount{0}, g_texturedCount{0}, g_unsupportedTexels{0};
 
 // ---- register state -----------------------------------------------------------------------------
 struct Vertex { i32 x, y; u32 z; float r, g, b, a, s, t, q, u, v; };
@@ -352,6 +454,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       break;
     case kPadMessage:
       if (w & 0x10000) { ToggleMenu(); return 0; }
+      if (w & 0x20000) {  // open from the game's menu
+        if (!ui::Visible()) ToggleMenu();
+        return 0;
+      }
       if (ui::Visible()) {
         if (w & 0x0010) MenuInput(h, ui::Input::Up);
         if (w & 0x0040) MenuInput(h, ui::Input::Down);
@@ -420,6 +526,7 @@ void WindowThread() {
   int fw = 0, fh = 0;
   std::uint64_t seen = 0;
   for (;;) {
+    // one present per new game frame (at most the game's 60; more only with real in-between frames, ADR 0013 §4)
     MsgWaitForMultipleObjects(1, &g_frameEvent, FALSE, 50, QS_ALLINPUT);
     MSG msg;
     bool quit = false;
@@ -558,11 +665,10 @@ Rgba TexelRaw(const Ctx& c, u32 x, u32 y) {  // texel (x, y) of the texture of c
     case T8H: t = ClutLookup(c, ReadPixel(CT32, tbp, tbw, x, y) >> 24); break;
     case T4HL: t = ClutLookup(c, (ReadPixel(CT32, tbp, tbw, x, y) >> 24) & 15); break;
     case T4HH: t = ClutLookup(c, ReadPixel(CT32, tbp, tbw, x, y) >> 28); break;
-    default: {
-      ++g_stats.unsupported;
-      static bool noted = false;  // development note, once: which format reached the texture decoder
-      if (!noted) {
-        noted = true;
+    default: {  // (called from several threads while a texture is decoded: atomic counter and note)
+      g_unsupportedTexels.fetch_add(1, std::memory_order_relaxed);
+      static std::atomic<bool> noted{false};  // development note, once: which format reached the texture decoder
+      if (!noted.exchange(true)) {
         if (FILE* f = fopen(".cache/native/gs_unsupported.txt", "w")) { fprintf(f, "TexelRaw: psm %02X tex0 %016llX\n", psm, static_cast<unsigned long long>(c.tex0)); fclose(f); }
       }
       break;
@@ -608,8 +714,12 @@ const TexCache& GetTexture(const Ctx& c) {
   slot->tex0 = key; slot->texa = g_texa; slot->version = ver; slot->used = ++g_texClock;
   slot->w = tw; slot->h = th; slot->firstPage = first; slot->pages = pages; slot->clutPage = clutPage;
   slot->pix.resize(static_cast<std::size_t>(tw) * th);
-  for (u32 y = 0; y < th; ++y)
-    for (u32 x = 0; x < tw; ++x) slot->pix[static_cast<std::size_t>(y) * tw + x] = Pack32(TexelRaw(c, x, y));
+  u32* out = slot->pix.data();
+  auto row = [&](int y) {  // rows are independent (read-only GS memory and CLUT): large textures are split between threads
+    for (u32 x = 0; x < tw; ++x) out[static_cast<std::size_t>(y) * tw + x] = Pack32(TexelRaw(c, x, static_cast<u32>(y)));
+  };
+  if (static_cast<i64>(tw) * th >= kParallelArea) Pool().Run(0, static_cast<int>(th) - 1, row);
+  else for (u32 y = 0; y < th; ++y) row(static_cast<int>(y));
   return *slot;
 }
 
@@ -668,12 +778,12 @@ Pipe MakePipe(bool flat) {
 }
 
 // One pixel: texture, depth/alpha tests, blending, write. `col` is the interpolated vertex colour, (tu, tv) the texel position.
-inline void Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, float tv) {
+inline bool Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, float tv) {
   const u32 zv = p.zpsm == Z24 ? (z >> 8) : (p.zpsm == Z32 ? z : (z >> 16) & 0xFFFF);
   if (p.zte && p.ztst != 1) {
-    if (p.ztst == 0) return;
+    if (p.ztst == 0) return false;
     const u32 old = SurfRead(p.zb, static_cast<u32>(px), static_cast<u32>(py));
-    if (p.ztst == 2 ? zv < old : zv <= old) return;  // GEQUAL / GREATER
+    if (p.ztst == 2 ? zv < old : zv <= old) return false;  // GEQUAL / GREATER
   }
   if (p.tme) {
     Rgba tex;
@@ -711,7 +821,7 @@ inline void Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, floa
       case 7: pass = av != p.aref; break;
       default: break;
     }
-    if (!pass) return;  // (the other fail modes would still update parts of the buffers)
+    if (!pass) return false;  // (the other fail modes would still update parts of the buffers)
   }
   const bool is16 = p.fpsm == CT16 || p.fpsm == CT16S;
   if (p.abe && (!(g_pabe & 1) || (col.a & 0x80))) {
@@ -728,8 +838,7 @@ inline void Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, floa
   const u32 out = is16 ? static_cast<u32>((col.r >> 3) | ((col.g >> 3) << 5) | ((col.b >> 3) << 10) | ((col.a & 0x80) << 8)) : Pack32(col);
   SurfWrite(p.fb, static_cast<u32>(px), static_cast<u32>(py), out, ~p.fbmsk);
   if (!p.zmsk && p.zte) SurfWrite(p.zb, static_cast<u32>(px), static_cast<u32>(py), zv, 0xFFFFFFFFu);
-  ++g_stats.pixels;
-  if (p.tme) ++g_stats.textured;
+  return true;
 }
 
 void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool flat) {
@@ -758,8 +867,10 @@ void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool f
   i64 r0 = static_cast<i64>(d.x - b.x) * (Y0 - b.y) - static_cast<i64>(d.y - b.y) * (X0 - b.x) + bias0;
   i64 r1 = static_cast<i64>(a.x - d.x) * (Y0 - d.y) - static_cast<i64>(a.y - d.y) * (X0 - d.x) + bias1;
   const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
-  for (int py = miny; py <= maxy; ++py, r0 += dy0, r1 += dy1, r2 += dy2) {
-    i64 w0 = r0, w1 = r1, w2 = r2;
+  auto row = [&](int py) {
+    const i64 k = py - miny;
+    i64 w0 = r0 + dy0 * k, w1 = r1 + dy1 * k, w2 = r2 + dy2 * k;
+    u64 written = 0;
     for (int px = minx; px <= maxx; ++px, w0 += dx0, w1 += dx1, w2 += dx2) {
       if ((w0 | w1 | w2) < 0) continue;
       const float l0 = static_cast<float>(static_cast<double>(w0) * inv), l1 = static_cast<float>(static_cast<double>(w1) * inv), l2 = 1.0f - l0 - l1;
@@ -782,9 +893,15 @@ void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool f
           }
         }
       }
-      Shade(p, px, py, z, col, tu, tv);
+      written += Shade(p, px, py, z, col, tu, tv) ? 1 : 0;
     }
-  }
+    if (written) g_pixelCount.fetch_add(written, std::memory_order_relaxed);
+    if (written && p.tme) g_texturedCount.fetch_add(written, std::memory_order_relaxed);
+  };
+  if (static_cast<i64>(maxx - minx + 1) * (maxy - miny + 1) >= kParallelArea) Pool().Run(miny, maxy, row);
+  else for (int py = miny; py <= maxy; ++py) row(py);
+  BumpRect(p.fb, minx, maxx, miny, maxy);
+  if (!p.zmsk && p.zte) BumpRect(p.zb, minx, maxx, miny, maxy);
 }
 
 // An axis-aligned sprite: corners (a = upper left, b = lower right) with the texture coordinates of each, flat colour.
@@ -805,14 +922,22 @@ void DrawSprite(const Vertex& a, const Vertex& b) {
     sv0 = a.q != 0 ? a.t / a.q * th : 0; sv1 = b.q != 0 ? b.t / b.q * th : 0;
   }
   const float fw = static_cast<float>(x1 - x0), fh = static_cast<float>(y1 - y0);
-  for (int py = miny; py <= maxy; ++py) {
+  if (minx > maxx || miny > maxy) return;
+  auto row = [&](int py) {
     const float fy = (static_cast<float>(py * 16 + 8 - y0)) / fh;
     const float tv = sv0 + (sv1 - sv0) * fy;
+    u64 written = 0;
     for (int px = minx; px <= maxx; ++px) {
       const float fx = (static_cast<float>(px * 16 + 8 - x0)) / fw;
-      Shade(p, px, py, b.z, col, su0 + (su1 - su0) * fx, tv);
+      written += Shade(p, px, py, b.z, col, su0 + (su1 - su0) * fx, tv) ? 1 : 0;
     }
-  }
+    if (written) g_pixelCount.fetch_add(written, std::memory_order_relaxed);
+    if (written && p.tme) g_texturedCount.fetch_add(written, std::memory_order_relaxed);
+  };
+  if (static_cast<i64>(maxx - minx + 1) * (maxy - miny + 1) >= kParallelArea) Pool().Run(miny, maxy, row);
+  else for (int py = miny; py <= maxy; ++py) row(py);
+  BumpRect(p.fb, minx, maxx, miny, maxy);
+  if (!p.zmsk && p.zte) BumpRect(p.zb, minx, maxx, miny, maxy);
 }
 
 Vertex MakeVertex(u64 xyz, bool hasF) {
@@ -1061,12 +1186,14 @@ void Present() {
   const u32 dw = static_cast<u32>((dp >> 32) & 0xFFF) + 1, dh = static_cast<u32>((dp >> 44) & 0x7FF) + 1;
   const u32 w = std::clamp<u32>(dw / (magh + 1), 1, 1024), h = std::clamp<u32>(dh / (magv + 1), 1, 1024);
   std::vector<u32> img(static_cast<std::size_t>(w) * h);
-  for (u32 y = 0; y < h; ++y)
+  Pool().Run(0, static_cast<int>(h) - 1, [&](int yi) {  // display read-out, rows split between threads
+    const u32 y = static_cast<u32>(yi);
     for (u32 x = 0; x < w; ++x) {
       const u32 raw = ReadPixel(psm, fbp, fbw, dbx + x, dby + y);
       Rgba px = (psm == CT16 || psm == CT16S) ? Unpack16(raw, 128, 0) : Unpack32(raw);
       img[y * w + x] = static_cast<u32>(px.b) | (static_cast<u32>(px.g) << 8) | (static_cast<u32>(px.r) << 16);
     }
+  });
   {
     std::lock_guard<std::mutex> lock(g_frameMutex);
     g_frame.swap(img);
@@ -1096,8 +1223,16 @@ bool DumpFrame(const char* path) {
   return true;
 }
 bool WindowClosed() { return g_closed; }
+void Shutdown() {  // closes the window and waits for its thread (a running std::thread at exit would abort the process)
+  if (!g_windowThread.joinable()) return;
+  if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+  g_windowThread.join();
+}
 bool WindowFocused() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 bool OverlayVisible() { return ui::Visible(); }
+void OpenSettings() {
+  if (g_hwnd) PostMessageW(g_hwnd, kPadMessage, 0x20000, 0);
+}
 void OverlayPad(std::uint16_t pressed) {  // emulation thread: newly pressed buttons go to the window thread as a message
   static std::uint16_t previous = 0;
   const std::uint16_t edges = static_cast<std::uint16_t>(pressed & ~previous);
@@ -1106,7 +1241,14 @@ void OverlayPad(std::uint16_t pressed) {  // emulation thread: newly pressed but
   const bool toggle = (pressed & 0x0009) == 0x0009 && (edges & 0x0009);  // Select + Start
   PostMessageW(g_hwnd, kPadMessage, toggle ? 0x10000 : edges, 0);
 }
-const Stats& GetStats() { return g_stats; }
+const Stats& GetStats() {  // the per-pixel and texel counters are atomics (several threads draw)
+  static Stats s;
+  s = g_stats;
+  s.pixels = g_pixelCount.load();
+  s.textured = g_texturedCount.load();
+  s.unsupported = g_stats.unsupported + g_unsupportedTexels.load();
+  return s;
+}
 void SetWindowScale(int percent) { g_scalePercent = percent; }
 
 }  // namespace gs
