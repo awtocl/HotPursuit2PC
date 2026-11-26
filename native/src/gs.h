@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace gs {
 
@@ -27,7 +28,16 @@ void SetInterruptCallback(void (*callback)());
 // Vertical blank: show the display buffer.
 void Present();
 bool WindowClosed();
-void Shutdown();  // before leaving main: closes the window, joins its thread
+void Shutdown();
+// Diagnostic: the last GS event-register activity (F FINISH write, W CSR write, R CSR read, M IMR), oldest first.
+std::string CsrTraceText();
+// Diagnostic: the frame buffers that received the most pixels since the last call (by FBP), PMODE and DISPFB1/2.
+std::string TargetsText();
+// Diagnostic: log every large primitive (rectangle >= 2048 px) while on; the text collected so far.
+void SetPrimLog(bool on);
+// Diagnostic: a buffer of GS memory (base page = FBP, width in 64-pixel units) written as a BMP file.
+bool DumpPage(std::uint32_t page, std::uint32_t fbw, std::uint32_t w, std::uint32_t h, std::uint32_t psm, const char* path);
+std::string PrimLogText();  // before leaving main: closes the window, joins its thread
 bool WindowFocused();
 // Settings overlay (ADR 0013): while it is open the game gets no pad input. `pressed` = buttons held this vblank in libpad's bit
 // order (0x0001 select, 0x0008 start, 0x0010 up, 0x0020 right, 0x0040 down, 0x0080 left, 0x2000 circle, 0x4000 cross).
@@ -43,6 +53,9 @@ void RequestWindowShot(const char* path);
 struct Stats {
   std::uint64_t triangles = 0, sprites = 0, lines = 0, points = 0, pixels = 0, textured = 0, transfers = 0, transferBytes = 0, frames = 0;
   std::uint64_t unsupported = 0;
+  // time spent (QPC ticks) drawing primitives, decoding textures (and how many), reading out the display, transfers
+  std::uint64_t drawTicks = 0, textureTicks = 0, textureDecodes = 0, presentTicks = 0, transferTicks = 0;
+  std::uint64_t skippedDepthFog = 0;  // 1 once the race's depth-fog pass has been skipped
 };
 const Stats& GetStats();
 // Prefer this window size (client area); 0 = the game's own display size.

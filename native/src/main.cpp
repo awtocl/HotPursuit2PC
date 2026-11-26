@@ -1273,6 +1273,23 @@ void PadPoll() {
       return list;
     }();
     std::uint64_t now = 0;
+    static const std::uint64_t primLogAt = [] {  // HP2_PRIMLOG_AT=<s>: every large primitive of 2 refreshes -> primlog.txt
+      const char* e = getenv("HP2_PRIMLOG_AT");
+      return e ? static_cast<std::uint64_t>(atof(e) * 60000.0 / 1001.0) : 0ull;
+    }();
+    if (primLogAt && ScriptTime(now)) {
+      if (now == primLogAt) gs::SetPrimLog(true);
+      if (now == primLogAt + 2) {
+        gs::SetPrimLog(false);
+        gs::DumpPage(0, 8, 512, 448, 0, ".cache/native/at_page0.bmp");  // the race's two frame buffers as they are now
+        gs::DumpPage(128, 8, 512, 448, 0, ".cache/native/at_page128.bmp");
+        if (FILE* f = nullptr; fopen_s(&f, ".cache/native/primlog.txt", "w") == 0 && f) {
+          const std::string text = gs::PrimLogText();
+          fwrite(text.data(), 1, text.size(), f);
+          fclose(f);
+        }
+      }
+    }
     if (ScriptTime(now))
       for (const At& a : at)
         if (a.vblank == now) {
@@ -1304,9 +1321,34 @@ void PadPoll() {
     static LARGE_INTEGER last = {};
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    if (last.QuadPart) Log("perf: vblank %llu, %.1f refreshes/s", static_cast<unsigned long long>(g_vblanks),
-                           600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart));
+    static gs::Stats prev;  // where the time went over these 600 refreshes (ms per refresh)
+    const gs::Stats st = gs::GetStats();
+    const double ms = 1000.0 / static_cast<double>(g_qpf.QuadPart) / 600.0;
+    if (last.QuadPart)
+      Log("perf: vblank %llu, %.1f refreshes/s; per refresh: total %.1f ms, GS draw %.1f ms (textures %.1f ms, %llu decodes), present %.1f ms, transfers %.1f ms, %llu tris %llu sprites",
+          static_cast<unsigned long long>(g_vblanks), 600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart),
+          static_cast<double>(now.QuadPart - last.QuadPart) * ms, static_cast<double>(st.drawTicks - prev.drawTicks) * ms,
+          static_cast<double>(st.textureTicks - prev.textureTicks) * ms, static_cast<unsigned long long>(st.textureDecodes - prev.textureDecodes),
+          static_cast<double>(st.presentTicks - prev.presentTicks) * ms, static_cast<double>(st.transferTicks - prev.transferTicks) * ms,
+          static_cast<unsigned long long>((st.triangles - prev.triangles) / 600), static_cast<unsigned long long>((st.sprites - prev.sprites) / 600));
+    prev = st;
     last = now;
+    std::string threads;  // what each game thread is doing (status 1 run, 2 ready, 4 wait, 8 suspended, 16 dormant)
+    for (const Thread* t : g_threads)
+      if (t && t->used) {
+        char one[96];
+        snprintf(one, sizeof one, " t%d:%d@%08X%s", t->id, t->status, t->s.pc, t->wait_sema >= 0 && t->status == kWait ? (" s" + std::to_string(t->wait_sema)).c_str() : (t->sleeping ? " sleep" : ""));
+        threads += one;
+      }
+    Log("perf:   threads%s", threads.c_str());
+    Log("perf:   targets%s", gs::TargetsText().c_str());
+    {  // GIF vertices vs vertices that draw (XYZ2/XYZF2), XGKICKs, VU1 runs per refresh
+      static std::uint64_t pv = 0, pk = 0, px = 0, pr = 0;
+      Log("perf:   per refresh: %llu GIF vertices, %llu drawing kicks, %llu XGKICKs, %llu VU1 runs", static_cast<unsigned long long>((g_gsVertices - pv) / 600),
+          static_cast<unsigned long long>((g_gsKicks - pk) / 600), static_cast<unsigned long long>((g_xgkicks - px) / 600),
+          static_cast<unsigned long long>((g_vuRuns - pr) / 600));
+      pv = g_gsVertices; pk = g_gsKicks; px = g_xgkicks; pr = g_vuRuns;
+    }
   }
   {  // tests (HP2_FAST_BOOT=1): Start pulses skip the intro movie and accept the title; the main menu is up at ~50 s of game
     if (g_fastBoot && !g_menuMusic) {  // time instead of ~150 s: pulses every 4 s from 8 s until the menus' music starts
@@ -1411,6 +1453,15 @@ void Hook(NativeState& s) {
       case 17: Wr<std::uint32_t>(item + 12, 6); break;
       default: break;  // 19: no instructions box; 6-9: the display offsets stay as they are
     }
+    s.pc = static_cast<std::uint32_t>(s.gpr[31][0]);
+    return;
+  }
+  if (pc == kHookVu1Start) {  // the EE starts VU1 at a0 (CMSAR1): run it now, like an MSCAL
+    static std::uint64_t calls = 0;
+    if (++calls <= 5 || calls % 10000 == 0)
+      Log("vu1: started by the EE at %04X (call %llu, vblank %llu)", (A(s, 0) & 0xFFFF) * 8, static_cast<unsigned long long>(calls),
+          static_cast<unsigned long long>(g_vblanks));
+    RunVu1((A(s, 0) & 0xFFFF) * 8);
     s.pc = static_cast<std::uint32_t>(s.gpr[31][0]);
     return;
   }
@@ -1615,7 +1666,13 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
       }
     }
-    g_log = _wfopen((exe_dir / L"native.log").c_str(), L"w");
+    // the log is named after the executable (a test copy does not overwrite the log of a game being played)
+    {
+      wchar_t self[MAX_PATH] = {};
+      GetModuleFileNameW(nullptr, self, MAX_PATH);
+      const std::wstring stem = std::filesystem::path(self).stem().wstring();
+      g_log = _wfopen((exe_dir / (stem == L"HotPursuit2Native" ? std::wstring(L"native.log") : stem + L".log")).c_str(), L"w");
+    }
     Log("HotPursuit2Native 0.2.0-dev.1 - native runtime, no emulator code. Development build.");
 
     // ---- the game's executable, from the user's ROM folder ----
@@ -1762,6 +1819,15 @@ int wmain(int argc, wchar_t** argv) {
     Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
         static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
     gs::DumpFrame(".cache/native/frame.bmp");
+    {
+      const std::string trace = gs::CsrTraceText();
+      Log("GS event registers, last activity (F FINISH written, W CSR write, R CSR read, M IMR):");
+      for (std::size_t p = 0; p < trace.size();) {
+        const std::size_t e = trace.find('\n', p);
+        Log("%s", trace.substr(p, e - p).c_str());
+        p = e + 1;
+      }
+    }
     audio::Shutdown();
     if (std::getenv("HP2_DUMP_RAM")) {  // diagnostic: EE RAM at the end of the run, same layout as the reference launcher's ee-ram.bin
       if (FILE* f = nullptr; fopen_s(&f, ".cache/native/ee-ram.bin", "wb") == 0 && f) { fwrite(g_ram, 1, kNativeRamSize, f); fclose(f); }

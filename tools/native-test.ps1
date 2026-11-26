@@ -28,6 +28,7 @@ param(
   [string]$TurboUntil = '',
   [switch]$FastBoot,
   [switch]$NoBuild,
+  [double]$RealSeconds = 0,  # real-time safety limit (default: twice the game time plus a minute)
   [string]$Grep = '',
   [hashtable]$Env = @{}
 )
@@ -45,7 +46,8 @@ if (-not $NoBuild) {
   if (-not (Test-Path $dll) -or $newest.LastWriteTime -gt (Get-Item $dll).LastWriteTime) {
     & (Join-Path $repo '.cache\build\release\recomp\hp2recomp.exe') package (Join-Path $rom 'SLUS_203.62') $dll | Select-Object -Last 1
   }
-  Copy-Item (Join-Path $repo '.cache\build\release\native\HotPursuit2Native.exe') $out -Force
+  # tests run their own copy, so a game the user has open is not disturbed (a running exe cannot be replaced)
+  Copy-Item (Join-Path $repo '.cache\build\release\native\HotPursuit2Native.exe') (Join-Path $out 'HotPursuit2Native-test.exe') -Force
 }
 
 $run = Join-Path $out ('test\' + (Get-Date -Format 'yyyy-MM-dd HHmmss'))
@@ -60,7 +62,7 @@ $watch = [Diagnostics.Stopwatch]::StartNew()
 try {
   Push-Location $repo
   # real-time limit as a safety net: the game-time limit (--until) ends the run
-  & (Join-Path $out 'HotPursuit2Native.exe') --rom $rom --until $Until --seconds ([math]::Max(60, $Until * 2 + 60)) 2>&1 | Out-Null
+  & (Join-Path $out 'HotPursuit2Native-test.exe') --rom $rom --until $Until --seconds $(if ($RealSeconds -gt 0) { $RealSeconds } else { [math]::Max(60, $Until * 2 + 60) }) 2>&1 | Out-Null
   $code = $LASTEXITCODE
 } finally {
   Pop-Location
@@ -68,7 +70,7 @@ try {
 }
 $watch.Stop()
 
-Copy-Item (Join-Path $out 'native.log') $run
+Copy-Item (Join-Path $out 'HotPursuit2Native-test.log') (Join-Path $run 'native.log')
 Add-Type -AssemblyName System.Drawing
 foreach ($f in Get-ChildItem $out -File | Where-Object { $_.Name -match '^(at|shot)_.*\.bmp$' }) {
   $dest = Join-Path $run $f.Name
