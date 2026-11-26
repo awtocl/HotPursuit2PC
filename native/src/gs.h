@@ -16,7 +16,14 @@ void StQ(std::uint32_t s, std::uint32_t t, std::uint32_t q);
 // Image data of a host-to-local transfer (GIF IMAGE tag or HWREG): whole quadwords.
 void ImageData(const std::uint8_t* data, std::size_t bytes);
 // Privileged registers (PMODE, SMODE2, DISPFB1/2, DISPLAY1/2, BGCOLOR...), address 0x12000000 + offset.
-void PrivWrite(std::uint32_t address, std::uint64_t value);
+// Privileged registers: `size` is the access width in bytes (4 or 8); a 32-bit write changes only its half of the register.
+void PrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size);
+// GS_CSR (0x12001000) and GS_IMR (0x12001010) reads; `field` = current field bit (0/1).
+std::uint64_t PrivRead(std::uint32_t address, std::uint32_t field);
+// Vertical blank start: sets CSR.VSINT.
+void VBlankStart();
+// Called when CSR.SIGNAL or CSR.FINISH is raised and not masked in GS_IMR (the host raises INTC cause 0, GS).
+void SetInterruptCallback(void (*callback)());
 // Vertical blank: show the display buffer.
 void Present();
 bool WindowClosed();

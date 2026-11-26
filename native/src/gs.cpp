@@ -259,6 +259,8 @@ int g_queued = 0;
 struct Transfer { bool active = false; u32 psm = 0, bp = 0, bw = 0, x0 = 0, y0 = 0, w = 0, h = 0, pos = 0; u32 pending = 0, pendingBits = 0; } g_xfer;
 
 // privileged registers
+u64 g_csr = 0, g_imr = 0xFF00, g_siglblid = 0;  // GS_CSR event bits (0 SIGNAL, 1 FINISH, 2 HSINT, 3 VSINT, 4 EDWINT), GS_IMR, GS_SIGLBLID
+void (*g_irqCallback)() = nullptr;
 u64 g_pmode = 0, g_dispfb[2] = {0, 0}, g_display[2] = {0, 0}, g_smode2 = 0;
 
 // ---- window ------------------------------------------------------------------------------------
@@ -786,6 +788,18 @@ void RegWrite(std::uint32_t reg, std::uint64_t v) {
           for (u32 x = 0; x < w; ++x) WritePixel(dpsm, dbp, dbw, dx + x, dy + y, ReadPixel(spsm, sbp, sbw, sx + x, sy + y));
       }
       break;
+    case 0x60: {  // SIGNAL: SIGID = (SIGID & ~mask) | (id & mask); raises CSR.SIGNAL
+      const u32 id = static_cast<u32>(v), mask = static_cast<u32>(v >> 32);
+      g_siglblid = (g_siglblid & ~static_cast<u64>(0xFFFFFFFFu)) | ((static_cast<u32>(g_siglblid) & ~mask) | (id & mask));
+      g_csr |= 1;
+      if (!(g_imr & 0x100) && g_irqCallback) g_irqCallback();
+      break;
+    }
+    case 0x61:  // FINISH: raises CSR.FINISH once everything before it is drawn (drawing here is immediate)
+      g_csr |= 2;
+      if (!(g_imr & 0x200) && g_irqCallback) g_irqCallback();
+      break;
+    case 0x62: g_siglblid = (g_siglblid & 0xFFFFFFFFull) | (v << 32); break;  // LABEL: LBLID
     case 0x54: {  // HWREG: 64 bits of image data
       u8 b[8];
       memcpy(b, &v, 8);
@@ -796,17 +810,40 @@ void RegWrite(std::uint32_t reg, std::uint64_t v) {
   }
 }
 
-void PrivWrite(std::uint32_t address, std::uint64_t value) {
-  switch (address & 0xFFF) {
-    case 0x000: g_pmode = value; break;
-    case 0x020: g_smode2 = value; break;
-    case 0x070: g_dispfb[0] = value; break;
-    case 0x080: g_display[0] = value; break;
-    case 0x090: g_dispfb[1] = value; break;
-    case 0x0A0: g_display[1] = value; break;
+namespace {
+void Merge(u64& reg, std::uint32_t address, u64 value, std::uint32_t size) {
+  if (size >= 8) reg = value;
+  else if (address & 4) reg = (reg & 0xFFFFFFFFull) | (value << 32);
+  else reg = (reg & ~0xFFFFFFFFull) | (value & 0xFFFFFFFFull);
+}
+}  // namespace
+
+void PrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size) {
+  switch (address & 0xFF8) {
+    case 0x000: Merge(g_pmode, address, value, size); break;
+    case 0x020: Merge(g_smode2, address, value, size); break;
+    case 0x070: Merge(g_dispfb[0], address, value, size); break;
+    case 0x080: Merge(g_display[0], address, value, size); break;
+    case 0x090: Merge(g_dispfb[1], address, value, size); break;
+    case 0x0A0: Merge(g_display[1], address, value, size); break;
+    case 0x1000: if (!(address & 4)) g_csr &= ~(value & 0x1F); break;  // CSR: write 1 to clear the event bits (bit 8 RESET ignored)
+    case 0x1010: Merge(g_imr, address, value, size); break;
+    case 0x1080: Merge(g_siglblid, address, value, size); break;
     default: break;
   }
 }
+
+std::uint64_t PrivRead(std::uint32_t address, std::uint32_t field) {
+  switch (address & 0xFF8) {
+    case 0x1000: return (g_csr & 0x1F) | 0x4000 | (static_cast<u64>(field & 1) << 13) | (static_cast<u64>(0x1B) << 16);  // FIFO empty, field, revision
+    case 0x1010: return g_imr;
+    case 0x1080: return g_siglblid;
+    default: return 0;
+  }
+}
+
+void VBlankStart() { g_csr |= 8; }
+void SetInterruptCallback(void (*callback)()) { g_irqCallback = callback; }
 
 void Present() {
   if (g_mem.empty()) return;

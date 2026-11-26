@@ -167,6 +167,7 @@ void Stop(const char* format, ...) {
 // ---- DMA ---------------------------------------------------------------------------------
 // Transfers complete at once. The data is walked, so that what the game waits for happens: for VIF1 the
 // command stream is parsed (interrupt bit -> INTC VIF1 interrupt). Graphics and VU1 programs come later.
+void RaiseGsInterrupt();  // INTC cause 0 (GS), used by GS SIGNAL/FINISH
 std::uint32_t g_intcPending = 0;  // INTC causes raised, waiting for the scheduler to deliver them
 std::uint32_t g_vifCycle = 0x0101;  // CL | WL << 8 (STCYCL)
 std::uint64_t g_vifCodes = 0, g_vifInterrupts = 0, g_vifStarts = 0;
@@ -485,7 +486,7 @@ std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
     case 0x1000F010: return g_intcMask;
     case 0x1000E010: return g_dmacStat;
     case 0x1000F230: return 0x00060000;  // SIF: the I/O side reports itself initialised
-    case 0x12001000: return 0x00000008 | ((g_vblanks & 1) << 13);  // GS CSR: FIFO empty, field
+    case 0x12001000: case 0x12001010: case 0x12001080: return gs::PrivRead(a, static_cast<std::uint32_t>(g_vblanks & 1));  // GS CSR, IMR, SIGLBLID
     case 0x10003020: return 0;  // GIF_STAT: idle
     case 0x10003C00: return 0;  // VIF1_STAT: idle
     case 0x10003C30: return g_vifMark;  // VIF1_MARK
@@ -513,12 +514,12 @@ void HwWrite(std::uint8_t*, std::uint32_t address, std::uint64_t value, std::uin
     memcpy(p, &value, size > 8 ? 8 : size);
     return;
   }
-  if (a >= 0x12000000 && a < 0x12001000) gs::PrivWrite(a, value);
+  if (a >= 0x12000000 && a < 0x12001100) gs::PrivWrite(a, value, size >= 8 ? 8 : 4);
   switch (a) {
     case 0x1000F000: g_intcStat &= ~v; return;
     case 0x1000F010: g_intcMask ^= v; return;
     case 0x1000E010: g_dmacStat = (g_dmacStat & ~(v & 0xFFFF)) ^ (v & 0xFFFF0000); return;
-    case 0x12001000: return;  // GS CSR: event acknowledge
+    case 0x12001000: case 0x12001010: case 0x12001080: return;  // GS CSR/IMR/SIGLBLID: handled by gs::PrivWrite
     default: break;
   }
   if (a >= 0x10008000 && a < 0x1000E000 && (a & 0xFF) == 0 && (v & 0x100)) {
@@ -611,6 +612,11 @@ void RunHandlers(std::vector<Handler>& list, std::uint32_t cause) {
   g_inHandler = false;
 }
 
+void RaiseGsInterrupt() {
+  g_intcPending |= 1u;
+  g_intcStat |= 1u;
+}
+
 void DeliverInterrupts() {
   const bool enabled = (g_status & 0x10000) != 0;  // the game can disable interrupts: handlers wait, time does not
   while (enabled && !g_pendingDmac.empty() && !g_stop) {
@@ -624,6 +630,7 @@ void DeliverInterrupts() {
     g_nextVblank.QuadPart += g_qpf.QuadPart * 1001 / 60000;
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
+    gs::VBlankStart();
     gs::Present();
     PadPoll();
     if (gs::WindowClosed()) Stop("the window was closed");
@@ -1305,6 +1312,7 @@ int wmain(int argc, wchar_t** argv) {
     Log("Executable loaded: %ls (entry %08X)", (rom / L"SLUS_203.62").c_str(), elf.entry());
     {
       std::string error;
+      gs::SetInterruptCallback(&RaiseGsInterrupt);
       g_disc = hp2::VirtualDisc::Open(rom.wstring(), error);
       if (!g_disc) fail("cannot open the disc from the ROM folder: {}", error);
       Log("Disc: %s", g_disc->Description().c_str());
