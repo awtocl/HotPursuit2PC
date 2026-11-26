@@ -441,17 +441,30 @@ void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
     take(g_hw[base + 0x10], g_hw[base + 0x20] & 0xFFFF);
   } else {
     std::uint32_t tadr = g_hw[base + 0x30];
+    std::uint32_t asr[2] = {0, 0};  // address stack (CALL/RET), two levels
+    unsigned asp = 0;
     for (int guard = 0; guard < 100000; ++guard) {
-      const std::uint64_t tag = Rd<std::uint64_t>(tadr);
+      const bool inSpr = (tadr & 0x80000000u) != 0;  // tag in scratchpad (bit 31 of the tag address)
+      const std::uint8_t* tp = inSpr ? g_spr + (tadr & 0x3FF0) : (InRam(tadr, 16) ? g_ram + Phys(tadr) : nullptr);
+      if (!tp) { LogOnce("dmatag" + std::to_string(tadr), "hw: DMA tag address %08X outside memory: chain stopped", tadr); break; }
+      std::uint64_t tag;
+      memcpy(&tag, tp, 8);
       const std::uint32_t id = (tag >> 28) & 7, qwc = tag & 0xFFFF, addr = static_cast<std::uint32_t>(tag >> 32);
-      if (chcr & 0x40) {  // TTE: the tag's upper half (two VIF codes) goes along
-        const std::uint8_t* hi = g_ram + Phys(tadr) + 8;
-        data.insert(data.end(), hi, hi + 8);
-      }
-      if (id == 1 || id == 7 || id == 2 || id == 5 || id == 6) take(tadr + 16, qwc);
-      else take(addr, qwc);  // refe, ref, refs
+      if (chcr & 0x40) data.insert(data.end(), tp + 8, tp + 16);  // TTE: the tag's upper half (two VIF codes) goes along
+      // ids: 0 refe, 1 cnt, 2 next, 3 ref, 4 refs, 5 call, 6 ret, 7 end
+      const bool afterTag = id == 1 || id == 2 || id == 5 || id == 6 || id == 7;
+      take(afterTag ? tadr + 16 : addr, qwc);
+      if ((chcr & 0x80) && (tag >> 31 & 1)) break;  // TIE with the tag's IRQ bit: the transfer stops after this tag's data
       if (id == 0 || id == 7) break;
-      tadr = (id == 2 || id == 5) ? addr : tadr + 16 + (id == 1 || id == 6 ? qwc * 16 : 0);
+      if (id == 5) {  // CALL: push the address of the packet after this one's data
+        if (asp >= 2) { LogOnce("dmaasr", "hw: DMA CALL with the address stack full: chain stopped"); break; }
+        asr[asp++] = tadr + 16 + qwc * 16;
+        tadr = addr;
+      } else if (id == 6) {  // RET
+        if (asp == 0) { LogOnce("dmaasr0", "hw: DMA RET with the address stack empty: chain ends"); break; }
+        tadr = asr[--asp];
+      } else if (id == 2) tadr = addr;
+      else tadr += 16 + (id == 1 ? qwc * 16 : 0);
     }
   }
   if (channel == 1) ParseVif1(data);

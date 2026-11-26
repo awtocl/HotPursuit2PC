@@ -639,7 +639,8 @@ Vertex MakeVertex(u64 xyz, bool hasF) {
   return v;
 }
 
-void Kick(bool hasF, u64 xyz) {
+// draw=false (XYZ3/XYZF3): the vertex is queued but no primitive is emitted (the vertex-kick is only XYZ2/XYZF2).
+void Kick(bool hasF, u64 xyz, bool draw) {
   const u32 type = static_cast<u32>(g_prim & 7);
   const bool flat = ((g_prim >> 3) & 1) == 0;
   Vertex v = MakeVertex(xyz, hasF);
@@ -648,21 +649,22 @@ void Kick(bool hasF, u64 xyz) {
     case 1: case 2: ++g_stats.lines; break;  // lines are not drawn yet
     case 3:  // triangle list
       g_queue[g_queued++] = v;
+      if (g_queued == 3 && !draw) g_queued = 0;  // (no-kick vertex completing a triangle: dropped)
       if (g_queued == 3) { DrawTriangle(g_queue[0], g_queue[1], g_queue[2], flat); ++g_stats.triangles; g_queued = 0; }
       break;
     case 4:  // strip
       if (g_queued < 3) g_queue[g_queued++] = v;
       else { g_queue[0] = g_queue[1]; g_queue[1] = g_queue[2]; g_queue[2] = v; }
-      if (g_queued == 3) { DrawTriangle(g_queue[0], g_queue[1], g_queue[2], flat); ++g_stats.triangles; }
+      if (g_queued == 3 && draw) { DrawTriangle(g_queue[0], g_queue[1], g_queue[2], flat); ++g_stats.triangles; }
       break;
     case 5:  // fan
       if (g_queued < 3) g_queue[g_queued++] = v;
       else { g_queue[1] = g_queue[2]; g_queue[2] = v; }
-      if (g_queued == 3) { DrawTriangle(g_queue[0], g_queue[1], g_queue[2], flat); ++g_stats.triangles; }
+      if (g_queued == 3 && draw) { DrawTriangle(g_queue[0], g_queue[1], g_queue[2], flat); ++g_stats.triangles; }
       break;
     case 6: {  // sprite: two corners, flat colour of the second vertex
       g_queue[g_queued++] = v;
-      if (g_queued == 2) {
+      if (g_queued == 2 && draw) {
         DrawSprite(g_queue[0], g_queue[1]);
         ++g_stats.sprites;
         g_queued = 0;
@@ -739,8 +741,10 @@ void RegWrite(std::uint32_t reg, std::uint64_t v) {
     case 0x01: g_rgbaq = v; break;
     case 0x02: g_st = v; break;
     case 0x03: g_uv = v; break;
-    case 0x04: case 0x0C: Kick(true, v); break;
-    case 0x05: case 0x0D: Kick(false, v); break;
+    case 0x04: Kick(true, v, true); break;
+    case 0x0C: Kick(true, v, false); break;
+    case 0x05: Kick(false, v, true); break;
+    case 0x0D: Kick(false, v, false); break;
     case 0x06: g_ctx[0].tex0 = v; break;
     case 0x07: g_ctx[1].tex0 = v; break;
     case 0x08: g_ctx[0].clamp = v; break;

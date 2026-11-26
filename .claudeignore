@@ -1,0 +1,37 @@
+# The user's game data and dumps (never read or commit)
+ROM/
+game/
+*.iso
+*.ISO
+*.bin
+*.BIN
+*.elf
+*.pak
+*.wad
+*.bmp
+# Caches, builds and third-party code
+.cache/
+build/
+bin/
+obj/
+out/
+third_party/
+# Binaries and logs
+*.dll
+*.exe
+*.o
+*.obj
+*.pdb
+*.lib
+*.ilk
+*.log
+*.tsv
+# Outside analyses and notes that predate the repository
+ghidra/
+ida/
+dumps/
+assets/
+docs/evidence/
+docs/gate-reports/
+Build prompt - Claude Fable 5.2.md
+ROM - dump analysis.md
