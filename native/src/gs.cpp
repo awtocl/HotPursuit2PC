@@ -405,12 +405,23 @@ Rgba TexelRaw(const Ctx& c, u32 x, u32 y) {  // texel (x, y) of the texture of c
       break;
     }
     case CT16: case CT16S: t = Unpack16(ReadPixel(psm, tbp, tbw, x, y), ta1, ta0); if (aem && (t.r | t.g | t.b) == 0 && t.a == ta0) t.a = 0; break;
+    case Z32: t = Unpack32(ReadPixel(Z32, tbp, tbw, x, y)); break;  // the depth buffer read back as colours (post effects)
+    case Z24: { const u32 v = ReadPixel(Z24, tbp, tbw, x, y); t = Unpack32(v & 0xFFFFFF); t.a = (aem && (v & 0xFFFFFF) == 0) ? 0 : ta0; break; }
+    case Z16: case Z16S: t = Unpack16(ReadPixel(psm, tbp, tbw, x, y), ta1, ta0); if (aem && (t.r | t.g | t.b) == 0 && t.a == ta0) t.a = 0; break;
     case T8: t = ClutLookup(c, ReadPixel(T8, tbp, tbw, x, y)); break;
     case T4: t = ClutLookup(c, ReadPixel(T4, tbp, tbw, x, y)); break;
     case T8H: t = ClutLookup(c, ReadPixel(CT32, tbp, tbw, x, y) >> 24); break;
     case T4HL: t = ClutLookup(c, (ReadPixel(CT32, tbp, tbw, x, y) >> 24) & 15); break;
     case T4HH: t = ClutLookup(c, ReadPixel(CT32, tbp, tbw, x, y) >> 28); break;
-    default: ++g_stats.unsupported; break;
+    default: {
+      ++g_stats.unsupported;
+      static bool noted = false;  // development note, once: which format reached the texture decoder
+      if (!noted) {
+        noted = true;
+        if (FILE* f = fopen(".cache/native/gs_unsupported.txt", "w")) { fprintf(f, "TexelRaw: psm %02X tex0 %016llX\n", psm, static_cast<unsigned long long>(c.tex0)); fclose(f); }
+      }
+      break;
+    }
   }
   return t;
 }
