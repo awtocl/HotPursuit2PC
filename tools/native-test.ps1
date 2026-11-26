@@ -31,7 +31,8 @@ param(
   [double]$RealSeconds = 0,  # real-time safety limit (default: twice the game time plus a minute)
   [string]$Grep = '',
   [hashtable]$Env = @{},
-  [string]$Code = ''  # another code package (e.g. one built with HP2_TRACE_ENTRIES=1 for function-entry traces)
+  [string]$Code = '',  # another code package (e.g. one built with HP2_TRACE_ENTRIES=1 for function-entry traces)
+  [string]$Preset = 'release'  # dev = optimised with debug symbols (HP2_SAMPLE=1 profiles name functions with them)
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -40,7 +41,7 @@ $rom = Join-Path $repo 'ROM\Need for Speed - Hot Pursuit 2 (USA)'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 if (-not $NoBuild) {
-  $build = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build.ps1') -Preset release -NoTest 2>&1
+  $build = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build.ps1') -Preset $Preset -NoTest 2>&1
   if ($LASTEXITCODE -ne 0) { $build | Select-String -Pattern 'error|FAILED' | Select-Object -First 15; throw 'build failed' }
   $dll = Join-Path $out 'hp2code.dll'
   $newest = Get-ChildItem (Join-Path $repo 'recomp') -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -48,7 +49,7 @@ if (-not $NoBuild) {
     & (Join-Path $repo '.cache\build\release\recomp\hp2recomp.exe') package (Join-Path $rom 'SLUS_203.62') $dll | Select-Object -Last 1
   }
   # tests run their own copy, so a game the user has open is not disturbed (a running exe cannot be replaced)
-  Copy-Item (Join-Path $repo '.cache\build\release\native\HotPursuit2Native.exe') (Join-Path $out 'HotPursuit2Native-test.exe') -Force
+  Copy-Item (Join-Path $repo ".cache\build\$Preset\native\HotPursuit2Native.exe") (Join-Path $out 'HotPursuit2Native-test.exe') -Force
 }
 
 $run = Join-Path $out ('test\' + (Get-Date -Format 'yyyy-MM-dd HHmmss'))

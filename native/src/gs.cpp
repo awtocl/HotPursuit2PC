@@ -13,6 +13,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <functional>
+#include <immintrin.h>
+#include <intrin.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,6 +23,8 @@
 #include <vector>
 
 namespace gs {
+void FlushGs();  // (the GS thread: defined at the end) everything queued done
+void StopGs();
 namespace {
 
 using u8 = std::uint8_t;
@@ -32,15 +37,19 @@ using i64 = std::int64_t;
 constexpr u32 kRamSize = 4u << 20;
 std::vector<u8> g_mem;
 Stats g_stats;
-struct Ticks {  // adds the time of a scope to a counter (QPC ticks)
+// Adds the time of a scope to a counter, in CPU time-stamp cycles (GetStats converts them to QPC ticks): it runs for every
+// vertex, where two QueryPerformanceCounter calls cost ~0.15 us per triangle.
+struct TscBase {
+  u64 tsc;
+  LARGE_INTEGER qpc;
+  TscBase() : tsc(__rdtsc()) { QueryPerformanceCounter(&qpc); }
+};
+const TscBase g_tscBase;
+struct Ticks {
   u64& total;
-  LARGE_INTEGER start;
-  explicit Ticks(u64& t) : total(t) { QueryPerformanceCounter(&start); }
-  ~Ticks() {
-    LARGE_INTEGER end;
-    QueryPerformanceCounter(&end);
-    total += static_cast<u64>(end.QuadPart - start.QuadPart);
-  }
+  u64 start;
+  explicit Ticks(u64& t) : total(t), start(__rdtsc()) {}
+  ~Ticks() { total += __rdtsc() - start; }
   Ticks(const Ticks&) = delete;
   Ticks& operator=(const Ticks&) = delete;
 };
@@ -227,19 +236,48 @@ u32 BitsOf(u32 psm) {
 
 
 // ---- fast surface access (frame and depth buffers) and page change tracking (texture cache) ----------------
-struct Surf { Kind kind; u32 psm, base, perRow, pw, ph; const u32* table; };
+// Page sizes are powers of two (64x32, 64x64, 128x64, 128x128): shifts and masks instead of divisions in the per-pixel path.
+struct Surf { Kind kind; u32 psm, base, perRow, pw, ph, pwShift, phShift; const u32* table; };
+u32 Log2(u32 v) { u32 n = 0; while ((1u << n) < v) ++n; return n; }
 Surf MakeSurf(u32 psm, u32 bp, u32 bw) {
   Surf s = {};
   s.kind = KindOf(psm);
   BuildOffsets(s.kind);
   const PageGeometry pg = PageOf(s.kind);
   s.psm = psm; s.base = bp * 256; s.pw = pg.w; s.ph = pg.h;
+  s.pwShift = Log2(pg.w); s.phShift = Log2(pg.h);
   s.perRow = std::max<u32>(1, bw * 64 / pg.w);
   s.table = g_pageOffset[static_cast<int>(s.kind)].data();
   return s;
 }
-inline u32 SurfAddr(const Surf& s, u32 x, u32 y) {
-  return (s.base + (x / s.pw + (y / s.ph) * s.perRow) * 8192 + s.table[(y % s.ph) * s.pw + x % s.pw]) & (kRamSize - 1);
+inline u32 SurfPage(const Surf& s, u32 x, u32 y) {  // byte address of the page holding (x, y)
+  return (s.base + ((x >> s.pwShift) + (y >> s.phShift) * s.perRow) * 8192) & (kRamSize - 1);
+}
+inline u32 SurfOffset(const Surf& s, u32 x, u32 y) {  // offset inside the page (bytes; nibbles for 4-bit)
+  return s.table[((y & (s.ph - 1)) << s.pwShift) + (x & (s.pw - 1))];
+}
+inline u32 SurfAddr(const Surf& s, u32 x, u32 y) { return (SurfPage(s, x, y) + SurfOffset(s, x, y)) & (kRamSize - 1); }
+inline u32 SurfReadRaw(const Surf& s, u32 x, u32 y) {  // stored value (any format), through the precomputed surface
+  const u32 page = SurfPage(s, x, y), off = SurfOffset(s, x, y);
+  switch (s.kind) {
+    case Kind::C32: case Kind::Z32: {
+      u32 v;
+      memcpy(&v, &g_mem[(page + off) & (kRamSize - 4)], 4);
+      return s.psm == CT24 || s.psm == Z24 ? (v & 0xFFFFFF) : v;
+    }
+    case Kind::C16: case Kind::C16S: case Kind::Z16: case Kind::Z16S: {
+      u16 h;
+      memcpy(&h, &g_mem[(page + off) & (kRamSize - 2)], 2);
+      return h;
+    }
+    case Kind::I8: return g_mem[(page + off) & (kRamSize - 1)];
+    case Kind::I4: {
+      const u32 a = (page * 2 + off) & (kRamSize * 2 - 1);
+      const u8 b = g_mem[a >> 1];
+      return (a & 1) ? (b >> 4) : (b & 15u);
+    }
+  }
+  return 0;
 }
 inline u32 SurfRead(const Surf& s, u32 x, u32 y) {
   const u32 a = SurfAddr(s, x, y);
@@ -270,11 +308,41 @@ inline void SurfWrite(const Surf& s, u32 x, u32 y, u32 value, u32 mask) {
     memcpy(&g_mem[a & ~1u], &old, 2);
   }
 }
-void BumpRect(const Surf& s, int x0, int x1, int y0, int y1) {  // every page of `s` that the rectangle touches
+template <class Fn>
+void ForPages(const Surf& s, int x0, int x1, int y0, int y1, Fn&& fn) {  // every page of `s` that the rectangle touches
   if (x1 < x0 || y1 < y0) return;
   for (u32 py = static_cast<u32>(y0) / s.ph; py <= static_cast<u32>(y1) / s.ph; ++py)
     for (u32 px = static_cast<u32>(x0) / s.pw; px <= static_cast<u32>(x1) / s.pw; ++px)
-      ++g_pageVersion[((s.base + (px + py * s.perRow) * 8192) & (kRamSize - 1)) >> 13];
+      fn(((s.base + (px + py * s.perRow) * 8192) & (kRamSize - 1)) >> 13);
+}
+void BumpRect(const Surf& s, int x0, int x1, int y0, int y1) {
+  ForPages(s, x0, x1, y0, y1, [](u32 page) { ++g_pageVersion[page]; });
+}
+
+// ---- band-parallel drawing: synchronisation with the queued primitives ---------------------------------------------
+// Pages that queued (not yet drawn) primitives write or read as frame/depth buffers. Anything that reads or writes GS
+// memory outside the workers (texture and palette decoding, image transfers, the display read-out) first waits for the
+// workers when it touches one of them.
+bool g_pendingPage[512] = {};
+bool g_anyPending = false;
+void DrawBarrier();  // (defined with the band pool) every queued primitive drawn; clears the pending pages
+void MarkPending(const Surf& s, int x0, int x1, int y0, int y1) {
+  ForPages(s, x0, x1, y0, y1, [](u32 page) { g_pendingPage[page] = true; });
+  g_anyPending = true;
+}
+void SyncPages(u32 first, u32 count) {
+  if (!g_anyPending) return;
+  for (u32 i = 0; i < count; ++i)
+    if (g_pendingPage[(first + i) & 511]) {
+      DrawBarrier();
+      return;
+    }
+}
+void SyncRect(const Surf& s, int x0, int x1, int y0, int y1) {
+  if (!g_anyPending) return;
+  bool hit = false;
+  ForPages(s, x0, x1, y0, y1, [&](u32 page) { hit |= g_pendingPage[page]; });
+  if (hit) DrawBarrier();
 }
 
 // ---- row-parallel rasterisation ------------------------------------------------------------------------
@@ -375,8 +443,21 @@ u64 g_bitbltbuf = 0, g_trxpos = 0, g_trxreg = 0, g_trxdir = 0;
 Vertex g_queue[3];
 int g_queued = 0;
 
-// image transfer state
-struct Transfer { bool active = false; u32 psm = 0, bp = 0, bw = 0, x0 = 0, y0 = 0, w = 0, h = 0, pos = 0; u32 pending = 0, pendingBits = 0; } g_xfer;
+// image transfer state: the destination surface is worked out once per transfer and the position advances pixel by pixel
+// (the per-pixel generic address path cost 3-7 ms per refresh in races, where textures are uploaded every frame)
+struct Transfer {
+  bool active = false;
+  u32 psm = 0, bp = 0, bw = 0, x0 = 0, y0 = 0, w = 0, h = 0, pos = 0;
+  u32 x = 0, y = 0;            // next pixel
+  u32 shift = 0, mask = ~0u;   // T8H / T4HL / T4HH: index bits placed in the alpha byte of a CT32 word
+  bool written = false;        // pixels since the last page-version bump
+} g_xfer;
+// The page versions of a transfer's rectangle are bumped when it completes, or before anything decodes texels or a palette
+// while it is still running (bumping them for every chunk of image data cost ~3% of the game's thread).
+void BumpTransferPages();
+inline void FlushTransferPages() {
+  if (g_xfer.written) BumpTransferPages();
+}
 
 // privileged registers
 u64 g_csr = 0, g_imr = 0xFF00, g_siglblid = 0;
@@ -625,12 +706,15 @@ void LoadClut(u64 tex0) {
   const bool is4 = KindOf(psm) == Kind::I4;
   const bool c16 = cpsm == CT16 || cpsm == CT16S;
   const u32 entries = is4 ? 16 : 256;
+  FlushTransferPages();
+  if (csm2) DrawBarrier();               // (a line anywhere in a buffer)
+  else SyncPages(cbp * 256 / 8192, 2);   // the palette block may have just been drawn
   g_clut16 = c16;
   const u32 fmt = cpsm == CT16S ? CT16S : (c16 ? CT16 : CT32);
+  const Surf src = MakeSurf(fmt, cbp, csm2 ? static_cast<u32>(g_texclut & 63) : 1);  // (a palette load comes with most TEX0 writes)
   for (u32 e = 0; e < entries; ++e) {
-    u32 x, y, bw = 1;
+    u32 x, y;
     if (csm2) {  // CSM2: entries in a line of a buffer whose width and start come from TEXCLUT
-      bw = static_cast<u32>(g_texclut & 63);
       x = static_cast<u32>((g_texclut >> 6) & 63) * 16 + e;
       y = static_cast<u32>((g_texclut >> 12) & 0x3FF);
     } else if (is4) {  // CSM1, 4-bit: 16 entries; CT32 as 8x2 groups tiled in a 16x16 area, CT16 as one row of 16 per group
@@ -640,7 +724,7 @@ void LoadClut(u64 tex0) {
       const u32 i = (e & 0xE7) | ((e & 8) << 1) | ((e & 16) >> 1);
       x = i & 15; y = i >> 4;
     }
-    g_clut[((is4 ? csa * 16 : 0) + e) & 255] = ReadPixel(fmt, cbp, bw, x, y);
+    g_clut[((is4 ? csa * 16 : 0) + e) & 255] = SurfReadRaw(src, x, y);
   }
   // the version is the palette's content: games reload the same palette with every TEX0 write, which must not
   // invalidate the decoded indexed textures (hundreds of needless decodes per frame in races)
@@ -705,13 +789,42 @@ Rgba TexelRaw(const Ctx& c, u32 x, u32 y) {  // texel (x, y) of the texture of c
   return t;
 }
 
+// TexelRaw through a surface made once per texture (the generic per-texel address path made decoding cost ~3.5 ms per
+// refresh in races). Formats it does not know fall back to TexelRaw.
+Rgba TexelFast(const Ctx& c, const Surf& s, u32 psm, u32 x, u32 y) {
+  const int ta0 = static_cast<int>(g_texa & 255), ta1 = static_cast<int>((g_texa >> 32) & 255);
+  const bool aem = ((g_texa >> 15) & 1) != 0;
+  switch (psm) {
+    case CT32: case Z32: return Unpack32(SurfReadRaw(s, x, y));
+    case CT24: case Z24: {
+      const u32 v = SurfReadRaw(s, x, y);
+      Rgba t = Unpack32(v);
+      t.a = (aem && v == 0) ? 0 : ta0;
+      return t;
+    }
+    case CT16: case CT16S: case Z16: case Z16S: {
+      Rgba t = Unpack16(SurfReadRaw(s, x, y), ta1, ta0);
+      if (aem && (t.r | t.g | t.b) == 0 && t.a == ta0) t.a = 0;
+      return t;
+    }
+    case T8: case T4: return ClutLookup(c, SurfReadRaw(s, x, y));
+    case T8H: return ClutLookup(c, SurfReadRaw(s, x, y) >> 24);
+    case T4HL: return ClutLookup(c, (SurfReadRaw(s, x, y) >> 24) & 15);
+    case T4HH: return ClutLookup(c, SurfReadRaw(s, x, y) >> 28);
+    default: return TexelRaw(c, x, y);
+  }
+}
+
 // A decoded copy of a texture (and its palette), valid while the GS memory pages it came from are unchanged.
 struct TexCache {
   u64 tex0 = 0, texa = 0;
-  u32 w = 0, h = 0, firstPage = 0, pages = 0, clutPage = 0;
+  u32 w = 0, h = 0, clutPage = 0;
+  std::vector<u16> pageList;  // the pages its texels come from
   u64 version = 0;
   u64 used = 0;
-  std::vector<u32> pix;  // packed RGBA, row after row
+  std::shared_ptr<const u32[]> pix;  // packed RGBA, row after row; never changed once made (queued primitives use it)
+  std::size_t count = 0;
+  u64 rawHash = 0;  // the stored bytes (and palette) it was decoded from
 };
 // Keyed by TEX0 (without CLD) and TEXA. A race uses far more than the 48 textures the first cache held: with a
 // round-robin use LRU missed every time (hundreds of decodes per frame). Now a hash table with a memory budget.
@@ -726,23 +839,52 @@ std::unordered_map<TexKey, TexCache, TexKeyHash> g_texCache;
 u64 g_texClock = 0, g_texBytes = 0;
 constexpr u64 kTexBudget = 512ull << 20;  // decoded texels kept (bytes)
 
-u64 PageVersionSum(u32 first, u32 count) {
+// The pages a texture's rectangle covers (exactly: a range of whole buffer rows also took in render targets next to the
+// texture, which change every frame, so the texture looked changed every frame).
+using PageList = std::vector<u16>;
+void TexturePages(const Surf& s, u32 tw, u32 th, PageList& out) {
+  out.clear();
+  ForPages(s, 0, static_cast<int>(tw) - 1, 0, static_cast<int>(th) - 1, [&](u32 page) { out.push_back(static_cast<u16>(page)); });
+}
+u64 PageVersionSum(const PageList& list) {
   u64 s = 0;
-  for (u32 i = 0; i < count; ++i) s += g_pageVersion[(first + i) & 511];
+  for (u16 page : list) s += g_pageVersion[page];
   return s;
 }
+void SyncPageList(const PageList& list) {
+  if (!g_anyPending) return;
+  for (u16 page : list)
+    if (g_pendingPage[page]) {
+      DrawBarrier();
+      return;
+    }
+}
+u64 RawHash(const PageList& list) {  // the stored bytes of the pages (64-bit words, four independent lanes)
+  u64 h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
+  for (u16 page : list) {
+    const u8* p = &g_mem[static_cast<std::size_t>(page) * 8192];
+    for (u32 o = 0; o < 8192; o += 32)
+      for (int l = 0; l < 4; ++l) {
+        u64 w;
+        memcpy(&w, p + o + l * 8, 8);
+        h[l] = (h[l] ^ w) * 0x100000001B3ull + (h[l] >> 29);
+      }
+  }
+  return (h[0] * 31 + h[1]) * 31 + h[2] * 7 + h[3];
+}
+
 
 const TexCache& GetTexture(const Ctx& c) {
+  FlushTransferPages();
   const u32 tbp = static_cast<u32>(c.tex0 & 0x3FFF), tbw = static_cast<u32>((c.tex0 >> 14) & 63), psm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
   const u32 tw = 1u << ((c.tex0 >> 26) & 15), th = 1u << ((c.tex0 >> 30) & 15);
-  const Kind k = KindOf(psm == T8H || psm == T4HL || psm == T4HH ? CT32 : psm);
-  const PageGeometry pg = PageOf(k);
-  const u32 perRow = std::max<u32>(1, tbw * 64 / pg.w);
-  const u32 first = tbp * 256 / 8192, pages = perRow * ((th + pg.h - 1) / pg.h) + 1;
+  const Surf src = MakeSurf(psm == T8H || psm == T4HL || psm == T4HH ? CT32 : psm, tbp, tbw);
+  static PageList list;
+  TexturePages(src, tw, th, list);
   const u32 cbp = static_cast<u32>((c.tex0 >> 37) & 0x3FFF);
   const bool indexed = psm == T8 || psm == T4 || psm == T8H || psm == T4HL || psm == T4HH;
   const u32 clutPage = cbp * 256 / 8192;  // (kept for reference; the buffer version decides)
-  const u64 ver = PageVersionSum(first, pages) + (indexed ? g_clutVersion * 7 : 0);
+  const u64 ver = PageVersionSum(list) + (indexed ? g_clutVersion * 7 : 0);
   const u64 key = c.tex0 & ~(0x7ull << 61);  // CLD (clut load control) does not change the pixels
   const TexKey cacheKey{key, g_texa};
   auto found = g_texCache.find(cacheKey);
@@ -755,37 +897,68 @@ const TexCache& GetTexture(const Ctx& c) {
   if (found == g_texCache.end()) {
     while (g_texBytes + bytes > kTexBudget && !g_texCache.empty()) {  // over budget: drop the least recently used
       auto lru = std::min_element(g_texCache.begin(), g_texCache.end(), [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
-      g_texBytes -= lru->second.pix.size() * 4;
+      g_texBytes -= lru->second.count * 4;
       g_texCache.erase(lru);
     }
     found = g_texCache.emplace(cacheKey, TexCache{}).first;
   } else {
-    g_texBytes -= found->second.pix.size() * 4;  // stale: decoded again in place
+    // Stale (its pages or palette changed): games upload the same texels again every frame. If the stored bytes and the
+    // palette are what the cached copy was decoded from, it only takes the new version.
+    SyncPageList(list);
+    const u64 raw = RawHash(list) ^ (indexed ? g_clutVersion : 0);
+    ++g_stats.textureStale;
+    if (raw == found->second.rawHash && !noCache) {
+      ++g_stats.textureSame;
+      found->second.version = ver;
+      found->second.used = ++g_texClock;
+      return found->second;
+    }
+    g_texBytes -= found->second.count * 4;  // decoded again (into a new buffer)
   }
+  SyncPageList(list);  // texels still being drawn (render to texture): wait for the band workers
   g_texBytes += bytes;
   TexCache* slot = &found->second;
   slot->tex0 = key; slot->texa = g_texa; slot->version = ver; slot->used = ++g_texClock;
-  slot->w = tw; slot->h = th; slot->firstPage = first; slot->pages = pages; slot->clutPage = clutPage;
+  slot->w = tw; slot->h = th; slot->pageList = list; slot->clutPage = clutPage;
   Ticks timer(g_stats.textureTicks);
   ++g_stats.textureDecodes;
-  slot->pix.resize(static_cast<std::size_t>(tw) * th);
-  u32* out = slot->pix.data();
+  const std::size_t count = static_cast<std::size_t>(tw) * th;
+  std::shared_ptr<u32[]> pix(new u32[count]);  // (not zero-filled: every texel is written below)
+  u32* out = pix.get();
+  slot->pix = pix;
+  slot->count = count;
+  slot->rawHash = RawHash(list) ^ (indexed ? g_clutVersion : 0);
+  // Indexed textures: the palette packed once, then one table look-up per texel (per texel it was a CLUT unpack and repack).
+  u32 pal[256];
+  const u32 entries = psm == T8 || psm == T8H ? 256 : 16;
+  const u32 shift = psm == T8H || psm == T4HL ? 24 : psm == T4HH ? 28 : 0;
+  if (indexed)
+    for (u32 i = 0; i < entries; ++i) pal[i] = Pack32(ClutLookup(c, i));
   auto row = [&](int y) {  // rows are independent (read-only GS memory and CLUT): large textures are split between threads
-    for (u32 x = 0; x < tw; ++x) out[static_cast<std::size_t>(y) * tw + x] = Pack32(TexelRaw(c, x, static_cast<u32>(y)));
+    u32* line = out + static_cast<std::size_t>(y) * tw;
+    if (indexed)
+      for (u32 x = 0; x < tw; ++x) line[x] = pal[(SurfReadRaw(src, x, static_cast<u32>(y)) >> shift) & (entries - 1)];
+    else
+      for (u32 x = 0; x < tw; ++x) line[x] = Pack32(TexelFast(c, src, psm, x, static_cast<u32>(y)));
   };
-  if (static_cast<i64>(tw) * th >= kParallelArea) Pool().Run(0, static_cast<int>(th) - 1, row);
+  // (the row pool's hand-off costs more than a small texture: only large ones are split)
+  if (count >= 65536) Pool().Run(0, static_cast<int>(th) - 1, row);
   else for (u32 y = 0; y < th; ++y) row(static_cast<int>(y));
   return *slot;
 }
 
 // Everything a pixel needs, decoded once per primitive.
+// Primitives may be drawn later by the band workers: a Pipe holds copies of everything Shade needs (no pointers into
+// registers that the game keeps changing; `c` is only for the diagnostic log at submission).
 struct Pipe {
   const Ctx* c;
-  bool tme, abe, fst, flat, linear, tcc, ate, zte, zmsk, aem, date, datm, fba, is16;
+  bool tme, abe, fst, flat, linear, tcc, ate, zte, zmsk, aem, date, datm, fba, is16, pabe;
   u32 tfx, atst, aref, ztst, zpsm, fpsm, fbmsk, afail;
   int sx0, sx1, sy0, sy1;
   u32 tw, th, wms, wmt, minu, maxu, minv, maxv;
-  const TexCache* tex;
+  u64 alpha;
+  const u32* texPix;                           // decoded texels (kept alive by `texKeep`)
+  std::shared_ptr<const u32[]> texKeep;
   Surf fb, zb;
 };
 
@@ -799,10 +972,16 @@ u32 WrapCoord(i32 v, u32 size, u32 mode, u32 minv, u32 maxv) {
 }
 inline Rgba Texel(const Pipe& p, i32 x, i32 y) {
   const u32 ux = WrapCoord(x, p.tw, p.wms, p.minu, p.maxu), uy = WrapCoord(y, p.th, p.wmt, p.minv, p.maxv);
-  return Unpack32(p.tex->pix[static_cast<std::size_t>(uy & (p.th - 1)) * p.tw + (ux & (p.tw - 1))]);
+  return Unpack32(p.texPix[static_cast<std::size_t>(uy & (p.th - 1)) * p.tw + (ux & (p.tw - 1))]);
 }
 
-Pipe MakePipe(bool flat) {
+bool g_pipeValid = false;  // (cleared by every register write but vertex data: RegWrite)
+Pipe g_pipe = {};
+std::vector<u16> g_pipeTexPages;
+u64 g_pipeTexVer = 0;
+bool g_pipeTexIndexed = false;
+
+Pipe BuildPipe(bool flat) {
   Pipe p = {};
   const Ctx& c = g_ctx[(g_prim >> 9) & 1];
   p.c = &c;
@@ -832,8 +1011,36 @@ Pipe MakePipe(bool flat) {
   p.minv = static_cast<u32>((c.clamp >> 24) & 0x3FF); p.maxv = static_cast<u32>((c.clamp >> 34) & 0x3FF);
   p.fb = MakeSurf(p.fpsm, fbp, fbw);
   p.zb = MakeSurf(p.zpsm, static_cast<u32>(c.zbuf & 0x1FF) * 32, fbw);
-  p.tex = p.tme ? &GetTexture(c) : nullptr;
+  p.alpha = c.alpha;
+  p.pabe = (g_pabe & 1) != 0;
+  if (p.tme) {
+    const TexCache& t = GetTexture(c);
+    p.texKeep = t.pix;
+    p.texPix = p.texKeep.get();
+    g_pipeTexPages = t.pageList; g_pipeTexVer = t.version;
+    g_pipeTexIndexed = IsIndexed(static_cast<u32>((c.tex0 >> 20) & 0x3F));
+  }
   return p;
+}
+
+// The pipe of the previous primitive, while no drawing register changed (strips and lists send only vertices between
+// primitives): rebuilding it with its texture lookup for each of ~15000 primitives per refresh cost several ms. The
+// texture is still checked (its pages or palette may have changed since).
+Pipe MakePipe(bool flat) {
+  FlushTransferPages();  // (the cached texture's check below reads the page versions)
+  if (!g_pipeValid) {
+    g_pipe = BuildPipe(flat);
+    g_pipeValid = true;
+    return g_pipe;
+  }
+  if (g_pipe.tme && PageVersionSum(g_pipeTexPages) + (g_pipeTexIndexed ? g_clutVersion * 7 : 0) != g_pipeTexVer) {
+    const TexCache& t = GetTexture(*g_pipe.c);
+    g_pipe.texKeep = t.pix;
+    g_pipe.texPix = g_pipe.texKeep.get();
+    g_pipeTexPages = t.pageList; g_pipeTexVer = t.version;
+  }
+  g_pipe.flat = flat;
+  return g_pipe;
 }
 
 // One pixel: texture, depth/alpha tests, blending, write. `col` is the interpolated vertex colour, (tu, tv) the texel position.
@@ -898,12 +1105,11 @@ inline bool Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, floa
     }
   }
   const bool is16 = p.is16;
-  if (p.abe && (!(g_pabe & 1) || (col.a & 0x80))) {
+  if (p.abe && (!p.pabe || (col.a & 0x80))) {
     const u32 raw = SurfRead(p.fb, static_cast<u32>(px), static_cast<u32>(py));
     const Rgba dst = is16 ? Unpack16(raw, 128, 0) : Unpack32(raw);
-    const Ctx& c = *p.c;
-    const u32 A = static_cast<u32>(c.alpha & 3), B = static_cast<u32>((c.alpha >> 2) & 3), C = static_cast<u32>((c.alpha >> 4) & 3), D = static_cast<u32>((c.alpha >> 6) & 3);
-    const int fix = static_cast<int>((c.alpha >> 32) & 255);
+    const u32 A = static_cast<u32>(p.alpha & 3), B = static_cast<u32>((p.alpha >> 2) & 3), C = static_cast<u32>((p.alpha >> 4) & 3), D = static_cast<u32>((p.alpha >> 6) & 3);
+    const int fix = static_cast<int>((p.alpha >> 32) & 255);
     auto pick = [&](u32 sel, int cs, int cd) { return sel == 0 ? cs : sel == 1 ? cd : 0; };
     const int ac = C == 0 ? col.a : C == 1 ? dst.a : fix;
     auto channel = [&](int cs, int cd) { return Clamp8(((pick(A, cs, cd) - pick(B, cs, cd)) * ac >> 7) + pick(D, cs, cd)); };
@@ -931,15 +1137,257 @@ void PrimLogLine(const char* kind, const Pipe& p, int minx, int maxx, int miny, 
   g_primLogText += line;
 }
 
+// ---- primitives: set up on the game's thread, rows drawn by the band workers ---------------------------------------
+// A race sends ~8000-13000 small primitives per refresh; drawing them on the game's thread took 13-17 ms of each 16.7 ms
+// refresh. Now the game's thread only sets each primitive up (registers, texture, edge functions) and queues it; band
+// workers draw it, each in its own rows (stripes of kStripe rows, interleaved between the workers), in queue order - every
+// pixel is drawn by one thread in the order the game sent the primitives, as on the console.
+struct Job {
+  bool sprite = false;
+  Pipe p = {};
+  int minx = 0, maxx = 0, miny = 0, maxy = 0;
+  // triangle: vertices (b and d ordered for a positive area), 1 / area, edge functions at (minx, miny) and their steps
+  Vertex a = {}, b = {}, d = {};
+  double inv = 0;
+  i64 r0 = 0, r1 = 0, r2 = 0, dx0 = 0, dx1 = 0, dx2 = 0, dy0 = 0, dy1 = 0, dy2 = 0;
+  // sprite: flat colour and depth, texel coordinates at the corners, upper-left corner and size (1/16 pixel)
+  Rgba col = {};
+  u32 z = 0;
+  float su0 = 0, su1 = 0, sv0 = 0, sv1 = 0, fw = 1, fh = 1;
+  i32 x0 = 0, y0 = 0;
+};
+
+u64 TriangleRow(const Job& j, int py) {
+  const Pipe& p = j.p;
+  const Vertex &a = j.a, &b = j.b, &d = j.d;
+  const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
+  const i64 k = py - j.miny;
+  i64 w[3] = {j.r0 + j.dy0 * k, j.r1 + j.dy1 * k, j.r2 + j.dy2 * k};
+  const i64 dx[3] = {j.dx0, j.dx1, j.dx2};
+  // The row's span inside the triangle, from the three edge functions (each linear in x): the bounding box is about twice
+  // the triangle, and every pixel outside it used to be visited and tested.
+  int lo = j.minx, hi = j.maxx;
+  for (int e = 0; e < 3; ++e) {
+    if (dx[e] > 0) {
+      if (w[e] < 0) lo = static_cast<int>(std::max<i64>(lo, j.minx + (-w[e] + dx[e] - 1) / dx[e]));
+    } else if (w[e] < 0) {
+      return 0;  // (decreasing or constant and already outside: nothing on this row)
+    } else if (dx[e] < 0) {
+      hi = static_cast<int>(std::min<i64>(hi, j.minx + w[e] / -dx[e]));
+    }
+  }
+  if (lo > hi) return 0;
+  // Attributes at the span's first pixel and their step per pixel (barycentric weights l0 = w0 / area, l1 = w1 / area:
+  // value = d + (a - d) l0 + (b - d) l1), stepped by additions instead of evaluating ten of them at every pixel.
+  const double l0 = static_cast<double>(w[0] + dx[0] * (lo - j.minx)) * j.inv, l1 = static_cast<double>(w[1] + dx[1] * (lo - j.minx)) * j.inv;
+  const double s0 = static_cast<double>(dx[0]) * j.inv, s1 = static_cast<double>(dx[1]) * j.inv;
+  auto at = [&](float va, float vb, float vd) { return static_cast<float>(vd + (va - vd) * l0 + (vb - vd) * l1); };
+  auto step = [&](float va, float vb, float vd) { return static_cast<float>((va - vd) * s0 + (vb - vd) * s1); };
+  double z = static_cast<double>(d.z) + (static_cast<double>(a.z) - d.z) * l0 + (static_cast<double>(b.z) - d.z) * l1;
+  const double zs = (static_cast<double>(a.z) - d.z) * s0 + (static_cast<double>(b.z) - d.z) * s1;
+  float r = at(a.r, b.r, d.r), g = at(a.g, b.g, d.g), bl = at(a.b, b.b, d.b), al = at(a.a, b.a, d.a);
+  const float rs = step(a.r, b.r, d.r), gs = step(a.g, b.g, d.g), bs = step(a.b, b.b, d.b), as = step(a.a, b.a, d.a);
+  float tx = 0, ty = 0, tq = 0, txs = 0, tys = 0, tqs = 0;  // u, v (fixed) or s, t, q (perspective)
+  if (p.tme) {
+    if (p.fst) { tx = at(a.u, b.u, d.u); ty = at(a.v, b.v, d.v); txs = step(a.u, b.u, d.u); tys = step(a.v, b.v, d.v); }
+    else {
+      tx = at(a.s, b.s, d.s); ty = at(a.t, b.t, d.t); tq = at(a.q, b.q, d.q);
+      txs = step(a.s, b.s, d.s); tys = step(a.t, b.t, d.t); tqs = step(a.q, b.q, d.q);
+    }
+  }
+  const Rgba flatCol = {static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)};
+  u64 written = 0;
+  for (int px = lo; px <= hi; ++px, z += zs, r += rs, g += gs, bl += bs, al += as, tx += txs, ty += tys, tq += tqs) {
+    const u32 zi = static_cast<u32>(std::clamp(z, 0.0, 4294967295.0));
+    const Rgba col = p.flat ? flatCol : Rgba{static_cast<int>(r), static_cast<int>(g), static_cast<int>(bl), static_cast<int>(al)};
+    float tu = 0, tv = 0;
+    if (p.tme) {
+      if (p.fst) {
+        tu = tx * (1.0f / 16.0f);
+        tv = ty * (1.0f / 16.0f);
+      } else if (tq != 0.0f) {
+        const float rq = 1.0f / tq;
+        tu = tx * rq * tw;
+        tv = ty * rq * th;
+      }
+    }
+    written += Shade(p, px, py, zi, col, tu, tv) ? 1 : 0;
+  }
+  return written;
+}
+
+u64 SpriteRow(const Job& j, int py) {
+  const float fy = (static_cast<float>(py * 16 + 8 - j.y0)) / j.fh;
+  const float tv = j.sv0 + (j.sv1 - j.sv0) * fy;
+  u64 written = 0;
+  for (int px = j.minx; px <= j.maxx; ++px) {
+    const float fx = (static_cast<float>(px * 16 + 8 - j.x0)) / j.fw;
+    written += Shade(j.p, px, py, j.z, j.col, j.su0 + (j.su1 - j.su0) * fx, tv) ? 1 : 0;
+  }
+  return written;
+}
+
+u64 DrawRows(const Job& j, int y0, int y1) {
+  u64 written = 0;
+  for (int py = y0; py <= y1; ++py) written += j.sprite ? SpriteRow(j, py) : TriangleRow(j, py);
+  return written;
+}
+void CountPixels(const Job& j, u64 written) {
+  if (!written) return;
+  g_pixelCount.fetch_add(written, std::memory_order_relaxed);
+  g_targetPixels[(j.p.fb.base >> 13) & 511].fetch_add(written, std::memory_order_relaxed);
+  if (j.p.tme) g_texturedCount.fetch_add(written, std::memory_order_relaxed);
+}
+
+class BandPool {
+ public:
+  BandPool() {
+    const unsigned n = std::thread::hardware_concurrency();
+    const char* env = std::getenv("HP2_GS_THREADS");  // 0 = draw on the game's thread
+    // default: about one per physical core besides the game's thread (two threads per core assumed from 12 up); more workers
+    // spinning on the game thread's sibling hardware thread slowed the game down
+    unsigned want = env ? static_cast<unsigned>(std::atoi(env)) : (n >= 12 ? n / 2 - 1 : n > 3 ? n - 2 : 0);
+    want = std::min(want, 16u);
+    if (want < 2) want = 0;  // a single worker gains nothing over drawing in place
+    m_count = want;
+    if (!want) return;
+    m_jobs.resize(kCapacity);
+    m_done = std::make_unique<Done[]>(want);
+    for (unsigned i = 0; i < want; ++i) m_workers.emplace_back([this, i] { Worker(i); });
+  }
+  ~BandPool() {
+    m_quit.store(true);
+    m_signal.fetch_add(1);
+    m_signal.notify_all();
+    for (auto& t : m_workers) t.join();
+  }
+  bool Active() const { return m_count != 0; }
+  Job& Next() {  // the slot for the next primitive, filled in place (a primitive is ~500 bytes)
+    if (m_seq >= m_freeUntil) {  // the slot still holds a primitive some worker has not drawn
+      WaitDone(m_seq - kCapacity + 1);
+      m_freeUntil = MinDone() + kCapacity;
+    }
+    return m_jobs[m_seq % kCapacity];
+  }
+  void Publish() {  // the slot from Next() is ready to draw
+    ++m_seq;
+    m_published.store(m_seq);
+    if (m_sleepers.load() > 0) {
+      m_signal.fetch_add(1);
+      m_signal.notify_all();
+    }
+  }
+  void Barrier() { WaitDone(m_seq); }
+
+ private:
+  static constexpr u64 kCapacity = 16384;
+  static constexpr int kStripe = 8;
+  static constexpr u64 kSpinCycles = 1'000'000;  // time-stamp cycles (~0.3 ms at 3-5 GHz)
+#pragma warning(push)
+#pragma warning(disable : 4324)  // padded to a cache line on purpose: each worker writes its own
+  struct alignas(64) Done { std::atomic<u64> v{0}; };
+#pragma warning(pop)
+
+  u64 MinDone() const {
+    u64 m = ~0ull;
+    for (unsigned i = 0; i < m_count; ++i) m = std::min(m, m_done[i].v.load(std::memory_order_acquire));
+    return m;
+  }
+  void WaitDone(u64 target) {
+    for (unsigned i = 0; i < m_count; ++i)
+      for (int spins = 0; m_done[i].v.load(std::memory_order_acquire) < target; ++spins) {
+        if (spins < 4000) _mm_pause();
+        else std::this_thread::yield();
+      }
+  }
+  void Worker(unsigned w) {
+    u64 next = 0;
+    const int n = static_cast<int>(m_count);
+    for (;;) {
+      u64 pub = m_published.load(std::memory_order_acquire);
+      // nothing queued: spin ~0.3 ms (while a frame is being set up the next primitive comes within microseconds, and
+      // waking a sleeping worker costs the game's thread a system call), then sleep until the next primitive
+      for (u64 since = __rdtsc(); pub == next; pub = m_published.load(std::memory_order_acquire)) {
+        if (m_quit.load(std::memory_order_relaxed)) return;
+        if (__rdtsc() - since < kSpinCycles) { _mm_pause(); continue; }
+        const u32 sig = m_signal.load();
+        m_sleepers.fetch_add(1);
+        if (m_published.load() == next && !m_quit.load()) m_signal.wait(sig);
+        m_sleepers.fetch_sub(1);
+        since = __rdtsc();
+      }
+      for (; next < pub; ++next) {
+        const Job& j = m_jobs[next % kCapacity];
+        const int first = j.miny / kStripe;
+        u64 written = 0;
+        for (int s = first + (static_cast<int>(w) - first % n + n) % n; s * kStripe <= j.maxy; s += n)
+          written += DrawRows(j, std::max(j.miny, s * kStripe), std::min(j.maxy, s * kStripe + kStripe - 1));
+        CountPixels(j, written);
+        m_done[w].v.store(next + 1, std::memory_order_release);
+      }
+    }
+  }
+
+  unsigned m_count = 0;
+  std::vector<Job> m_jobs;
+  std::unique_ptr<Done[]> m_done;
+  std::vector<std::thread> m_workers;
+  u64 m_seq = 0, m_freeUntil = kCapacity;  // game's thread only
+  std::atomic<u64> m_published{0};
+  std::atomic<u32> m_signal{0};
+  std::atomic<int> m_sleepers{0};
+  std::atomic<bool> m_quit{false};
+};
+BandPool& Bands() {
+  static BandPool pool;
+  return pool;
+}
+void DrawBarrier() {
+  if (Bands().Active()) {
+    Ticks timer(g_stats.waitTicks);
+    Bands().Barrier();
+  }
+  if (g_anyPending) {
+    memset(g_pendingPage, 0, sizeof g_pendingPage);
+    g_anyPending = false;
+  }
+}
+
+// Where a primitive is set up: its queue slot, or (no workers, or the primitive log wants pixel counts) a local one.
+bool Queued() { return Bands().Active() && !g_primLog; }
+Job& NewJob() {
+  static Job serial;
+  return Queued() ? Bands().Next() : serial;
+}
+// Queues a set-up primitive (or draws it at once).
+void Submit(Job& j, const char* kind) {
+  BumpRect(j.p.fb, j.minx, j.maxx, j.miny, j.maxy);
+  if (!j.p.zmsk && j.p.zte) BumpRect(j.p.zb, j.minx, j.maxx, j.miny, j.maxy);
+  if (!Queued()) {
+    DrawBarrier();  // (in order with what is queued)
+    const u64 before = g_pixelCount.load();
+    if (static_cast<i64>(j.maxx - j.minx + 1) * (j.maxy - j.miny + 1) >= kParallelArea) Pool().Run(j.miny, j.maxy, [&](int y) { CountPixels(j, DrawRows(j, y, y)); });
+    else CountPixels(j, DrawRows(j, j.miny, j.maxy));
+    PrimLogLine(kind, j.p, j.minx, j.maxx, j.miny, j.maxy, g_pixelCount.load() - before);
+    return;
+  }
+  MarkPending(j.p.fb, j.minx, j.maxx, j.miny, j.maxy);
+  if (j.p.zte) MarkPending(j.p.zb, j.minx, j.maxx, j.miny, j.maxy);
+  Bands().Publish();
+}
+
 void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool flat) {
   static const bool skip = getenv("HP2_NOGS") != nullptr;  // development: measure the rest of the runtime without rasterising
   if (skip) return;
-  const Pipe p = MakePipe(flat);
+  Job& j = NewJob();
+  j.sprite = false;
+  j.p = MakePipe(flat);
+  const Pipe& p = j.p;
   Vertex a = v0, b = v1_, d = v2_;
   const i64 area = static_cast<i64>(b.x - a.x) * (d.y - a.y) - static_cast<i64>(b.y - a.y) * (d.x - a.x);
   if (area == 0) return;
   if (area < 0) std::swap(b, d);
-  const double inv = 1.0 / static_cast<double>(area < 0 ? -area : area);
+  j.inv = 1.0 / static_cast<double>(area < 0 ? -area : area);
   const int minx = std::max((std::min({a.x, b.x, d.x}) >> 4), p.sx0), maxx = std::min((std::max({a.x, b.x, d.x}) + 15) >> 4, p.sx1);
   const int miny = std::max((std::min({a.y, b.y, d.y}) >> 4), p.sy0), maxy = std::min((std::max({a.y, b.y, d.y}) + 15) >> 4, p.sy1);
   if (minx > maxx || miny > maxy) {  // outside the scissor: logged with its unclipped bounds (pixels, offset removed)
@@ -954,52 +1402,16 @@ void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool f
   };
   const i64 bias2 = bias(a, b), bias0 = bias(b, d), bias1 = bias(d, a);
   // edge functions: w2 (weight of d) on a->b, w0 (weight of a) on b->d, w1 (weight of b) on d->a; each steps linearly in x and y
-  const i64 dx2 = -(static_cast<i64>(b.y - a.y)) * 16, dy2 = static_cast<i64>(b.x - a.x) * 16;
-  const i64 dx0 = -(static_cast<i64>(d.y - b.y)) * 16, dy0 = static_cast<i64>(d.x - b.x) * 16;
-  const i64 dx1 = -(static_cast<i64>(a.y - d.y)) * 16, dy1 = static_cast<i64>(a.x - d.x) * 16;
+  j.dx2 = -(static_cast<i64>(b.y - a.y)) * 16; j.dy2 = static_cast<i64>(b.x - a.x) * 16;
+  j.dx0 = -(static_cast<i64>(d.y - b.y)) * 16; j.dy0 = static_cast<i64>(d.x - b.x) * 16;
+  j.dx1 = -(static_cast<i64>(a.y - d.y)) * 16; j.dy1 = static_cast<i64>(a.x - d.x) * 16;
   const i64 X0 = minx * 16 + 8, Y0 = miny * 16 + 8;
-  i64 r2 = static_cast<i64>(b.x - a.x) * (Y0 - a.y) - static_cast<i64>(b.y - a.y) * (X0 - a.x) + bias2;
-  i64 r0 = static_cast<i64>(d.x - b.x) * (Y0 - b.y) - static_cast<i64>(d.y - b.y) * (X0 - b.x) + bias0;
-  i64 r1 = static_cast<i64>(a.x - d.x) * (Y0 - d.y) - static_cast<i64>(a.y - d.y) * (X0 - d.x) + bias1;
-  const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
-  auto row = [&](int py) {
-    const i64 k = py - miny;
-    i64 w0 = r0 + dy0 * k, w1 = r1 + dy1 * k, w2 = r2 + dy2 * k;
-    u64 written = 0;
-    for (int px = minx; px <= maxx; ++px, w0 += dx0, w1 += dx1, w2 += dx2) {
-      if ((w0 | w1 | w2) < 0) continue;
-      const float l0 = static_cast<float>(static_cast<double>(w0) * inv), l1 = static_cast<float>(static_cast<double>(w1) * inv), l2 = 1.0f - l0 - l1;
-      const u32 z = static_cast<u32>(std::clamp(static_cast<double>(l0) * a.z + static_cast<double>(l1) * b.z + static_cast<double>(l2) * d.z, 0.0, 4294967295.0));
-      Rgba col;
-      if (p.flat) col = {static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)};
-      else col = {static_cast<int>(l0 * a.r + l1 * b.r + l2 * d.r), static_cast<int>(l0 * a.g + l1 * b.g + l2 * d.g),
-                  static_cast<int>(l0 * a.b + l1 * b.b + l2 * d.b), static_cast<int>(l0 * a.a + l1 * b.a + l2 * d.a)};
-      float tu = 0, tv = 0;
-      if (p.tme) {
-        if (p.fst) {
-          tu = (l0 * a.u + l1 * b.u + l2 * d.u) * (1.0f / 16.0f);
-          tv = (l0 * a.v + l1 * b.v + l2 * d.v) * (1.0f / 16.0f);
-        } else {
-          const float q = l0 * a.q + l1 * b.q + l2 * d.q;
-          if (q != 0.0f) {
-            const float rq = 1.0f / q;
-            tu = (l0 * a.s + l1 * b.s + l2 * d.s) * rq * tw;
-            tv = (l0 * a.t + l1 * b.t + l2 * d.t) * rq * th;
-          }
-        }
-      }
-      written += Shade(p, px, py, z, col, tu, tv) ? 1 : 0;
-    }
-    if (written) g_pixelCount.fetch_add(written, std::memory_order_relaxed);
-    if (written) g_targetPixels[(p.fb.base >> 13) & 511].fetch_add(written, std::memory_order_relaxed);
-    if (written && p.tme) g_texturedCount.fetch_add(written, std::memory_order_relaxed);
-  };
-  const u64 before = g_pixelCount.load();
-  if (static_cast<i64>(maxx - minx + 1) * (maxy - miny + 1) >= kParallelArea) Pool().Run(miny, maxy, row);
-  else for (int py = miny; py <= maxy; ++py) row(py);
-  PrimLogLine("tri", p, minx, maxx, miny, maxy, g_pixelCount.load() - before);
-  BumpRect(p.fb, minx, maxx, miny, maxy);
-  if (!p.zmsk && p.zte) BumpRect(p.zb, minx, maxx, miny, maxy);
+  j.r2 = static_cast<i64>(b.x - a.x) * (Y0 - a.y) - static_cast<i64>(b.y - a.y) * (X0 - a.x) + bias2;
+  j.r0 = static_cast<i64>(d.x - b.x) * (Y0 - b.y) - static_cast<i64>(d.y - b.y) * (X0 - b.x) + bias0;
+  j.r1 = static_cast<i64>(a.x - d.x) * (Y0 - d.y) - static_cast<i64>(a.y - d.y) * (X0 - d.x) + bias1;
+  j.a = a; j.b = b; j.d = d;
+  j.minx = minx; j.maxx = maxx; j.miny = miny; j.maxy = maxy;
+  Submit(j, "tri");
 }
 
 // An axis-aligned sprite: corners (a = upper left, b = lower right) with the texture coordinates of each, flat colour.
@@ -1017,39 +1429,26 @@ void DrawSprite(const Vertex& a, const Vertex& b) {
       return;
     }
   }
-  const Pipe p = MakePipe(true);
+  Job& j = NewJob();
+  j.sprite = true;
+  j.p = MakePipe(true);
+  const Pipe& p = j.p;
   const i32 x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
   if (x1 == x0 || y1 == y0) return;
-  const int minx = std::max((x0 + 15) >> 4, p.sx0), maxx = std::min(((x1 + 15) >> 4) - 1, p.sx1);  // pixel centres inside [x0, x1)
-  const int miny = std::max((y0 + 15) >> 4, p.sy0), maxy = std::min(((y1 + 15) >> 4) - 1, p.sy1);
-  const Rgba col = {static_cast<int>(b.r), static_cast<int>(b.g), static_cast<int>(b.b), static_cast<int>(b.a)};
+  j.minx = std::max((x0 + 15) >> 4, p.sx0); j.maxx = std::min(((x1 + 15) >> 4) - 1, p.sx1);  // pixel centres inside [x0, x1)
+  j.miny = std::max((y0 + 15) >> 4, p.sy0); j.maxy = std::min(((y1 + 15) >> 4) - 1, p.sy1);
+  if (j.minx > j.maxx || j.miny > j.maxy) return;
+  j.col = {static_cast<int>(b.r), static_cast<int>(b.g), static_cast<int>(b.b), static_cast<int>(b.a)};
+  j.z = b.z;
   const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
-  float su0, su1, sv0, sv1;  // texel coordinates at the corners
-  if (p.fst) { su0 = a.u / 16.0f; su1 = b.u / 16.0f; sv0 = a.v / 16.0f; sv1 = b.v / 16.0f; }
+  if (p.fst) { j.su0 = a.u / 16.0f; j.su1 = b.u / 16.0f; j.sv0 = a.v / 16.0f; j.sv1 = b.v / 16.0f; }
   else {
-    su0 = a.q != 0 ? a.s / a.q * tw : 0; su1 = b.q != 0 ? b.s / b.q * tw : 0;
-    sv0 = a.q != 0 ? a.t / a.q * th : 0; sv1 = b.q != 0 ? b.t / b.q * th : 0;
+    j.su0 = a.q != 0 ? a.s / a.q * tw : 0; j.su1 = b.q != 0 ? b.s / b.q * tw : 0;
+    j.sv0 = a.q != 0 ? a.t / a.q * th : 0; j.sv1 = b.q != 0 ? b.t / b.q * th : 0;
   }
-  const float fw = static_cast<float>(x1 - x0), fh = static_cast<float>(y1 - y0);
-  if (minx > maxx || miny > maxy) return;
-  auto row = [&](int py) {
-    const float fy = (static_cast<float>(py * 16 + 8 - y0)) / fh;
-    const float tv = sv0 + (sv1 - sv0) * fy;
-    u64 written = 0;
-    for (int px = minx; px <= maxx; ++px) {
-      const float fx = (static_cast<float>(px * 16 + 8 - x0)) / fw;
-      written += Shade(p, px, py, b.z, col, su0 + (su1 - su0) * fx, tv) ? 1 : 0;
-    }
-    if (written) g_pixelCount.fetch_add(written, std::memory_order_relaxed);
-    if (written) g_targetPixels[(p.fb.base >> 13) & 511].fetch_add(written, std::memory_order_relaxed);
-    if (written && p.tme) g_texturedCount.fetch_add(written, std::memory_order_relaxed);
-  };
-  const u64 before = g_pixelCount.load();
-  if (static_cast<i64>(maxx - minx + 1) * (maxy - miny + 1) >= kParallelArea) Pool().Run(miny, maxy, row);
-  else for (int py = miny; py <= maxy; ++py) row(py);
-  PrimLogLine("sprite", p, minx, maxx, miny, maxy, g_pixelCount.load() - before);
-  BumpRect(p.fb, minx, maxx, miny, maxy);
-  if (!p.zmsk && p.zte) BumpRect(p.zb, minx, maxx, miny, maxy);
+  j.fw = static_cast<float>(x1 - x0); j.fh = static_cast<float>(y1 - y0);
+  j.x0 = x0; j.y0 = y0;
+  Submit(j, "sprite");
 }
 
 Vertex MakeVertex(u64 xyz, bool hasF) {
@@ -1117,7 +1516,17 @@ void Kick(bool hasF, u64 xyz, bool draw) {
 }
 
 // ---- image transfer ------------------------------------------------------------------------------
+Surf g_xferSurf = {};
+
+void BumpTransferPages() {  // page versions of the transfer rectangle (texture cache), once per chunk of image data
+  if (!g_xfer.written) return;
+  g_xfer.written = false;
+  BumpRect(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
+           static_cast<int>(g_xfer.y0 + g_xfer.h) - 1);
+}
+
 void BeginTransfer() {
+  BumpTransferPages();  // (an unfinished previous transfer)
   g_xfer.active = true;
   g_xfer.bp = static_cast<u32>((g_bitbltbuf >> 32) & 0x3FFF);
   g_xfer.bw = static_cast<u32>((g_bitbltbuf >> 48) & 63);
@@ -1127,39 +1536,80 @@ void BeginTransfer() {
   g_xfer.w = static_cast<u32>(g_trxreg & 0xFFF);
   g_xfer.h = static_cast<u32>((g_trxreg >> 32) & 0xFFF);
   g_xfer.pos = 0;
-  g_xfer.pending = 0;
-  g_xfer.pendingBits = 0;
+  g_xfer.x = g_xfer.x0;
+  g_xfer.y = g_xfer.y0;
+  g_xfer.written = false;
+  const u32 psm = g_xfer.psm;
+  const bool high = psm == T8H || psm == T4HL || psm == T4HH;
+  g_xfer.shift = psm == T8H || psm == T4HL ? 24 : psm == T4HH ? 28 : 0;
+  g_xfer.mask = psm == T8H ? 0xFF000000u : psm == T4HL ? 0x0F000000u : psm == T4HH ? 0xF0000000u : psm == CT24 || psm == Z24 ? 0x00FFFFFFu : ~0u;
+  g_xferSurf = MakeSurf(high ? CT32 : psm, g_xfer.bp, g_xfer.bw);
+  if (g_xfer.w == 0 || g_xfer.h == 0) g_xfer.active = false;
+  else SyncRect(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
+                static_cast<int>(g_xfer.y0 + g_xfer.h) - 1);  // pages still being drawn by queued primitives
   ++g_stats.transfers;
 }
 
-void PutPixelStream(u32 value) {  // one pixel (already extracted) of the running transfer
-  if (g_xfer.w == 0) return;
-  const u32 x = g_xfer.x0 + g_xfer.pos % g_xfer.w, y = g_xfer.y0 + g_xfer.pos / g_xfer.w;
-  ++g_xfer.pos;
-  if (g_xfer.pos / g_xfer.w >= g_xfer.h && g_xfer.pos % g_xfer.w == 0) g_xfer.active = false;
-  const u32 psm = g_xfer.psm;
-  if (psm == T8H) { WritePixel(CT32, g_xfer.bp, g_xfer.bw, x, y, value << 24, 0xFF000000u); return; }
-  if (psm == T4HL) { WritePixel(CT32, g_xfer.bp, g_xfer.bw, x, y, value << 24, 0x0F000000u); return; }
-  if (psm == T4HH) { WritePixel(CT32, g_xfer.bp, g_xfer.bw, x, y, value << 28, 0xF0000000u); return; }
-  WritePixel(psm, g_xfer.bp, g_xfer.bw, x, y, value);
+inline void PutPixelStream(u32 value) {  // one pixel (already extracted) of the running transfer
+  const Surf& s = g_xferSurf;
+  const u32 x = g_xfer.x, y = g_xfer.y;
+  if (++g_xfer.x == g_xfer.x0 + g_xfer.w) {
+    g_xfer.x = g_xfer.x0;
+    if (++g_xfer.y == g_xfer.y0 + g_xfer.h) g_xfer.active = false;
+  }
+  // `written` only when a value changes: games upload the same textures every frame, and unchanged pages keep their
+  // version (their decoded copies stay valid)
+  const u32 page = SurfPage(s, x, y), off = SurfOffset(s, x, y);
+  switch (s.kind) {
+    case Kind::C32: case Kind::Z32: {
+      u8* p = &g_mem[(page + off) & (kRamSize - 4)];
+      u32 old;
+      memcpy(&old, p, 4);
+      const u32 now = (old & ~g_xfer.mask) | ((value << g_xfer.shift) & g_xfer.mask);
+      if (now != old) { memcpy(p, &now, 4); g_xfer.written = true; }
+      break;
+    }
+    case Kind::C16: case Kind::C16S: case Kind::Z16: case Kind::Z16S: {
+      u8* p = &g_mem[(page + off) & (kRamSize - 2)];
+      u16 old;
+      memcpy(&old, p, 2);
+      const u16 v = static_cast<u16>(value);
+      if (v != old) { memcpy(p, &v, 2); g_xfer.written = true; }
+      break;
+    }
+    case Kind::I8: {
+      u8& b = g_mem[(page + off) & (kRamSize - 1)];
+      if (b != static_cast<u8>(value)) { b = static_cast<u8>(value); g_xfer.written = true; }
+      break;
+    }
+    case Kind::I4: {  // table offsets in nibbles
+      const u32 a = (page * 2 + off) & (kRamSize * 2 - 1);
+      u8& b = g_mem[a >> 1];
+      const u8 now = (a & 1) ? static_cast<u8>((b & 0x0F) | ((value & 15) << 4)) : static_cast<u8>((b & 0xF0) | (value & 15));
+      if (now != b) { b = now; g_xfer.written = true; }
+      break;
+    }
+  }
 }
 
 }  // namespace
 
-void Reset() {
+void DoReset() {
+  DrawBarrier();
+  g_pipeValid = false;
   g_mem.assign(kRamSize, 0);
   g_frame.clear();
 }
 
-void StQ(std::uint32_t s, std::uint32_t t, std::uint32_t q) {
+void DoStQ(std::uint32_t s, std::uint32_t t, std::uint32_t q) {
   g_st = s | (static_cast<u64>(t) << 32);
   memcpy(&g_q, &q, 4);
 }
 
-void ImageData(const std::uint8_t* data, std::size_t bytes) {
+void DoImageData(const std::uint8_t* data, std::size_t bytes) {
   if (!g_xfer.active) return;
   Ticks timer(g_stats.transferTicks);
-  if (g_mem.empty()) Reset();
+  if (g_mem.empty()) DoReset();
   const u32 bits = BitsOf(g_xfer.psm == T8H ? T8 : g_xfer.psm == T4HL || g_xfer.psm == T4HH ? T4 : g_xfer.psm);
   g_stats.transferBytes += bytes;
   if (bits == 32) {
@@ -1174,10 +1624,14 @@ void ImageData(const std::uint8_t* data, std::size_t bytes) {
   } else {
     for (std::size_t i = 0; i < bytes && g_xfer.active; ++i) { PutPixelStream(data[i] & 15); if (g_xfer.active) PutPixelStream(data[i] >> 4); }
   }
+  if (!g_xfer.active) BumpTransferPages();  // complete (else FlushTransferPages does it when texels are next read)
 }
 
-void RegWrite(std::uint32_t reg, std::uint64_t v) {
-  if (g_mem.empty()) Reset();
+void DoRegWrite(std::uint32_t reg, std::uint64_t v) {
+  if (g_mem.empty()) DoReset();
+  // drawing state changes: the next primitive builds its pipe again (vertex data, FOG, image transfers and the event
+  // registers leave it; transfers change textures through the page versions, which MakePipe checks)
+  if (!(reg >= 0x01 && reg <= 0x05) && reg != 0x0A && reg != 0x0C && reg != 0x0D && !(reg >= 0x50 && reg <= 0x54) && reg < 0x60) g_pipeValid = false;
   switch (reg) {
     case 0x00: g_prim = v & 0x7FF; g_queued = 0; break;
     case 0x01: g_rgbaq = v; break;
@@ -1232,27 +1686,16 @@ void RegWrite(std::uint32_t reg, std::uint64_t v) {
         const u32 dx = static_cast<u32>((g_trxpos >> 32) & 0x7FF), dy = static_cast<u32>((g_trxpos >> 48) & 0x7FF);
         const u32 w = static_cast<u32>(g_trxreg & 0xFFF), h = static_cast<u32>((g_trxreg >> 32) & 0xFFF);
         ++g_stats.transfers;
+        DrawBarrier();  // reads and writes local memory that queued primitives may still draw to
         for (u32 y = 0; y < h; ++y)
           for (u32 x = 0; x < w; ++x) WritePixel(dpsm, dbp, dbw, dx + x, dy + y, ReadPixel(spsm, sbp, sbw, sx + x, sy + y));
       }
       break;
-    case 0x60: {  // SIGNAL: SIGID = (SIGID & ~mask) | (id & mask); raises CSR.SIGNAL
-      const u32 id = static_cast<u32>(v), mask = static_cast<u32>(v >> 32);
-      g_siglblid = (g_siglblid & ~static_cast<u64>(0xFFFFFFFFu)) | ((static_cast<u32>(g_siglblid) & ~mask) | (id & mask));
-      g_csr |= 1;
-      if (!(g_imr & 0x100) && g_irqCallback) g_irqCallback();
-      break;
-    }
-    case 0x61:  // FINISH: raises CSR.FINISH once everything before it is drawn (drawing here is immediate)
-      g_csr |= 2;
-      CsrTrace('F', g_imr);
-      if (!(g_imr & 0x200) && g_irqCallback) g_irqCallback();
-      break;
-    case 0x62: g_siglblid = (g_siglblid & 0xFFFFFFFFull) | (v << 32); break;  // LABEL: LBLID
+    // (0x60-0x62 SIGNAL, FINISH, LABEL: EventRegWrite, on the game's thread)
     case 0x54: {  // HWREG: 64 bits of image data
       u8 b[8];
       memcpy(b, &v, 8);
-      ImageData(b, 8);
+      DoImageData(b, 8);
       break;
     }
     default: break;
@@ -1269,17 +1712,20 @@ void Merge(u64& reg, std::uint32_t address, u64 value, std::uint32_t size) {
 
 // (0x1FF8: the event registers sit at 0x12001000-0x12001080; with 0xFF8 they aliased PMODE/DISPLAY1 and CSR read as 0,
 // so a game polling CSR.FINISH, as the race start does, waited forever.)
-void PrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size) {
+void DoPrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size) {
   switch (address & 0x1FF8) {
     case 0x000: Merge(g_pmode, address, value, size); break;
     case 0x020: Merge(g_smode2, address, value, size); break;
-    case 0x070: Merge(g_dispfb[0], address, value, size); break;
+    case 0x070: {  // a new value = the game shows a new frame (flips counted for the perf line)
+      const u64 before = g_dispfb[0];
+      Merge(g_dispfb[0], address, value, size);
+      if (g_dispfb[0] != before) ++g_stats.flips;
+      break;
+    }
     case 0x080: Merge(g_display[0], address, value, size); break;
     case 0x090: Merge(g_dispfb[1], address, value, size); break;
     case 0x0A0: Merge(g_display[1], address, value, size); break;
-    case 0x1000: if (!(address & 4)) g_csr &= ~(value & 0x1F); CsrTrace('W', value); break;  // CSR: write 1 to clear the event bits (bit 8 RESET ignored)
-    case 0x1010: Merge(g_imr, address, value, size); CsrTrace('M', g_imr); break;
-    case 0x1080: Merge(g_siglblid, address, value, size); break;
+    // (CSR, IMR, SIGLBLID: EventPrivWrite, on the game's thread)
     default: break;
   }
 }
@@ -1296,8 +1742,13 @@ void CsrTrace(char kind, u64 value) {
   ++g_csrPos;
 }
 }  // namespace
-void SetPrimLog(bool on) { g_primLog = on; }
+void SetPrimLog(bool on) {
+  FlushGs();
+  g_primLog = on;
+}
 bool DumpPage(u32 page, u32 fbw, u32 w, u32 h, u32 psm, const char* path) {  // diagnostic: a GS-memory buffer as a BMP
+  FlushGs();
+  DrawBarrier();
   std::vector<u32> img(static_cast<std::size_t>(w) * h);
   for (u32 y = 0; y < h; ++y)
     for (u32 x = 0; x < w; ++x) {
@@ -1317,7 +1768,10 @@ bool DumpPage(u32 page, u32 fbw, u32 w, u32 h, u32 psm, const char* path) {  // 
   fclose(f);
   return true;
 }
-std::string PrimLogText() { return g_primLogText; }
+std::string PrimLogText() {
+  FlushGs();
+  return g_primLogText;
+}
 std::string TargetsText() {  // diagnostic: the busiest frame buffers since the last call, and what the display shows
   std::vector<std::pair<u64, u32>> list;
   for (u32 i = 0; i < 512; ++i)
@@ -1357,8 +1811,9 @@ std::uint64_t PrivRead(std::uint32_t address, std::uint32_t field) {
 void VBlankStart() { g_csr |= 8; }
 void SetInterruptCallback(void (*callback)()) { g_irqCallback = callback; }
 
-void Present() {
+void DoPresent() {
   if (g_mem.empty()) return;
+  DrawBarrier();  // the display buffer complete (counted as waiting, not as read-out)
   Ticks timer(g_stats.presentTicks);
   if (!g_windowThread.joinable()) g_windowThread = std::thread(WindowThread);
   // circuit 2 over circuit 1 when both are enabled (the game normally enables one); pick the first enabled
@@ -1372,11 +1827,13 @@ void Present() {
   const u32 magh = static_cast<u32>((dp >> 23) & 15), magv = static_cast<u32>((dp >> 27) & 3);
   const u32 dw = static_cast<u32>((dp >> 32) & 0xFFF) + 1, dh = static_cast<u32>((dp >> 44) & 0x7FF) + 1;
   const u32 w = std::clamp<u32>(dw / (magh + 1), 1, 1024), h = std::clamp<u32>(dh / (magv + 1), 1, 1024);
-  std::vector<u32> img(static_cast<std::size_t>(w) * h);
+  static std::vector<u32> img;  // (after the swap below it holds the previous picture: same size, no new allocation)
+  img.resize(static_cast<std::size_t>(w) * h);
+  const Surf src = MakeSurf(psm, fbp, fbw);
   Pool().Run(0, static_cast<int>(h) - 1, [&](int yi) {  // display read-out, rows split between threads
     const u32 y = static_cast<u32>(yi);
     for (u32 x = 0; x < w; ++x) {
-      const u32 raw = ReadPixel(psm, fbp, fbw, dbx + x, dby + y);
+      const u32 raw = SurfReadRaw(src, dbx + x, dby + y);
       Rgba px = (psm == CT16 || psm == CT16S) ? Unpack16(raw, 128, 0) : Unpack32(raw);
       img[y * w + x] = static_cast<u32>(px.b) | (static_cast<u32>(px.g) << 8) | (static_cast<u32>(px.r) << 16);
     }
@@ -1394,6 +1851,7 @@ void Present() {
 }
 
 bool DumpFrame(const char* path) {
+  FlushGs();  // the last queued picture read out
   std::lock_guard<std::mutex> lock(g_frameMutex);
   if (g_frame.empty()) return false;
   FILE* f = nullptr;
@@ -1411,6 +1869,7 @@ bool DumpFrame(const char* path) {
 }
 bool WindowClosed() { return g_closed; }
 void Shutdown() {  // closes the window and waits for its thread (a running std::thread at exit would abort the process)
+  StopGs();
   if (!g_windowThread.joinable()) return;
   if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
   g_windowThread.join();
@@ -1435,11 +1894,195 @@ void OverlayPad(std::uint16_t pressed) {  // emulation thread: newly pressed but
 const Stats& GetStats() {  // the per-pixel and texel counters are atomics (several threads draw)
   static Stats s;
   s = g_stats;
+  {  // time counters: time-stamp cycles to QPC ticks, over the time since start-up
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const u64 cycles = __rdtsc() - g_tscBase.tsc;
+    const double ratio = cycles ? static_cast<double>(now.QuadPart - g_tscBase.qpc.QuadPart) / static_cast<double>(cycles) : 0.0;
+    for (u64* t : {&s.drawTicks, &s.textureTicks, &s.presentTicks, &s.transferTicks, &s.waitTicks}) *t = static_cast<u64>(static_cast<double>(*t) * ratio);
+  }
   s.pixels = g_pixelCount.load();
   s.textured = g_texturedCount.load();
   s.unsupported = g_stats.unsupported + g_unsupportedTexels.load();
   return s;
 }
 void SetWindowScale(int percent) { g_scalePercent = percent; }
+
+
+// ---- the GS on its own thread -------------------------------------------------------------------------------------
+// The game's thread only queues what it sends to the GS (register writes, image data, display registers, the refresh's
+// picture); a GS thread works through the queue in order - primitive set-up, uploads, texture decoding, the display
+// read-out - with the band workers drawing behind it. In a race that was ~14 ms of each ~30 ms game frame on the game's
+// thread. What the game reads back stays on its own thread: the event registers (SIGNAL, FINISH, LABEL, CSR, IMR,
+// SIGLBLID) and their interrupts. HP2_GS_ASYNC=0 keeps everything on the game's thread.
+namespace {
+void EventRegWrite(u32 reg, u64 v) {
+  switch (reg) {
+    case 0x60: {  // SIGNAL: SIGID = (SIGID & ~mask) | (id & mask); raises CSR.SIGNAL
+      const u32 id = static_cast<u32>(v), mask = static_cast<u32>(v >> 32);
+      g_siglblid = (g_siglblid & ~static_cast<u64>(0xFFFFFFFFu)) | ((static_cast<u32>(g_siglblid) & ~mask) | (id & mask));
+      g_csr |= 1;
+      if (!(g_imr & 0x100) && g_irqCallback) g_irqCallback();
+      break;
+    }
+    case 0x61:  // FINISH: raises CSR.FINISH once everything before it is drawn (queued drawing counts as drawn: the game
+                // cannot read GS memory back)
+      g_csr |= 2;
+      CsrTrace('F', g_imr);
+      if (!(g_imr & 0x200) && g_irqCallback) g_irqCallback();
+      break;
+    case 0x62: g_siglblid = (g_siglblid & 0xFFFFFFFFull) | (v << 32); break;  // LABEL: LBLID
+    default: break;
+  }
+}
+bool EventPrivWrite(std::uint32_t address, u64 value, std::uint32_t size) {  // true: an event register (handled here)
+  switch (address & 0x1FF8) {
+    case 0x1000: if (!(address & 4)) g_csr &= ~(value & 0x1F); CsrTrace('W', value); return true;  // CSR: write 1 to clear (RESET ignored)
+    case 0x1010: Merge(g_imr, address, value, size); CsrTrace('M', g_imr); return true;
+    case 0x1080: Merge(g_siglblid, address, value, size); return true;
+    default: return false;
+  }
+}
+
+class GsThread {
+ public:
+  enum Type : u32 { kReg, kStQ, kImage, kPriv, kPresent, kReset };
+  GsThread() {
+    const char* e = std::getenv("HP2_GS_ASYNC");
+    m_on = !(e && e[0] == '0');
+    if (!m_on) return;
+    m_cmds.resize(kCmds);
+    m_bytes.resize(kBytes);
+    m_thread = std::thread([this] { Run(); });
+  }
+  ~GsThread() { Stop(); }
+  bool On() const { return m_on && !m_stopped; }
+  void Push(u32 type, u32 a, u64 v, u64 w = 0) {
+    while (m_head - m_tail.load(std::memory_order_acquire) >= kCmds) Pause();
+    m_cmds[m_head % kCmds] = {type, a, v, w};
+    ++m_head;
+    m_published.store(m_head);
+    if (m_sleeping.load()) {
+      m_signal.fetch_add(1);
+      m_signal.notify_one();
+    }
+  }
+  void PushImage(const u8* data, std::size_t n) {
+    if (n > kBytes / 4) {  // (not expected: a whole transfer in one piece) done here, in order
+      Flush();
+      DoImageData(data, n);
+      return;
+    }
+    u64 pos = m_byteHead;
+    if (pos % kBytes + n > kBytes) pos += kBytes - pos % kBytes;  // a chunk never wraps
+    while (pos + n - m_byteTail.load(std::memory_order_acquire) > kBytes) Pause();
+    memcpy(&m_bytes[pos % kBytes], data, n);
+    m_byteHead = pos + n;
+    Push(kImage, 0, pos, n);
+  }
+  void PushPresent() {  // at most one refresh queued ahead of the GS: the shown picture stays current
+    while (m_presents.load(std::memory_order_acquire) >= 1) Pause();
+    m_presents.fetch_add(1);
+    Push(kPresent, 0, 0);
+  }
+  void Flush() {
+    while (m_tail.load(std::memory_order_acquire) != m_head) Pause();
+  }
+  void Stop() {
+    if (!m_thread.joinable()) return;
+    Flush();
+    m_quit = true;
+    m_signal.fetch_add(1);
+    m_signal.notify_one();
+    m_thread.join();
+    m_stopped = true;
+  }
+
+ private:
+  struct Cmd { u32 type, a; u64 v, w; };
+  static constexpr u64 kCmds = 1ull << 18, kBytes = 64ull << 20;
+  static constexpr u64 kSpinCycles = 2'000'000;  // the GS thread spins ~0.5 ms for more work before it sleeps
+  int m_pauses = 0;
+  void Pause() {  // the game's thread waiting for the GS
+    if (++m_pauses < 2000) _mm_pause();
+    else { m_pauses = 0; std::this_thread::yield(); }
+  }
+  void Run() {
+    u64 tail = 0;
+    for (;;) {
+      u64 pub = m_published.load(std::memory_order_acquire);
+      for (u64 since = __rdtsc(); pub == tail; pub = m_published.load(std::memory_order_acquire)) {
+        if (m_quit.load()) return;
+        if (__rdtsc() - since < kSpinCycles) { _mm_pause(); continue; }
+        const u32 sig = m_signal.load();
+        m_sleeping.store(true);
+        if (m_published.load() == tail && !m_quit.load()) m_signal.wait(sig);
+        m_sleeping.store(false);
+        since = __rdtsc();
+      }
+      for (; tail < pub; ++tail) {
+        const Cmd& c = m_cmds[tail % kCmds];
+        switch (c.type) {
+          case kReg: DoRegWrite(c.a, c.v); break;
+          case kStQ: DoStQ(c.a, static_cast<u32>(c.v), static_cast<u32>(c.v >> 32)); break;
+          case kImage:
+            DoImageData(&m_bytes[c.v % kBytes], static_cast<std::size_t>(c.w));
+            m_byteTail.store(c.v + c.w, std::memory_order_release);
+            break;
+          case kPriv: DoPrivWrite(c.a, c.v, static_cast<u32>(c.w)); break;
+          case kPresent: DoPresent(); m_presents.fetch_sub(1); break;
+          case kReset: DoReset(); break;
+          default: break;
+        }
+        m_tail.store(tail + 1, std::memory_order_release);
+      }
+    }
+  }
+
+  bool m_on = false, m_stopped = false;
+  std::vector<Cmd> m_cmds;
+  std::vector<u8> m_bytes;
+  u64 m_head = 0, m_byteHead = 0;  // game's thread only
+  std::atomic<u64> m_published{0}, m_tail{0}, m_byteTail{0};
+  std::atomic<int> m_presents{0};
+  std::atomic<u32> m_signal{0};
+  std::atomic<bool> m_sleeping{false}, m_quit{false};
+  std::thread m_thread;
+};
+GsThread& Gs() {
+  static GsThread t;
+  return t;
+}
+}  // namespace
+
+void FlushGs() { if (Gs().On()) Gs().Flush(); }
+void StopGs() { Gs().Stop(); }
+
+void Reset() {
+  if (Gs().On()) Gs().Push(GsThread::kReset, 0, 0);
+  else DoReset();
+}
+void StQ(std::uint32_t s, std::uint32_t t, std::uint32_t q) {
+  if (Gs().On()) Gs().Push(GsThread::kStQ, s, t | (static_cast<u64>(q) << 32));
+  else DoStQ(s, t, q);
+}
+void ImageData(const std::uint8_t* data, std::size_t bytes) {
+  if (Gs().On()) Gs().PushImage(data, bytes);
+  else DoImageData(data, bytes);
+}
+void RegWrite(std::uint32_t reg, std::uint64_t v) {
+  if (reg >= 0x60 && reg <= 0x62) EventRegWrite(reg, v);
+  else if (Gs().On()) Gs().Push(GsThread::kReg, reg, v);
+  else DoRegWrite(reg, v);
+}
+void PrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size) {
+  if (EventPrivWrite(address, value, size)) return;
+  if (Gs().On()) Gs().Push(GsThread::kPriv, address, value, size);
+  else DoPrivWrite(address, value, size);
+}
+void Present() {
+  if (Gs().On()) Gs().PushPresent();
+  else DoPresent();
+}
 
 }  // namespace gs

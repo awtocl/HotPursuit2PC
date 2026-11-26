@@ -13,6 +13,12 @@
 // Development build: it reports how far the game gets and why it stops.
 #include <windows.h>
 
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+#include <atomic>
+#include <filesystem>
+#include <thread>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstdarg>
@@ -105,6 +111,100 @@ void* FindCode(std::uint32_t pc) {
   return find(g_table->entries, g_table->entry_count);
 }
 
+// ---- development: sampling profiler of the game's thread (HP2_SAMPLE=<script s>: from then until the end) ------------
+// Every millisecond a helper thread stops the game's thread for an instant and notes where it is. At the end the places are
+// named: runtime functions by the build's symbols (dev preset), translated game code by the guest function it belongs to.
+std::atomic<bool> g_sampleOn{false}, g_sampleQuit{false};
+std::thread g_sampler;
+struct SampleKey {
+  std::uint64_t rip, caller;  // caller: the first return address into this executable on the stack (system calls: who made them)
+  bool operator==(const SampleKey& o) const { return rip == o.rip && caller == o.caller; }
+};
+struct SampleKeyHash {
+  std::size_t operator()(const SampleKey& k) const { return std::hash<std::uint64_t>()(k.rip * 31 + k.caller); }
+};
+std::unordered_map<SampleKey, std::uint32_t, SampleKeyHash> g_samples;
+void StartSampler() {
+  HANDLE self = nullptr;
+  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self,
+                  THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
+  g_sampler = std::thread([self] {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(GetModuleHandleW(nullptr));
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const std::uint8_t*>(dos) + dos->e_lfanew);
+    std::uint64_t exeLo = reinterpret_cast<std::uint64_t>(dos), exeHi = exeLo + nt->OptionalHeader.SizeOfImage;
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)  // code only (stack values pointing at data are not callers)
+      if (memcmp(sec[i].Name, ".text", 5) == 0) {
+        exeHi = exeLo + sec[i].VirtualAddress + sec[i].Misc.VirtualSize;
+        exeLo += sec[i].VirtualAddress;
+      }
+    while (!g_sampleQuit) {
+      Sleep(1);
+      if (!g_sampleOn || SuspendThread(self) == static_cast<DWORD>(-1)) continue;
+      CONTEXT c = {};
+      c.ContextFlags = CONTEXT_CONTROL;
+      const bool ok = GetThreadContext(self, &c) != 0;
+      std::uint64_t stack[96] = {};
+      if (ok) memcpy(stack, reinterpret_cast<const void*>(c.Rsp), sizeof stack);  // (the stack's top is committed memory)
+      ResumeThread(self);  // (before touching the heap: the game's thread may hold its lock)
+      if (!ok) continue;
+      std::uint64_t caller = 0;
+      if (c.Rip < exeLo || c.Rip >= exeHi)
+        for (std::uint64_t v : stack)
+          if (v >= exeLo && v < exeHi) { caller = v; break; }
+      ++g_samples[{c.Rip, caller}];
+    }
+    CloseHandle(self);
+  });
+}
+void ReportSamples() {
+  if (!g_sampler.joinable()) return;
+  g_sampleQuit = true;
+  g_sampler.join();
+  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+  SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+  std::vector<std::pair<std::uintptr_t, std::uint32_t>> starts;  // host code of each translated game function -> guest address
+  for (std::uint32_t i = 0; i < g_table->function_count; ++i)
+    starts.emplace_back(reinterpret_cast<std::uintptr_t>(g_table->functions[i].code), g_table->functions[i].address);
+  std::sort(starts.begin(), starts.end());
+  HMODULE codeModule = nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCWSTR>(g_table->functions[0].code), &codeModule);
+  std::map<std::string, std::uint64_t> byName;
+  std::uint64_t total = 0;
+  auto nameOf = [&](std::uint64_t rip) -> std::string {
+    HMODULE m = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(rip), &m);
+    char name[256];
+    if (m && m == codeModule) {
+      auto it = std::upper_bound(starts.begin(), starts.end(), std::make_pair(static_cast<std::uintptr_t>(rip), ~0u));
+      snprintf(name, sizeof name, "game %08X", it == starts.begin() ? 0u : std::prev(it)->second);
+      return name;
+    }
+    alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 200] = {};
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 199;
+    DWORD64 disp = 0;
+    if (SymFromAddr(GetCurrentProcess(), rip, &disp, sym)) return sym->Name;
+    wchar_t file[MAX_PATH] = L"?";
+    if (m) GetModuleFileNameW(m, file, MAX_PATH);
+    snprintf(name, sizeof name, "[%ls]", std::filesystem::path(file).filename().c_str());
+    return name;
+  };
+  for (const auto& [key, n] : g_samples) {
+    total += n;
+    byName[key.caller ? nameOf(key.rip) + " <- " + nameOf(key.caller) : nameOf(key.rip)] += n;
+  }
+  std::vector<std::pair<std::uint64_t, std::string>> top;
+  for (const auto& [k, v] : byName) top.emplace_back(v, k);
+  std::sort(top.rbegin(), top.rend());
+  Log("profile: %llu samples of the game's thread (1 ms apart)", static_cast<unsigned long long>(total));
+  for (std::size_t i = 0; i < top.size() && i < 50; ++i)
+    Log("profile: %5.1f%%  %s", 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total ? total : 1), top[i].second.c_str());
+  SymCleanup(GetCurrentProcess());
+}
+
 // ---- kernel objects ------------------------------------------------------------
 enum ThreadStatus { kRun = 1, kReady = 2, kWait = 4, kSuspend = 8, kDormant = 0x10 };
 struct Thread {
@@ -147,6 +247,8 @@ std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
 std::unordered_map<std::uint32_t, std::uint64_t> g_funcCount;  // function -> entries (traced packages)
 std::vector<std::uint32_t> g_funcOrder;                        // functions in order of their first entry
 LARGE_INTEGER g_qpf, g_nextVblank;
+std::uint64_t g_idleTicks = 0;  // time with every game thread waiting (perf line: what is left of each refresh)
+std::uint64_t g_codeTicks = 0, g_vu1Ticks = 0;  // time in translated EE code (everything it starts included), in VU1 microprograms
 // Tests (HP2_TURBO=n or max): refreshes n times faster than real time, or as soon as every game thread waits. The game's
 // logic follows the refresh count, so a scripted run (HP2_PRESS, --until) gives the same result in less time. Silent.
 double g_turbo = 1.0;
@@ -327,6 +429,11 @@ VuCodeFn VuCodeAt(std::uint32_t pc) {
 
 void RunVu1(std::uint32_t pc) {
   ++g_vuRuns;
+  struct Timer {  // (the GS work its XGKICKs start is included)
+    LARGE_INTEGER t0;
+    Timer() { QueryPerformanceCounter(&t0); }
+    ~Timer() { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_vu1Ticks += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart); }
+  } timer;
   g_vu1.pc = pc & 0x3FFF;
   g_vu1.has_exception = 0;
   for (int guard = 0; guard < 200000; ++guard) {
@@ -699,6 +806,19 @@ void DeliverInterrupts() {
       Log("Turbo: real time from game second %.0f", static_cast<double>(g_vblanks) * 1001.0 / 60000.0);
     }
     std::uint64_t scriptTime = 0;
+    {  // HP2_BENCH_AT=<script s>: from then on refreshes come 4x faster than real time, so the perf lines' refreshes/s is
+       // how fast the runtime can go (60 = full speed at the 60 Hz cap)
+      static const std::uint64_t benchAt = [] { const char* e = std::getenv("HP2_BENCH_AT"); return e ? static_cast<std::uint64_t>(atof(e) * 60000.0 / 1001.0) : 0ull; }();
+      static bool benching = false;
+      std::uint64_t t = 0;
+      static const std::uint64_t sampleAt = [] { const char* e = std::getenv("HP2_SAMPLE"); return e ? static_cast<std::uint64_t>(atof(e) * 60000.0 / 1001.0) : 0ull; }();
+      if (sampleAt && !g_sampleOn && ScriptTime(t) && t >= sampleAt) g_sampleOn = true;
+      if (benchAt && !benching && ScriptTime(t) && t >= benchAt) {
+        benching = true;
+        g_turbo = 4.0;
+        Log("Bench: refreshes 4x faster than real time from script second %.0f", static_cast<double>(t) * 1001.0 / 60000.0);
+      }
+    }
     if (g_untilVblank && ScriptTime(scriptTime) && scriptTime >= g_untilVblank) Stop("game time limit of the run (%.0f s of game time) reached", static_cast<double>(g_untilVblank) * 1001.0 / 60000.0);
     gs::VBlankStart();
     gs::Present();
@@ -1336,16 +1456,18 @@ void PadPoll() {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     static gs::Stats prev;  // where the time went over these 600 refreshes (ms per refresh)
+    static std::uint64_t prevIdle = 0, prevCode = 0, prevVu1 = 0;
     const gs::Stats st = gs::GetStats();
     const double ms = 1000.0 / static_cast<double>(g_qpf.QuadPart) / 600.0;
     if (last.QuadPart)
-      Log("perf: vblank %llu, %.1f refreshes/s; per refresh: total %.1f ms, GS draw %.1f ms (textures %.1f ms, %llu decodes), present %.1f ms, transfers %.1f ms, %llu tris %llu sprites",
+      Log("perf: vblank %llu, %.1f refreshes/s; per refresh: total %.1f ms, GS set-up %.1f ms (textures %.1f ms, %llu decodes), present %.1f ms, transfers %.1f ms, waiting for GS workers %.1f ms, %llu tris %llu sprites",
           static_cast<unsigned long long>(g_vblanks), 600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart),
           static_cast<double>(now.QuadPart - last.QuadPart) * ms, static_cast<double>(st.drawTicks - prev.drawTicks) * ms,
           static_cast<double>(st.textureTicks - prev.textureTicks) * ms, static_cast<unsigned long long>(st.textureDecodes - prev.textureDecodes),
           static_cast<double>(st.presentTicks - prev.presentTicks) * ms, static_cast<double>(st.transferTicks - prev.transferTicks) * ms,
-          static_cast<unsigned long long>((st.triangles - prev.triangles) / 600), static_cast<unsigned long long>((st.sprites - prev.sprites) / 600));
+          static_cast<double>(st.waitTicks - prev.waitTicks) * ms, static_cast<unsigned long long>((st.triangles - prev.triangles) / 600), static_cast<unsigned long long>((st.sprites - prev.sprites) / 600));
     prev = st;
+    const double seconds = last.QuadPart ? static_cast<double>(now.QuadPart - last.QuadPart) / static_cast<double>(g_qpf.QuadPart) : 0.0;
     last = now;
     std::string threads;  // what each game thread is doing (status 1 run, 2 ready, 4 wait, 8 suspended, 16 dormant)
     for (const Thread* t : g_threads)
@@ -1354,7 +1476,21 @@ void PadPoll() {
         snprintf(one, sizeof one, " t%d:%d@%08X%s", t->id, t->status, t->s.pc, t->wait_sema >= 0 && t->status == kWait ? (" s" + std::to_string(t->wait_sema)).c_str() : (t->sleeping ? " sleep" : ""));
         threads += one;
       }
-    Log("perf:   threads%s", threads.c_str());
+    {
+      static std::uint64_t prevFlips = 0;
+      static std::uint64_t prevStale = 0, prevSame = 0;
+      Log("perf:   game frames: %.1f per second (real time); textures with changed pages %llu, of those unchanged bytes %llu",
+          seconds > 0 ? static_cast<double>(st.flips - prevFlips) / seconds : 0.0, static_cast<unsigned long long>(st.textureStale - prevStale),
+          static_cast<unsigned long long>(st.textureSame - prevSame));
+      prevFlips = st.flips;
+      prevStale = st.textureStale;
+      prevSame = st.textureSame;
+    }
+    Log("perf:   threads%s; idle %.1f ms, in game code %.1f ms, in VU1 %.1f ms per refresh (both with the GS work they start)", threads.c_str(),
+        static_cast<double>(g_idleTicks - prevIdle) * ms, static_cast<double>(g_codeTicks - prevCode) * ms, static_cast<double>(g_vu1Ticks - prevVu1) * ms);
+    prevIdle = g_idleTicks;
+    prevCode = g_codeTicks;
+    prevVu1 = g_vu1Ticks;
     Log("perf:   targets%s", gs::TargetsText().c_str());
     {  // GIF vertices vs vertices that draw (XYZ2/XYZF2), XGKICKs, VU1 runs per refresh
       static std::uint64_t pv = 0, pk = 0, px = 0, pr = 0;
@@ -1621,7 +1757,11 @@ void Step(NativeState& s) {
     s.cycle_quota = kSliceQuota;
     g_lastEntry = pc;
     if (g_profile) ++g_entryCount[pc];
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
     reinterpret_cast<EeCode>(code)(reinterpret_cast<std::uint8_t*>(&s), g_ram, g_spr, &g_runtime);
+    QueryPerformanceCounter(&t1);
+    g_codeTicks += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);  // (GS and VU1 work started by the code included)
     bool due = false;
     if (++g_sinceCheck >= 64) {
       g_sinceCheck = 0;  // a refresh interrupt is due: let the scheduler deliver it
@@ -1747,6 +1887,7 @@ int wmain(int argc, wchar_t** argv) {
     QueryPerformanceCounter(&g_nextVblank);
     LARGE_INTEGER start = g_nextVblank;
     g_mainFiber = ConvertThreadToFiber(nullptr);
+    if (std::getenv("HP2_SAMPLE")) StartSampler();
     g_threads.push_back(new Thread());  // id 0 unused
     g_threads.push_back(new Thread());
     Thread& main_thread = *g_threads[1];
@@ -1787,7 +1928,13 @@ int wmain(int argc, wchar_t** argv) {
           break;
         }
         if (g_turboMax) g_nextVblank.QuadPart = 0;  // tests: nothing to run, the next refresh is due now
-        else Sleep(1);                             // all threads wait: until the next interrupt
+        else {                                     // all threads wait: until the next interrupt
+          LARGE_INTEGER a, b;
+          QueryPerformanceCounter(&a);
+          Sleep(1);
+          QueryPerformanceCounter(&b);
+          g_idleTicks += static_cast<std::uint64_t>(b.QuadPart - a.QuadPart);
+        }
       } else {
         rotate = static_cast<std::size_t>(best->id) + 1;
         g_current = best;
@@ -1810,6 +1957,7 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<double>(end.QuadPart - start.QuadPart) / g_qpf.QuadPart, static_cast<unsigned long long>(g_vblanks),
         static_cast<unsigned long long>(g_steps), static_cast<unsigned long long>(g_syscalls),
         static_cast<unsigned long long>(g_rpcCalls));
+    ReportSamples();
     {
       std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
       for (const auto& [pc, n] : g_entryCount) top.emplace_back(n, pc);
