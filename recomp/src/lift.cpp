@@ -42,6 +42,7 @@ std::string function_name(std::uint32_t start) {
 
 bool supported(const Insn& in, bool native) {
   switch (in.op) {
+    case Op::MFSA: case Op::MTSA: case Op::MTSAB: case Op::MTSAH: case Op::QFSRV:  // SA lives in the native runtime's state only
     case Op::EI: case Op::DI: case Op::MFC0: case Op::MTC0:
       return native;  // the native runtime's own system services (Runtime slot 2)
     case Op::SLL: case Op::SRL: case Op::SRA: case Op::SLLV: case Op::SRLV: case Op::SRAV:
@@ -956,6 +957,32 @@ class FunctionLifter : public VectorCode {
       case Op::PROT3W: W(rd, pair(word(rt, 1), word(rt, 2))); WH(rd, pair(word(rt, 0), word(rt, 3))); break;
       case Op::PMFLO: W(rd, ld(i64_, L_.lo)); WH(rd, ld(i64_, L_.lo1)); break;
       case Op::PMFHI: W(rd, ld(i64_, L_.hi)); WH(rd, ld(i64_, L_.hi1)); break;
+      case Op::MTSAB: case Op::MTSAH: case Op::MTSA: case Op::MFSA: case Op::QFSRV: {
+        if (in.op == Op::MTSAB) {  // SA = ((rs ^ imm) & 15) * 8
+          st(b_.CreateShl(b_.CreateAnd(b_.CreateXor(R32(rs), b_.getInt32(in.imm() & 0xFFFF)), b_.getInt32(15)), 3), L_.sa);
+        } else if (in.op == Op::MTSAH) {  // SA = ((rs ^ imm) & 7) * 16
+          st(b_.CreateShl(b_.CreateAnd(b_.CreateXor(R32(rs), b_.getInt32(in.imm() & 0xFFFF)), b_.getInt32(7)), 4), L_.sa);
+        } else if (in.op == Op::MTSA) {
+          st(b_.CreateAnd(R32(rs), b_.getInt32(0x7F)), L_.sa);
+        } else if (in.op == Op::MFSA) {
+          W(rd, b_.CreateZExt(ld(i32_, L_.sa), i64_));
+        } else {  // QFSRV: low 128 bits of ({rs:rt} >> SA), rs the upper half
+          auto* i128 = llvm::Type::getIntNTy(ctx_, 128);
+          auto join = [&](llvm::Value* lo, llvm::Value* hi) {
+            return b_.CreateOr(b_.CreateZExt(lo, i128), b_.CreateShl(b_.CreateZExt(hi, i128), 64));
+          };
+          llvm::Value* lower = join(R(rt), RH(rt));
+          llvm::Value* upper = join(R(rs), RH(rs));
+          llvm::Value* sh = b_.CreateAnd(ld(i32_, L_.sa), b_.getInt32(0x7F));
+          llvm::Value* sh128 = b_.CreateZExt(sh, i128);
+          llvm::Value* inv = b_.CreateAnd(b_.CreateSub(llvm::ConstantInt::get(i128, 128), sh128), llvm::ConstantInt::get(i128, 127));
+          llvm::Value* shifted = b_.CreateOr(b_.CreateLShr(lower, sh128), b_.CreateShl(upper, inv));
+          llvm::Value* res = b_.CreateSelect(b_.CreateICmpEQ(sh, b_.getInt32(0)), lower, shifted);
+          W(rd, b_.CreateTrunc(res, i64_));
+          WH(rd, b_.CreateTrunc(b_.CreateLShr(res, llvm::ConstantInt::get(i128, 64)), i64_));
+        }
+        break;
+      }
       case Op::PEXCW: W(rd, pair(word(rt, 0), word(rt, 2))); WH(rd, pair(word(rt, 1), word(rt, 3))); break;
       case Op::PADDW: case Op::PSUBW: {
         llvm::Value* w[4];

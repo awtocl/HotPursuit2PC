@@ -38,6 +38,7 @@ StateLayout state_layout(const Hp2CodeLayout& c) {
   l.fpr = c.fpr;
   l.fcsr = c.fcsr;
   l.fpacc = c.fpacc;
+  l.sa = c.sa;
   l.vf = c.vf;
   l.cycle_quota = c.cycle_quota;
   l.has_exception = c.has_exception;

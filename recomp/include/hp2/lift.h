@@ -46,6 +46,7 @@ struct StateLayout {
   std::uint32_t fpr = 0;           // 32 single-precision registers as 32-bit patterns
   std::uint32_t fcsr = 0;          // FPU control/status; bit 23 is the condition flag
   std::uint32_t fpacc = 0;         // FPU accumulator (madd.s, adda.s, ...)
+  std::uint32_t sa = 0;            // uint32 SA register (0: not available, the SA instructions stop the translated code)
   std::uint32_t vf = 0;            // VU0 vector registers, 32 x 128 bits
   std::uint32_t cycle_quota = 0;   // int32: decremented by loops; at 0 or below the code stops
   std::uint32_t has_exception = 0; // uint32: non-zero after a hardware access -> stop at the next instruction

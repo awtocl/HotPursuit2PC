@@ -18,7 +18,7 @@ namespace hp2 {
 
 inline constexpr std::uint32_t kCodeTableMagic = 0x43325048;  // "HP2C"
 // Raise whenever the table layout or the translators' output changes meaning.
-inline constexpr std::uint32_t kCodeTableVersion = 1;
+inline constexpr std::uint32_t kCodeTableVersion = 2;  // 2: Hp2CodeLayout gained `sa`
 inline constexpr const char* kCodeTableSymbol = "hp2_code_table";
 inline constexpr const char* kCodeDllName = "hp2code.dll";
 
@@ -29,11 +29,12 @@ struct Hp2CodeLayout {
   std::uint32_t pc, gpr, gpr_stride, hi, lo, hi1, lo1, fpr, fcsr, fpacc, vf, cycle_quota, has_exception;
   std::uint32_t vacc, vi, vq, vi_i, vr, vcf, vmf, vdf, vt, pipe_mac, pipe_sticky, pipe_clip, pipe_time, pipe_q;
   std::uint32_t delayed_jump, fmac_write, saved_next_index, saved_next_value, xgkick_address;
+  std::uint32_t sa;  // shift amount register (mtsa/mtsab/mtsah/mfsa/qfsrv); 0 = not provided: those instructions stop the translated code
   std::uint32_t micro_size, data_mask, addr_top, addr_xgkick, addr_itop;
   std::uint32_t exception_dbit, exception_tbit, exception_ebit, quota_done, invalid_pc;
   std::uint32_t ram_size;
 };
-static_assert(sizeof(Hp2CodeLayout) == 43 * 4, "Hp2CodeLayout must have no padding");
+static_assert(sizeof(Hp2CodeLayout) == 44 * 4, "Hp2CodeLayout must have no padding");
 
 inline std::uint64_t code_layout_fingerprint(const Hp2CodeLayout& layout) {
   const auto* bytes = reinterpret_cast<const std::uint8_t*>(&layout);

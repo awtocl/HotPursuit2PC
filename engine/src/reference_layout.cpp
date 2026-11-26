@@ -33,6 +33,7 @@ namespace hp2ref
 		l.has_exception = at(offsetof(MIPSSTATE, nHasException));
 		l.vacc = at(offsetof(MIPSSTATE, nCOP2A));
 		l.vi = at(offsetof(MIPSSTATE, nCOP2VI));
+		l.sa = 0;  // the reference core does not keep SA in MIPSSTATE for its own use: leave mtsa/qfsrv to it
 		l.vq = at(offsetof(MIPSSTATE, nCOP2Q));
 		l.vi_i = at(offsetof(MIPSSTATE, nCOP2I));
 		l.vr = at(offsetof(MIPSSTATE, nCOP2R));

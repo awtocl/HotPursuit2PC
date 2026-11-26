@@ -33,6 +33,7 @@ struct alignas(16) NativeState {
   std::uint32_t pipe_time = 0;
   alignas(16) std::uint32_t fmac_write[12] = {};
   std::uint32_t saved_next_index = 0, saved_next_value = 0, xgkick_address = 0;
+  std::uint32_t sa = 0;  // SA register (qfsrv funnel shift, in bits)
 };
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -101,6 +102,7 @@ inline Hp2CodeLayout native_code_layout() {
   l.saved_next_index = at(offsetof(NativeState, saved_next_index));
   l.saved_next_value = at(offsetof(NativeState, saved_next_value));
   l.xgkick_address = at(offsetof(NativeState, xgkick_address));
+  l.sa = at(offsetof(NativeState, sa));
   l.micro_size = 0x4000;
   l.data_mask = 0x3FFF;
   l.addr_top = 0x8400;
