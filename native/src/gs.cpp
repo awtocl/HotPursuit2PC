@@ -14,6 +14,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -377,6 +378,7 @@ std::atomic<int> g_scalePercent{100};
 HWND g_hwnd = nullptr;
 std::thread g_windowThread;
 std::uint64_t g_frameSeq = 0;                                       // bumped by Present (under g_frameMutex)
+std::string g_windowShot;                                           // development: next window picture to a file (under g_frameMutex)
 HANDLE g_frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // wakes the window thread for a new frame
 std::atomic<bool> g_d3dActive{false};                               // the D3D11 presenter draws (else GDI WM_PAINT)
 constexpr UINT kPadMessage = WM_APP + 1;                            // wParam: newly pressed pad buttons, bit 16 = menu toggle
@@ -540,6 +542,13 @@ void WindowThread() {
     bool changed = false;
     {
       std::lock_guard<std::mutex> lock(g_frameMutex);
+      if (!g_windowShot.empty()) {
+        static std::string pending;  // the presenter keeps the pointer until its next Draw
+        pending = g_windowShot;
+        g_windowShot.clear();
+        present::RequestShot(pending.c_str());
+        g_redraw = true;
+      }
       if (g_frameSeq != seen && !g_frame.empty()) {
         frame = g_frame;
         fw = g_frameW;
@@ -1230,6 +1239,10 @@ void Shutdown() {  // closes the window and waits for its thread (a running std:
 }
 bool WindowFocused() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 bool OverlayVisible() { return ui::Visible(); }
+void RequestWindowShot(const char* path) {
+  std::lock_guard<std::mutex> lock(g_frameMutex);
+  g_windowShot = path;
+}
 void OpenSettings() {
   if (g_hwnd) PostMessageW(g_hwnd, kPadMessage, 0x20000, 0);
 }

@@ -54,12 +54,13 @@ inline constexpr std::uint32_t kHookSifInitRpc = 0x00285118;
 // The game's file API (found by its use of the RPC server 80000001): C signatures, served by the runtime from the disc.
 inline constexpr std::uint32_t kHookOpen = 0x00286980, kHookClose = 0x00286C08, kHookLseek = 0x00286D88,
                                kHookRead = 0x00286FC0;
-// Event handler of the "Calibrate Display" item of Options > Display (registered by name at 001F5934): screen centring
-// has no meaning on PC, so the runtime opens its graphics settings there (ADR 0013, settings inside the game's menus).
-inline constexpr std::uint32_t kHookCalibrateDisplay = 0x001F4A30;
+// Event handler of the "Calibrate display offset" screen of Options > Display (registered by name at 001F5968). Screen
+// centring has no meaning on PC: the runtime serves this handler; when the screen opens (event 1) it shows its graphics
+// settings, and closing them confirms the screen (event 19), which returns to Display (ADR 0013, settings in the game's menus).
+inline constexpr std::uint32_t kHookCalibrateScreen = 0x001F4B20;
 inline constexpr std::uint32_t kNativeHooks[] = {kHookSifBindRpc, kHookSifCallRpc, kHookSifCheckStatRpc, kHookSifInitRpc,
                                                   0x0028511C,      kHookOpen,       kHookClose,          kHookLseek,
-                                                  kHookRead,       kHookCalibrateDisplay};
+                                                  kHookRead,       kHookCalibrateScreen};
 
 // Code the game copies into kernel memory at start-up (found at 0x0028B73C-0x0028B748: it passes the
 // source 0x00328E58, 1856 bytes, and the destination 0x80076000 to its own kernel-copy system call).

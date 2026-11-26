@@ -147,10 +147,26 @@ std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
 std::unordered_map<std::uint32_t, std::uint64_t> g_funcCount;  // function -> entries (traced packages)
 std::vector<std::uint32_t> g_funcOrder;                        // functions in order of their first entry
 LARGE_INTEGER g_qpf, g_nextVblank;
+// Tests (HP2_TURBO=n or max): refreshes n times faster than real time, or as soon as every game thread waits. The game's
+// logic follows the refresh count, so a scripted run (HP2_PRESS, --until) gives the same result in less time. Silent.
+double g_turbo = 1.0;
+bool g_turboMax = false;
+std::uint64_t g_untilVblank = 0;  // --until <game seconds>: stop at this refresh
+std::uint64_t g_turboUntil = 0;   // HP2_TURBO_UNTIL=<game seconds>: back to real time there (menus animate on real-time timers)
 std::uint32_t g_lastEntry = 0, g_sinceCheck = 0;
 std::map<int, std::uint32_t> g_userSyscalls;  // system calls installed by the game (SetSyscall)
 bool g_stop = false;
 std::string g_stopReason;
+bool g_menuMusic = false;        // the menus' music has started (stream 0 on voice 2E): the title has been passed
+// Tests: with HP2_FAST_BOOT every scripted time (HP2_PRESS, HP2_DUMP_AT, HP2_SHOT_AT, --until) counts from the main menu.
+const bool g_fastBoot = std::getenv("HP2_FAST_BOOT") != nullptr;
+std::uint64_t g_timeBase = 0;    // refresh of the main menu's arrival (fast boot), else 0
+bool ScriptTime(std::uint64_t& t) {  // refreshes since the script's origin; false while a fast boot is still on its way
+  if (g_fastBoot && !g_timeBase) return false;
+  t = g_vblanks - g_timeBase;
+  return true;
+}
+bool g_calibrateScreen = false;  // the graphics settings were opened from the game's calibration screen (confirm it on close)
 
 std::uint64_t& G(NativeState& s, int r) { return s.gpr[r][0]; }
 std::uint32_t A(NativeState& s, int n) { return static_cast<std::uint32_t>(s.gpr[4 + n][0]); }  // a0..a3, t0..t3
@@ -660,9 +676,17 @@ void DeliverInterrupts() {
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
   if (now.QuadPart >= g_nextVblank.QuadPart) {
-    g_nextVblank.QuadPart += g_qpf.QuadPart * 1001 / 60000;
+    g_nextVblank.QuadPart += static_cast<LONGLONG>(static_cast<double>(g_qpf.QuadPart) * 1001.0 / 60000.0 / g_turbo);
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
+    if (g_turboUntil == ~0ull && g_menuMusic && g_turbo != 1.0) g_turboUntil = g_vblanks;  // HP2_TURBO_UNTIL=menu
+    if (g_turboUntil && g_vblanks == g_turboUntil) {
+      g_turbo = 1.0;
+      g_turboMax = false;
+      Log("Turbo: real time from game second %.0f", static_cast<double>(g_vblanks) * 1001.0 / 60000.0);
+    }
+    std::uint64_t scriptTime = 0;
+    if (g_untilVblank && ScriptTime(scriptTime) && scriptTime >= g_untilVblank) Stop("game time limit of the run (%.0f s of game time) reached", static_cast<double>(g_untilVblank) * 1001.0 / 60000.0);
     gs::VBlankStart();
     gs::Present();
     PadPoll();
@@ -1045,6 +1069,7 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
       g_music.active = true;
       g_music.start = g_vblanks;
       g_music.voice[0] = c[i + 3];
+      if (c[i + 3] == 0x2E) g_menuMusic = true;
       const std::uint32_t interleave = std::max<std::uint32_t>(c[i + 5], 1) * 0x4000u;
       g_music.rate = std::max<std::uint32_t>(static_cast<std::uint32_t>(c[i + 6]) * 48000u / 4096u, 4000);
       g_music.durationVblanks = g_music.length ? static_cast<std::uint64_t>(g_music.length) / 2 / 16 * 28 * 60000 / 1001 / g_music.rate : ~0ull;
@@ -1206,13 +1231,15 @@ void PadPoll() {
       if (std::abs(st.ry) > 7000) axes[1] = axis(st.ry, true);
     }
   }
-  {  // development: HP2_PRESS="start@10-11,cross@14-15" presses buttons at given seconds of the run (no keyboard needed)
+  {  // development: HP2_PRESS="start@10-11,cross@14-15" presses buttons at given seconds of the run (no keyboard needed);
+     // with HP2_FAST_BOOT the seconds count from the arrival at the main menu
     static const std::string spec = [] { const char* e = getenv("HP2_PRESS"); return std::string(e ? e : ""); }();
-    if (!spec.empty()) {
+    std::uint64_t scriptTime = 0;
+    if (!spec.empty() && ScriptTime(scriptTime)) {
       struct NamedBit { const char* name; unsigned bit; };
       static const NamedBit names[] = {{"select", 1}, {"start", 8}, {"up", 0x10}, {"right", 0x20}, {"down", 0x40}, {"left", 0x80}, {"l2", 0x100}, {"r2", 0x200},
                                                                     {"l1", 0x400}, {"r1", 0x800}, {"triangle", 0x1000}, {"circle", 0x2000}, {"cross", 0x4000}, {"square", 0x8000}};
-      const double now = static_cast<double>(g_vblanks) / 59.94;
+      const double now = static_cast<double>(scriptTime) / 59.94;
       for (std::size_t i = 0; i < spec.size();) {
         const std::size_t end = spec.find(',', i), stop = end == std::string::npos ? spec.size() : end;
         const std::string item = spec.substr(i, stop - i);
@@ -1228,6 +1255,51 @@ void PadPoll() {
     static const int dumpEvery = [] { const char* e = getenv("HP2_DUMP_EVERY"); return e ? atoi(e) : 0; }();
     if (dumpEvery > 0 && g_vblanks % static_cast<std::uint64_t>(dumpEvery * 60) == 0) gs::DumpFrame((".cache/native/frame_" + std::to_string(g_vblanks / 60) + ".bmp").c_str());
   }
+  {  // tests: HP2_DUMP_AT="130,176.5" game frame at those game seconds (at_<s>.bmp); HP2_SHOT_AT: the window picture (shot_<s>.bmp)
+    struct At { std::uint64_t vblank; std::string name; bool window; };
+    static const std::vector<At> at = [] {
+      std::vector<At> list;
+      for (const char* var : {"HP2_DUMP_AT", "HP2_SHOT_AT"}) {
+        const char* e = getenv(var);
+        for (std::string item; e && *e; ++e) {
+          if (*e != ',') item += *e;
+          if (*e == ',' || !e[1]) {
+            if (!item.empty()) list.push_back({static_cast<std::uint64_t>(atof(item.c_str()) * 60000.0 / 1001.0),
+                                               std::string(var[4] == 'D' ? ".cache/native/at_" : ".cache/native/shot_") + item + ".bmp", var[4] == 'S'});
+            item.clear();
+          }
+        }
+      }
+      return list;
+    }();
+    std::uint64_t now = 0;
+    if (ScriptTime(now))
+      for (const At& a : at)
+        if (a.vblank == now) {
+        if (a.window) gs::RequestWindowShot(a.name.c_str());
+        else gs::DumpFrame(a.name.c_str());
+      }
+  }
+  if (g_vblanks % 600 == 300) {  // menu text: the console-only "Calibrate Display Offset" item opens the graphics settings
+    static const struct { const char* from; const char* to; } kText[] = {
+        {"Calibrate Display Offset", "Graphics Settings"},
+        {"Adjust the picture's alignment", "Display and picture settings."},
+    };
+    for (const auto& t : kText) {
+      const std::size_t n = strlen(t.from);
+      std::uint8_t* const end = g_ram + kNativeRamSize - n - 128;
+      for (std::uint8_t* p = g_ram; p < end; ++p) {
+        p = static_cast<std::uint8_t*>(memchr(p, t.from[0], static_cast<std::size_t>(end - p)));
+        if (!p) break;
+        if (memcmp(p, t.from, n) != 0) continue;
+        std::size_t len = n;  // the whole original string, up to its terminator
+        while (len < 128 && p[len]) ++len;
+        memset(p, 0, len);
+        memcpy(p, t.to, std::min(strlen(t.to), len));
+        LogOnce(t.from, "menu text at %08X: \"%s\" -> \"%s\"", static_cast<unsigned>(p - g_ram), t.from, t.to);
+      }
+    }
+  }
   if (g_vblanks % 600 == 0) {  // speed: refreshes per real second over the last 600 (60 = full speed)
     static LARGE_INTEGER last = {};
     LARGE_INTEGER now;
@@ -1236,8 +1308,37 @@ void PadPoll() {
                            600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart));
     last = now;
   }
+  {  // tests (HP2_FAST_BOOT=1): Start pulses skip the intro movie and accept the title; the main menu is up at ~50 s of game
+    if (g_fastBoot && !g_menuMusic) {  // time instead of ~150 s: pulses every 4 s from 8 s until the menus' music starts
+      const double t = static_cast<double>(g_vblanks) * 1001.0 / 60000.0;
+      if (t >= 8.0 && t - 4.0 * std::floor(t / 4.0) < 0.3) pressed |= 0x0008;
+    }
+    if (g_fastBoot && g_menuMusic && !g_timeBase) {
+      g_timeBase = g_vblanks;
+      Log("fast boot: main menu reached at game second %.1f; scripted times count from here", static_cast<double>(g_vblanks) * 1001.0 / 60000.0);
+    }
+  }
   gs::OverlayPad(static_cast<std::uint16_t>(pressed));  // settings overlay (Select+Start opens it); the game gets no input while it is open
-  if (gs::OverlayVisible()) pressed = 0;
+  {
+    static bool wasVisible = false, swallow = false, pendingConfirm = false;
+    static int confirm = 0;  // vblanks of Cross still to send to the calibration screen
+    const bool visible = gs::OverlayVisible();
+    if (wasVisible && !visible) {
+      swallow = true;  // the button that closed the settings must not reach the game
+      if (g_calibrateScreen) pendingConfirm = true;
+    }
+    wasVisible = visible;
+    if (visible) pressed = 0;
+    if (swallow) {
+      if (pressed == 0) swallow = false;
+      pressed = 0;
+    }
+    if (!swallow && pendingConfirm) {  // then a fresh Cross: the calibration screen closes and the game returns to Display
+      pendingConfirm = false;
+      confirm = 12;
+    }
+    if (confirm > 0) pressed = (--confirm < 6) ? 0x4000 : 0;
+  }
   if (static_cast<std::uint16_t>(~pressed) != g_padButtons) {  // log each change of the button mask (0 = pressed)
     static int logged = 0;
     if (logged++ < 60) Log("pad: vblank %llu buttons %04X -> %04X (ports opened: %llu)", static_cast<unsigned long long>(g_vblanks), g_padButtons, static_cast<std::uint16_t>(~pressed), static_cast<unsigned long long>(g_padOpens));
@@ -1281,6 +1382,38 @@ std::map<std::uint64_t, std::uint64_t> g_rpcCount;   // (server, function) -> ca
 
 void Hook(NativeState& s) {
   const std::uint32_t pc = s.pc;
+  if (pc == kHookCalibrateScreen) {  // (event, item): the game's results, with the graphics settings instead of centring
+    // Events (measured): opening 11 (item), 2, 4; every frame 18 and 19 (19 draws the instructions box: 0021E560 text,
+    // 001451E0 box); 6-9 the directional buttons (offsets), 1 Cross and 14 cancel (item+12 = 5 closes the screen), 17 kind.
+    const std::uint32_t ev = A(s, 0), item = A(s, 1), gp = static_cast<std::uint32_t>(s.gpr[28][0]);
+    Wr<std::uint32_t>(item + 12, 0);
+    Ret(s, 0);
+    switch (ev) {
+      case 11:  // the screen opens: the graphics settings instead of the centring
+        Wr<std::uint32_t>(gp - 13356, Rd<std::uint32_t>(item));
+        if (!g_calibrateScreen) {
+          g_calibrateScreen = true;
+          gs::OpenSettings();
+          Log("menu: Options > Display > Graphics Settings opened (vblank %llu)", static_cast<unsigned long long>(g_vblanks));
+        }
+        break;
+      case 1:  // Cross (sent by the runtime when the settings close): the game's "back" (00170320(1)), as a tail call
+        Wr<std::uint32_t>(item + 12, 5);
+        g_calibrateScreen = false;
+        Log("menu: Graphics Settings closed, back to Display (vblank %llu)", static_cast<unsigned long long>(g_vblanks));
+        s.gpr[4][0] = 1;
+        s.pc = 0x00170320;  // returns straight to the caller of the handler
+        return;
+      case 14:  // cancel (the frontend goes back by itself)
+        Wr<std::uint32_t>(item + 12, 5);
+        g_calibrateScreen = false;
+        break;
+      case 17: Wr<std::uint32_t>(item + 12, 6); break;
+      default: break;  // 19: no instructions box; 6-9: the display offsets stay as they are
+    }
+    s.pc = static_cast<std::uint32_t>(s.gpr[31][0]);
+    return;
+  }
   if (pc == kHookSifInitRpc || pc == 0x0028511C) {  // sceSifInitRpc(mode)
     Wr<std::uint32_t>(0x00327F7C, 1);
     LogOnce("sifinit", "io: sceSifInitRpc served by the runtime (no I/O processor to wait for)");
@@ -1402,19 +1535,6 @@ void Hook(NativeState& s) {
     Ret(s, FileSeek(static_cast<int>(A(s, 0)), static_cast<std::int32_t>(A(s, 1)), static_cast<int>(A(s, 2))));
   } else if (pc == kHookRead) {  // sceRead(fd, buffer, size)
     Ret(s, FileRead(static_cast<int>(A(s, 0)), A(s, 1), A(s, 2)));
-  } else if (pc == kHookCalibrateDisplay) {  // menu item handler (event, item): same results as the game's, but
-    const std::uint32_t ev = A(s, 0), item = A(s, 1);  // activation (19) opens the native graphics settings
-    Wr<std::uint32_t>(item + 12, ev == 17 ? 6u : 0u);
-    std::int32_t v = ev == 17 ? 6 : ev < 18 ? 11 : 19;
-    if (ev == 11) {
-      v = static_cast<std::int32_t>(Rd<std::uint32_t>(item));
-      Wr<std::uint32_t>(static_cast<std::uint32_t>(s.gpr[28][0]) - 13360, static_cast<std::uint32_t>(v));
-    }
-    if (ev == 19) {
-      gs::OpenSettings();
-      v = 0;
-    }
-    Ret(s, v);
   } else {  // sceSifCheckStatRpc(client): never busy, calls complete at once
     Ret(s, 0);
   }
@@ -1425,6 +1545,12 @@ void Hook(NativeState& s) {
 void Step(NativeState& s) {
   ++g_steps;
   const std::uint32_t pc = s.pc;
+  // hooks first: a hooked function may still be in the package as an entry inside a neighbouring function
+  for (std::uint32_t hook : kNativeHooks)
+    if (pc == hook) {
+      Hook(s);
+      return;
+    }
   if (void* code = FindCode(pc)) {
     s.cycle_quota = kSliceQuota;
     g_lastEntry = pc;
@@ -1443,11 +1569,6 @@ void Step(NativeState& s) {
     }
     return;
   }
-  for (std::uint32_t hook : kNativeHooks)
-    if (pc == hook) {
-      Hook(s);
-      return;
-    }
   if (!InRam(pc)) {
     Stop("execution reached %08X, outside memory (called from %08X)", pc, static_cast<std::uint32_t>(s.gpr[31][0]));
     return;
@@ -1487,9 +1608,10 @@ int wmain(int argc, wchar_t** argv) {
       if (a == L"--rom" && i + 1 < argc) rom = argv[++i];
       else if (a == L"--code" && i + 1 < argc) dll = argv[++i];
       else if (a == L"--seconds" && i + 1 < argc) seconds = _wtof(argv[++i]);
+      else if (a == L"--until" && i + 1 < argc) g_untilVblank = static_cast<std::uint64_t>(_wtof(argv[++i]) * 60000.0 / 1001.0);
       else if (a == L"--verbose") g_verbose = true;
       else {
-        printf("HotPursuit2Native [--rom <folder>] [--code <hp2code.dll>] [--seconds <n>]\n");
+        printf("HotPursuit2Native [--rom <folder>] [--code <hp2code.dll>] [--seconds <real s>] [--until <game s>]\n");
         return 2;
       }
     }
@@ -1518,7 +1640,14 @@ int wmain(int argc, wchar_t** argv) {
         mc::SetRoot(saves);
         Log("Memory card: %s", (saves / L"mc0").string().c_str());
       }
-      if (!std::getenv("HP2_MUTE")) Log("Audio: %s", audio::Init() ? "XAudio2 ready (music stream)" : audio::LastError());
+      if (const char* t = std::getenv("HP2_TURBO")) {  // tests: faster than real time (silent)
+        g_turboMax = std::string(t) == "max";
+        g_turbo = g_turboMax ? 8.0 : std::max(1.0, atof(t));
+        if (const char* u = std::getenv("HP2_TURBO_UNTIL"))  // game seconds, or "menu" (the main menu's arrival)
+          g_turboUntil = std::string(u) == "menu" ? ~0ull : static_cast<std::uint64_t>(atof(u) * 60000.0 / 1001.0);
+        Log("Turbo: refreshes x%.0f%s (no audio)", g_turbo, g_turboMax ? " and as soon as the game waits" : "");
+      }
+      if (!std::getenv("HP2_MUTE") && g_turbo == 1.0) Log("Audio: %s", audio::Init() ? "XAudio2 ready (music stream)" : audio::LastError());
     }
 
     // ---- the translated code ----
@@ -1529,7 +1658,8 @@ int wmain(int argc, wchar_t** argv) {
       fail("'{}' is not a code package of this version", to_utf8(dll));
     if (g_table->layout_fingerprint != code_layout_fingerprint(native_code_layout()))
       fail("the code package was not built for the native runtime (hp2recomp package)");
-    {
+    for (std::uint32_t hook : kNativeHooks)
+      if (FindCode(hook)) Log("hook %08X also has translated code in the package (the runtime's version is used)", hook);    {
       Sha256 h;
       h.update(file);
       const auto digest = h.finish();
@@ -1584,7 +1714,8 @@ int wmain(int argc, wchar_t** argv) {
           Stop("every game thread has ended");
           break;
         }
-        Sleep(1);  // all threads wait: until the next interrupt
+        if (g_turboMax) g_nextVblank.QuadPart = 0;  // tests: nothing to run, the next refresh is due now
+        else Sleep(1);                             // all threads wait: until the next interrupt
       } else {
         rotate = static_cast<std::size_t>(best->id) + 1;
         g_current = best;

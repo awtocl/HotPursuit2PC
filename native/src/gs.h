@@ -37,6 +37,8 @@ void OverlayPad(std::uint16_t pressed);
 void OpenSettings();
 // Development: writes the last presented frame as a BMP file (kept out of git: .cache).
 bool DumpFrame(const char* path);
+// Development: the next picture the window shows (post-processing and settings menu included) as a BMP file.
+void RequestWindowShot(const char* path);
 
 struct Stats {
   std::uint64_t triangles = 0, sprites = 0, lines = 0, points = 0, pixels = 0, textured = 0, transfers = 0, transferBytes = 0, frames = 0;
