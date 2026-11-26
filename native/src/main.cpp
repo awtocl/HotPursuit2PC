@@ -24,6 +24,7 @@
 #include <algorithm>
 
 #include "virtual_disc.h"
+#include "gs.h"
 #include <set>
 #include <string>
 #include <vector>
@@ -192,6 +193,7 @@ struct GifStream {  // streaming decoder: packets may continue across calls
 
 void GsRegWrite(std::uint32_t reg, std::uint64_t value) {
   reg &= 0x7F;
+  gs::RegWrite(reg, value);
   g_gsReg[reg] = value;
   ++g_gsRegCount[reg];
   if (reg == 0x00) ++g_gsPrims;                                     // PRIM
@@ -205,7 +207,7 @@ void GifFeed(int path, const std::uint8_t* d, std::size_t bytes) {
     std::uint64_t lo, hi;
     memcpy(&lo, d + pos, 8);
     memcpy(&hi, d + pos + 8, 8);
-    if (g.imageLeft) { --g.imageLeft; g_gifImageBytes += 16; continue; }
+    if (g.imageLeft) { --g.imageLeft; g_gifImageBytes += 16; gs::ImageData(d + pos, 16); continue; }
     if (g.nloop == 0) {  // a new tag
       g.nloop = lo & 0x7FFF;
       g.eop = ((lo >> 15) & 1) != 0;
@@ -233,7 +235,7 @@ void GifFeed(int path, const std::uint8_t* d, std::size_t bytes) {
       switch (reg) {
         case 0: GsRegWrite(0x00, lo & 0x7FF); break;
         case 1: GsRegWrite(0x01, (w[0] & 0xFFull) | ((w[1] & 0xFFull) << 8) | ((w[2] & 0xFFull) << 16) | ((w[3] & 0xFFull) << 24)); break;
-        case 2: GsRegWrite(0x02, lo); break;
+        case 2: GsRegWrite(0x02, lo); gs::StQ(w[0], w[1], w[2]); break;
         case 3: GsRegWrite(0x03, (w[0] & 0x3FFFull) | ((w[1] & 0x3FFFull) << 16)); break;
         case 4: GsRegWrite((w[3] & 0x8000) ? 0x0C : 0x04, xy | (((w[2] >> 4) & 0xFFFFFFull) << 32) | (((w[3] >> 4) & 0xFFull) << 56)); break;
         case 5: GsRegWrite((w[3] & 0x8000) ? 0x0D : 0x05, xy | (static_cast<std::uint64_t>(w[2]) << 32)); break;
@@ -496,6 +498,7 @@ void HwWrite(std::uint8_t*, std::uint32_t address, std::uint64_t value, std::uin
     memcpy(p, &value, size > 8 ? 8 : size);
     return;
   }
+  if (a >= 0x12000000 && a < 0x12001000) gs::PrivWrite(a, value);
   switch (a) {
     case 0x1000F000: g_intcStat &= ~v; return;
     case 0x1000F010: g_intcMask ^= v; return;
@@ -606,6 +609,8 @@ void DeliverInterrupts() {
     g_nextVblank.QuadPart += g_qpf.QuadPart * 1001 / 60000;
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
+    gs::Present();
+    if (gs::WindowClosed()) Stop("the window was closed");
     if (g_vsyncFlag1) Wr<std::uint32_t>(g_vsyncFlag1, 1);
     if (g_vsyncFlag2) Wr<std::uint64_t>(g_vsyncFlag2, (g_vblanks & 1) << 13);
     for (std::uint32_t cause : {2u, 3u}) {  // vertical blank start, end
@@ -1274,6 +1279,8 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(g_discReads));
     Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
         static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
+    gs::DumpFrame(".cache/native/frame.bmp");
+    { const gs::Stats& g = gs::GetStats(); Log("  GS: %llu frames shown, %llu triangles, %llu sprites, %llu pixels (%llu textured), %llu transfers (%llu bytes), %llu unsupported", static_cast<unsigned long long>(g.frames), static_cast<unsigned long long>(g.triangles), static_cast<unsigned long long>(g.sprites), static_cast<unsigned long long>(g.pixels), static_cast<unsigned long long>(g.textured), static_cast<unsigned long long>(g.transfers), static_cast<unsigned long long>(g.transferBytes), static_cast<unsigned long long>(g.unsupported)); }
     Log("  GIF: %llu tags, %llu image bytes, %llu PRIM writes, %llu vertices (%llu kicks)", static_cast<unsigned long long>(g_gifTags),
         static_cast<unsigned long long>(g_gifImageBytes), static_cast<unsigned long long>(g_gsPrims),
         static_cast<unsigned long long>(g_gsVertices), static_cast<unsigned long long>(g_gsKicks));
