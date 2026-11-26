@@ -1037,9 +1037,11 @@ void PadWrite(const PadPort& p, int index) {  // fill struct `index` of the pad 
   std::uint8_t* b = g_ram + Phys(p.address) + static_cast<std::size_t>(index) * (p.type == 0 ? 0x40 : 0x80);
   const std::size_t data = p.type == 2 ? 0 : 8;
   b[data + 0] = 0;
-  b[data + 1] = 0x70;  // DualShock mode
-  b[data + 2] = static_cast<std::uint8_t>(g_padButtons >> 8);
-  b[data + 3] = static_cast<std::uint8_t>(g_padButtons);
+  b[data + 1] = 0x79;  // DualShock 2 in pressure mode: id 7, 9 halfwords (buttons, 4 axes, 12 pressures), as the real padman reports
+  // libpad reads bytes 2-3 as a little-endian u16 in its own bit order (0x0008 START ... 0x4000 CROSS), the order of g_padButtons:
+  // byte 2 = select, L3, R3, start, up, right, down, left; byte 3 = L2, R2, L1, R1, triangle, circle, cross, square
+  b[data + 2] = static_cast<std::uint8_t>(g_padButtons);
+  b[data + 3] = static_cast<std::uint8_t>(g_padButtons >> 8);
   for (int i = 0; i < 4; ++i) b[data + 4 + i] = g_padAxes[i];
   {  // pressure bytes (DualShock): right, left, up, down, triangle, circle, cross, square, L1, R1, L2, R2: 0xFF while pressed
     static const std::uint16_t order[12] = {0x20, 0x80, 0x10, 0x40, 0x1000, 0x2000, 0x4000, 0x8000, 0x400, 0x800, 0x100, 0x200};
@@ -1065,7 +1067,11 @@ void PadOpen(int port, std::uint32_t address) {
     const std::uint32_t frame = static_cast<std::uint32_t>(i), n = 32;
     memcpy(b + (type == 2 ? 0x58 : 0), &frame, 4);
     memcpy(b + len, &n, 4);
-    if (type == 2) { b[0x65] = 0x70; b[0x68] = 4; b[0x69] = 0; const std::uint16_t m = 7; memcpy(b + 0x50, &m, 2); }
+    if (type == 2) {  // mode info as the real padman leaves it (reference RAM): current id 0x79, modes {4 digital, 7 DualShock}, current offset 1
+      b[0x65] = 0x79; b[0x68] = 2; b[0x69] = 1;
+      const std::uint16_t m[2] = {4, 7};
+      memcpy(b + 0x50, m, 4);
+    }
   }
   PadWrite(g_pad[port], 0);
   PadWrite(g_pad[port], 1);
@@ -1151,6 +1157,16 @@ void PadPoll() {
   if (static_cast<std::uint16_t>(~pressed) != g_padButtons) {  // log each change of the button mask (0 = pressed)
     static int logged = 0;
     if (logged++ < 60) Log("pad: vblank %llu buttons %04X -> %04X (ports opened: %llu)", static_cast<unsigned long long>(g_vblanks), g_padButtons, static_cast<std::uint16_t>(~pressed), static_cast<unsigned long long>(g_padOpens));
+  }
+  if (pressed && g_vblanks % 10 == 0) {  // diagnostic while a button is held: newest ring entry of port 0 and the player's device state
+    static int logged = 0;
+    const std::uint32_t w = Rd<std::uint32_t>(0x0032FBF0), e = 0x002DE640u + ((w - 1) & 31) * 84;  // gp-23808 = ring write index
+    const std::uint32_t replay = Rd<std::uint32_t>(0x00330148);                                      // gp-22440: replay object (pads skipped if +32 != 0)
+    if (logged++ < 40)
+      Log("pad: vblank %llu ring w %u r %u entry %02X %02X %02X %02X +36 %d; player type %X/%X n %d listeners %08X; replay %08X(+32 %u)",
+          static_cast<unsigned long long>(g_vblanks), w, Rd<std::uint32_t>(0x0032FBF4), Rd<std::uint8_t>(e), Rd<std::uint8_t>(e + 1), Rd<std::uint8_t>(e + 2),
+          Rd<std::uint8_t>(e + 3), static_cast<int>(Rd<std::uint32_t>(e + 36)), Rd<std::uint32_t>(0x002F95EC), Rd<std::uint32_t>(0x002F95F0),
+          static_cast<int>(Rd<std::uint32_t>(0x002F95F4)), Rd<std::uint32_t>(0x002F9530), replay, replay && InRam(replay, 64) ? Rd<std::uint32_t>(replay + 32) : 0u);
   }
   if (g_vblanks % 1800 == 0 && g_pad[0].address && InRam(g_pad[0].address, 0x100)) {  // diagnostic: does the game touch the pad area?
     const std::uint8_t* b = g_ram + Phys(g_pad[0].address);
@@ -1484,6 +1500,9 @@ int wmain(int argc, wchar_t** argv) {
     Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
         static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
     gs::DumpFrame(".cache/native/frame.bmp");
+    if (std::getenv("HP2_DUMP_RAM")) {  // diagnostic: EE RAM at the end of the run, same layout as the reference launcher's ee-ram.bin
+      if (FILE* f = nullptr; fopen_s(&f, ".cache/native/ee-ram.bin", "wb") == 0 && f) { fwrite(g_ram, 1, kNativeRamSize, f); fclose(f); }
+    }
     { const gs::Stats& g = gs::GetStats(); Log("  GS: %llu frames shown, %llu triangles, %llu sprites, %llu pixels (%llu textured), %llu transfers (%llu bytes), %llu unsupported", static_cast<unsigned long long>(g.frames), static_cast<unsigned long long>(g.triangles), static_cast<unsigned long long>(g.sprites), static_cast<unsigned long long>(g.pixels), static_cast<unsigned long long>(g.textured), static_cast<unsigned long long>(g.transfers), static_cast<unsigned long long>(g.transferBytes), static_cast<unsigned long long>(g.unsupported)); }
     Log("  GIF: %llu tags, %llu image bytes, %llu PRIM writes, %llu vertices (%llu kicks)", static_cast<unsigned long long>(g_gifTags),
         static_cast<unsigned long long>(g_gifImageBytes), static_cast<unsigned long long>(g_gsPrims),

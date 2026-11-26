@@ -3,6 +3,12 @@ ROM/
 game/
 *.iso
 *.ISO
+*.cue
+*.chd
+*.cso
+*.img
+*.mdf
+SLUS_*
 *.bin
 *.BIN
 *.elf

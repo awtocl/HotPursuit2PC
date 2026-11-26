@@ -4,6 +4,20 @@
 game/
 *.iso
 *.ISO
+# other disc images, the game executable and memory dumps (copyrighted, user-supplied only)
+*.cue
+*.chd
+*.cso
+*.img
+*.mdf
+*.mds
+*.nrg
+*.ecm
+SLUS_*
+ee-ram.bin
+ee-bios.bin
+rpc.bin
+dumps/
 
 # --- local notes that predate the repo (kept in place, superseded by docs/) --
 /Build prompt - Claude Fable 5.2.md
