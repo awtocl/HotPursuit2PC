@@ -1,5 +1,8 @@
 #include "gs.h"
 
+#include "overlay.h"
+#include "present.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -271,13 +274,99 @@ std::atomic<bool> g_closed{false};
 std::atomic<int> g_scalePercent{100};
 HWND g_hwnd = nullptr;
 std::thread g_windowThread;
+std::uint64_t g_frameSeq = 0;                                       // bumped by Present (under g_frameMutex)
+HANDLE g_frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // wakes the window thread for a new frame
+std::atomic<bool> g_d3dActive{false};                               // the D3D11 presenter draws (else GDI WM_PAINT)
+constexpr UINT kPadMessage = WM_APP + 1;                            // wParam: newly pressed pad buttons, bit 16 = menu toggle
+// window thread only
+ui::Settings g_settings;
+bool g_overlayDirty = true, g_redraw = true;
+std::vector<u32> g_overlayPixels;
+int g_overlayW = 0, g_overlayH = 0;
+RECT g_windowedRect = {};
+
+void ApplyDisplayMode(HWND h) {  // borderless full screen on the window's monitor, or back to the remembered window
+  const LONG style = GetWindowLongW(h, GWL_STYLE);
+  if (g_settings.fullscreen && (style & WS_OVERLAPPEDWINDOW)) {
+    GetWindowRect(h, &g_windowedRect);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof mi;
+    GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+    SetWindowLongW(h, GWL_STYLE, (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+    SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+  } else if (!g_settings.fullscreen && !(style & WS_OVERLAPPEDWINDOW)) {
+    SetWindowLongW(h, GWL_STYLE, (style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
+    SetWindowPos(h, nullptr, g_windowedRect.left, g_windowedRect.top, g_windowedRect.right - g_windowedRect.left,
+                 g_windowedRect.bottom - g_windowedRect.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+  }
+}
+void SettingsChanged(HWND h) {
+  ui::Save(g_settings);
+  ApplyDisplayMode(h);
+  g_overlayDirty = g_redraw = true;
+}
+void MenuInput(HWND h, ui::Input in) {
+  if (ui::Navigate(in, g_settings)) SettingsChanged(h);
+  g_overlayDirty = g_redraw = true;
+}
+void ToggleMenu() {
+  if (!g_d3dActive) return;  // the menu needs the D3D11 presenter
+  ui::Toggle();
+  g_overlayDirty = g_redraw = true;
+}
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch (m) {
     case WM_CLOSE: g_closed = true; DestroyWindow(h); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_ERASEBKGND: return 1;
+    case WM_SIZE:
+      if (g_d3dActive) present::Resize();
+      g_overlayDirty = g_redraw = true;
+      return 0;
+    case WM_SYSKEYDOWN:
+      if (w == VK_RETURN && (l & (1 << 29))) {  // Alt+Enter
+        g_settings.fullscreen ^= 1;
+        SettingsChanged(h);
+        return 0;
+      }
+      break;
+    case WM_KEYDOWN:
+      switch (w) {
+        case VK_F1: ToggleMenu(); return 0;
+        case VK_F11: g_settings.fullscreen ^= 1; SettingsChanged(h); return 0;
+        default: break;
+      }
+      if (ui::Visible()) {
+        switch (w) {
+          case VK_UP: MenuInput(h, ui::Input::Up); return 0;
+          case VK_DOWN: MenuInput(h, ui::Input::Down); return 0;
+          case VK_LEFT: MenuInput(h, ui::Input::Left); return 0;
+          case VK_RIGHT: MenuInput(h, ui::Input::Right); return 0;
+          case VK_RETURN: case VK_SPACE: MenuInput(h, ui::Input::Accept); return 0;
+          case VK_ESCAPE: case VK_BACK: MenuInput(h, ui::Input::Back); return 0;
+          default: break;
+        }
+      }
+      break;
+    case kPadMessage:
+      if (w & 0x10000) { ToggleMenu(); return 0; }
+      if (ui::Visible()) {
+        if (w & 0x0010) MenuInput(h, ui::Input::Up);
+        if (w & 0x0040) MenuInput(h, ui::Input::Down);
+        if (w & 0x0080) MenuInput(h, ui::Input::Left);
+        if (w & 0x0020) MenuInput(h, ui::Input::Right);
+        if (w & 0x4000) MenuInput(h, ui::Input::Accept);
+        if (w & 0x2000) MenuInput(h, ui::Input::Back);
+      }
+      return 0;
     case WM_PAINT: {
+      if (g_d3dActive) {
+        ValidateRect(h, nullptr);
+        g_redraw = true;
+        return 0;
+      }
       PAINTSTRUCT ps;
       HDC dc = BeginPaint(h, &ps);
       RECT rc;
@@ -297,8 +386,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       EndPaint(h, &ps);
       return 0;
     }
-    default: return DefWindowProcW(h, m, w, l);
+    default: break;
   }
+  return DefWindowProcW(h, m, w, l);
 }
 
 void WindowThread() {
@@ -308,15 +398,70 @@ void WindowThread() {
   wc.lpszClassName = L"HP2NativeWindow";
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   RegisterClassW(&wc);
-  RECT r = {0, 0, 640 * g_scalePercent / 100 * 1, 448 * g_scalePercent / 100 * 1};
-  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-  g_hwnd = CreateWindowW(L"HP2NativeWindow", L"Need for Speed: Hot Pursuit 2 - native runtime (development)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                         CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
-  MSG msg;
-  while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-    TranslateMessage(&msg);
-    DispatchMessageW(&msg);
+  g_settings = ui::Load();
+  RECT r = {0, 0, 640 * g_scalePercent / 100, 480 * g_scalePercent / 100};
+  if (g_scalePercent == 100) {  // default: 4:3 at 80% of the primary monitor's work area height
+    RECT work = {};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) && work.bottom - work.top > 600) {
+      r.bottom = (work.bottom - work.top) * 8 / 10;
+      r.right = r.bottom * 4 / 3;
+    }
   }
+  AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+  g_hwnd = CreateWindowW(L"HP2NativeWindow", L"Need for Speed: Hot Pursuit 2 - native runtime (development)   [F1 settings]",
+                         WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr,
+                         wc.hInstance, nullptr);
+  g_d3dActive = !std::getenv("HP2_GDI") && present::Init(g_hwnd);
+  ApplyDisplayMode(g_hwnd);
+  if (g_d3dActive && std::getenv("HP2_MENU")) ui::Toggle();  // development: start with the settings menu open
+  const char* shotEnv = std::getenv("HP2_PRESENT_SHOT");     // development: back buffer to .cache/native/present.bmp after N frames
+  std::uint64_t shotAt = shotEnv ? std::strtoull(shotEnv, nullptr, 10) : 0, drawn = 0;
+  std::vector<u32> frame;
+  int fw = 0, fh = 0;
+  std::uint64_t seen = 0;
+  for (;;) {
+    MsgWaitForMultipleObjects(1, &g_frameEvent, FALSE, 50, QS_ALLINPUT);
+    MSG msg;
+    bool quit = false;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+      if (msg.message == WM_QUIT) { quit = true; break; }
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+    if (quit) break;
+    if (!g_d3dActive) continue;
+    bool changed = false;
+    {
+      std::lock_guard<std::mutex> lock(g_frameMutex);
+      if (g_frameSeq != seen && !g_frame.empty()) {
+        frame = g_frame;
+        fw = g_frameW;
+        fh = g_frameH;
+        seen = g_frameSeq;
+        changed = true;
+      }
+    }
+    const bool menu = ui::Visible();
+    bool menuChanged = false;
+    if (menu && g_overlayDirty) {
+      RECT rc = {};
+      GetClientRect(g_hwnd, &rc);
+      if (ui::Render(g_settings, rc.right, rc.bottom, g_overlayPixels)) {
+        g_overlayW = rc.right;
+        g_overlayH = rc.bottom;
+        menuChanged = true;
+      }
+      g_overlayDirty = false;
+    }
+    if (changed || menuChanged || g_redraw) {
+      if (shotAt && ++drawn == shotAt) present::RequestShot(".cache/native/present.bmp");
+      present::Draw(frame.empty() ? nullptr : frame.data(), fw, fh, changed, menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr,
+                    g_overlayW, g_overlayH, menuChanged, g_settings);
+      g_redraw = false;
+    }
+  }
+  if (g_d3dActive) present::Shutdown();
+  g_d3dActive = false;
   g_closed = true;
 }
 
@@ -927,9 +1072,11 @@ void Present() {
     g_frame.swap(img);
     g_frameW = static_cast<int>(w);
     g_frameH = static_cast<int>(h);
+    ++g_frameSeq;
   }
   ++g_stats.frames;
-  if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+  if (g_d3dActive) SetEvent(g_frameEvent);
+  else if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 bool DumpFrame(const char* path) {
@@ -950,6 +1097,15 @@ bool DumpFrame(const char* path) {
 }
 bool WindowClosed() { return g_closed; }
 bool WindowFocused() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
+bool OverlayVisible() { return ui::Visible(); }
+void OverlayPad(std::uint16_t pressed) {  // emulation thread: newly pressed buttons go to the window thread as a message
+  static std::uint16_t previous = 0;
+  const std::uint16_t edges = static_cast<std::uint16_t>(pressed & ~previous);
+  previous = pressed;
+  if (!edges || !g_hwnd) return;
+  const bool toggle = (pressed & 0x0009) == 0x0009 && (edges & 0x0009);  // Select + Start
+  PostMessageW(g_hwnd, kPadMessage, toggle ? 0x10000 : edges, 0);
+}
 const Stats& GetStats() { return g_stats; }
 void SetWindowScale(int percent) { g_scalePercent = percent; }
 

@@ -1000,7 +1000,14 @@ int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
 // EA's streamer (IOP server 00012345, function 0): a batch of 16-bit commands [count][id, nargs, args...]... in,
 // a status block out. Modelled from the reference core's traffic (docs/recomp-analysis.md section 18): word 1 counts the
 // batches, word 2 is -1, word 4 holds the result of the last command 0x0E ((a0 << 16) | a1) and, once command 0x34 has
-// been seen, words 66-70 describe two buffers. Streams (word 0 > 0) are not modelled yet: no sound.
+// been seen, words 66-70 describe two buffers.
+// Streams: word 0 = N playing streams, then 6 words each (parsed by the game at 0026B8C0): e1 = volume << 16 | voice << 10 |
+// stream << 4 | buffer half << 2 | error, e2 = SPU play address, e3 bit 31 = playing, e4 = link byte, e5 = SPU buffer base,
+// e6 = buffer wraps << 16; the words above follow at 6N + 1. A stream missing from a reply counts as finished, so the music
+// player skipped to the next track every frame. Modelled (reference rpc.bin): commands 01/2C start stream 0 on voices
+// 2E/2F (PS-ADPCM, pitch 0x0AC7 = 32332 Hz, 0x10000-byte ring per voice at 0x5010/0x15010), command 05 stops it.
+// No audio is produced yet: the play position advances in game time (vblanks).
+struct StreamerMusic { bool active = false; std::uint64_t start = 0; std::uint16_t voice[2] = {0x2E, 0x2F}; } g_music;
 void StreamerService(std::uint32_t send, std::uint32_t recv) {
   static std::uint32_t batch = 0, result = 0, buf = 0;
   static bool have34 = false;
@@ -1013,17 +1020,47 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
       have34 = true;
       buf = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
     }
+    if (id == 0x01 && na >= 2 && c[i + 2] == 0) {  // stream 0 (music), first voice
+      g_music.active = true;
+      g_music.start = g_vblanks;
+      g_music.voice[0] = c[i + 3];
+    }
+    if (id == 0x2C && na >= 2 && (c[i + 2] & 0xFF) == 0) g_music.voice[1] = c[i + 3];  // second voice of stream 0
+    if (id == 0x05 && na >= 1 && c[i + 2] == 0) g_music.active = false;
+    if ((id == 0x01 || id == 0x05 || id == 0x1E) && c[i + 2] == 0) {
+      static int logged = 0;
+      if (logged++ < 80) Log("streamer: vblank %llu cmd %02X stream 0 args %04X %04X %04X %04X", static_cast<unsigned long long>(g_vblanks), id,
+                             na > 1 ? c[i + 3] : 0, na > 2 ? c[i + 4] : 0, na > 6 ? c[i + 8] : 0, na > 7 ? c[i + 9] : 0);
+    }
     i += 2u + na;
   }
   std::uint32_t* w = reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv));
-  w[1] = ++batch;
-  w[2] = 0xFFFFFFFFu;
-  w[4] = result;
+  std::uint32_t t = 1;  // first word after the stream entries
+  if (g_music.active) {
+    const std::uint64_t bytes = (g_vblanks - g_music.start) * 32332ull * 16 / 28 * 1001 / 60000;  // 32332 Hz PS-ADPCM, 59.94 Hz
+    const std::uint32_t pos = static_cast<std::uint32_t>(bytes & 0xFFFF), wraps = static_cast<std::uint32_t>(bytes >> 16);
+    w[0] = 2;
+    for (std::uint32_t ch = 0; ch < 2; ++ch) {
+      std::uint32_t* e = w + 1 + ch * 6;
+      e[0] = 0x7FFF0000u | (static_cast<std::uint32_t>(g_music.voice[ch] & 0x3F) << 10) | (ch << 4) | (pos >= 0x8000 ? 4u : 0u);
+      e[1] = 0x5010u + ch * 0x10000u + pos;
+      e[2] = ch == 0 ? 0x80000000u : 0;
+      e[3] = 0;
+      e[4] = 0x5010u + ch * 0x10000u;
+      e[5] = ch == 0 ? wraps << 16 : 0;
+    }
+    t = 13;
+  } else {
+    w[0] = 0;
+  }
+  w[t] = ++batch;
+  w[t + 1] = 0xFFFFFFFFu;
+  w[t + 3] = result;
   if (have34) {
-    w[66] = 2;
-    w[67] = 3;
-    w[68] = buf;
-    w[70] = buf + 0x20000;
+    w[t + 65] = 2;
+    w[t + 66] = 3;
+    w[t + 67] = buf;
+    w[t + 69] = buf + 0x20000;
   }
 }
 // ---- pad (libpad's RPC server 80000100): the I/O side keeps a pad data area in the game's memory up to date -------------
@@ -1154,6 +1191,8 @@ void PadPoll() {
     static const int dumpEvery = [] { const char* e = getenv("HP2_DUMP_EVERY"); return e ? atoi(e) : 0; }();
     if (dumpEvery > 0 && g_vblanks % static_cast<std::uint64_t>(dumpEvery * 60) == 0) gs::DumpFrame((".cache/native/frame_" + std::to_string(g_vblanks / 60) + ".bmp").c_str());
   }
+  gs::OverlayPad(static_cast<std::uint16_t>(pressed));  // settings overlay (Select+Start opens it); the game gets no input while it is open
+  if (gs::OverlayVisible()) pressed = 0;
   if (static_cast<std::uint16_t>(~pressed) != g_padButtons) {  // log each change of the button mask (0 = pressed)
     static int logged = 0;
     if (logged++ < 60) Log("pad: vblank %llu buttons %04X -> %04X (ports opened: %llu)", static_cast<unsigned long long>(g_vblanks), g_padButtons, static_cast<std::uint16_t>(~pressed), static_cast<unsigned long long>(g_padOpens));

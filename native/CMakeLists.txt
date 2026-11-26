@@ -2,6 +2,7 @@
 # only this project's own code (the ELF reader and helpers of recomp/ and
 # assets-pipeline/). The translated game code comes from hp2code.dll, built
 # for this runtime's own state layout by `hp2recomp package`.
-add_executable(hp2-native src/main.cpp src/gs.cpp)
+# Presentation (ADR 0013): Direct3D 11 through the Windows system DLLs (d3dcompiler_47.dll is loaded at run time).
+add_executable(hp2-native src/main.cpp src/gs.cpp src/d3d11_present.cpp src/overlay.cpp)
 set_target_properties(hp2-native PROPERTIES OUTPUT_NAME HotPursuit2Native)
-target_link_libraries(hp2-native PRIVATE hp2recomp hp2vdisc user32 gdi32)  # hp2vdisc: our own ISO 9660 view of the ROM folder
+target_link_libraries(hp2-native PRIVATE hp2recomp hp2vdisc user32 gdi32 d3d11)  # hp2vdisc: our own ISO 9660 view of the ROM folder
