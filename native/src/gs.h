@@ -20,6 +20,7 @@ void PrivWrite(std::uint32_t address, std::uint64_t value);
 // Vertical blank: show the display buffer.
 void Present();
 bool WindowClosed();
+bool WindowFocused();
 // Development: writes the last presented frame as a BMP file (kept out of git: .cache).
 bool DumpFrame(const char* path);
 

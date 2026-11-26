@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -139,6 +140,7 @@ std::uint32_t g_vsyncFlag1 = 0, g_vsyncFlag2 = 0;
 std::uint32_t g_heapStart = 0, g_heapEnd = 0;
 std::deque<std::pair<std::uint32_t, std::uint32_t>> g_pendingDmac;  // channel, unused
 std::map<std::uint32_t, std::uint32_t> g_hw;                       // hardware registers as last written
+void PadPoll();
 std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
 std::unordered_map<std::uint32_t, std::uint64_t> g_funcCount;  // function -> entries (traced packages)
 std::vector<std::uint32_t> g_funcOrder;                        // functions in order of their first entry
@@ -610,6 +612,7 @@ void DeliverInterrupts() {
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
     gs::Present();
+    PadPoll();
     if (gs::WindowClosed()) Stop("the window was closed");
     if (g_vsyncFlag1) Wr<std::uint32_t>(g_vsyncFlag1, 1);
     if (g_vsyncFlag2) Wr<std::uint64_t>(g_vsyncFlag2, (g_vblanks & 1) << 13);
@@ -972,6 +975,130 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
     w[70] = buf + 0x20000;
   }
 }
+// ---- pad (libpad's RPC server 80000100): the I/O side keeps a pad data area in the game's memory up to date -------------
+struct PadPort { std::uint32_t address = 0; int type = 0; } g_pad[2];  // type 0: 0x40-byte structs, 1: 0x80-byte structs, 2: extended layout
+std::uint16_t g_padButtons = 0xFFFF;                                   // 0 = pressed
+std::uint8_t g_padAxes[4] = {0x7F, 0x7F, 0x7F, 0x7F};                  // right x, right y, left x, left y
+std::uint64_t g_padOpens = 0;
+
+void PadWrite(const PadPort& p, int index) {  // fill struct `index` of the pad area
+  if (!p.address || !InRam(p.address, 0x100)) return;
+  std::uint8_t* b = g_ram + Phys(p.address) + static_cast<std::size_t>(index) * (p.type == 0 ? 0x40 : 0x80);
+  const std::size_t data = p.type == 2 ? 0 : 8;
+  b[data + 0] = 0;
+  b[data + 1] = 0x70;  // DualShock mode
+  b[data + 2] = static_cast<std::uint8_t>(g_padButtons >> 8);
+  b[data + 3] = static_cast<std::uint8_t>(g_padButtons);
+  for (int i = 0; i < 4; ++i) b[data + 4 + i] = g_padAxes[i];
+  const std::size_t state = p.type == 2 ? 0x70 : 4;
+  b[state] = 6;      // stable
+  b[state + 1] = 0;  // no request pending
+  b[state + 2] = 1;  // ok
+}
+void PadOpen(int port, std::uint32_t address) {
+  if (port < 0 || port > 1 || !InRam(address, 0x100)) return;
+  const std::uint8_t* a = g_ram + Phys(address);
+  int type = 0;
+  if (a[0x08] == 0xFF && a[0x88] == 0xFF) type = 1;
+  if (a[0x00] == 0xFF && a[0x80] == 0xFF) type = 2;
+  g_pad[port] = {address, type};
+  ++g_padOpens;
+  Log("io: pad port %d opened, data area %08X, layout %d", port, address, type);
+  for (int i = 0; i < 2; ++i) {  // both structs start as stable, ok, length 32, sticks centred
+    std::uint8_t* b = g_ram + Phys(address) + static_cast<std::size_t>(i) * (type == 0 ? 0x40 : 0x80);
+    const std::size_t len = type == 2 ? 0x60 : 0x28;
+    const std::uint32_t frame = static_cast<std::uint32_t>(i), n = 32;
+    memcpy(b + (type == 2 ? 0x58 : 0), &frame, 4);
+    memcpy(b + len, &n, 4);
+    if (type == 2 && i == 1) { b[0x65] = 0x70; b[0x68] = 4; b[0x69] = 0; const std::uint16_t m = 7; memcpy(b + 0x50, &m, 2); }
+  }
+  PadWrite(g_pad[port], 0);
+  PadWrite(g_pad[port], 1);
+}
+void PadService(const std::uint32_t* args, std::uint32_t recv, std::uint32_t rsize) {  // args: the call's first eight send words
+  std::uint32_t ret[8] = {};
+  switch (args[0]) {
+    case 0x00000001: case 0x80000100: PadOpen(static_cast<int>(args[1]), args[4]); ret[3] = 1; break;
+    case 0x80000105: ret[3] = 1; break;                      // set main mode
+    case 0x8000010D: if (args[1] < 2) g_pad[args[1]].address = 0; ret[3] = 1; break;  // close
+    case 0x00000008: ret[5] = 1; break;                      // actuator align
+    case 0x00000010: ret[3] = 1; break;                      // init
+    case 0x00000012: ret[3] = 0x400; break;                  // module version
+    default: LogOnce("padfn" + std::to_string(args[0]), "io: pad server: unknown method %08X", args[0]); break;
+  }
+  if (recv && rsize >= 32 && InRam(recv, 32)) memcpy(g_ram + Phys(recv), ret, 32);
+}
+// Keyboard and the first XInput controller, read at every vertical blank.
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
+void PadPoll() {
+  static XInputGetStateFn xinput = [] {
+    HMODULE m = LoadLibraryW(L"xinput1_4.dll");
+    return m ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(m, "XInputGetState")) : nullptr;
+  }();
+  std::uint16_t pressed = 0;  // 1 = pressed, in the PS2 bit order
+  std::uint8_t axes[4] = {0x7F, 0x7F, 0x7F, 0x7F};
+  auto key = [&](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+  if (gs::WindowFocused()) {
+    if (key(VK_BACK) || key(VK_RSHIFT)) pressed |= 0x0001;  // select
+    if (key(VK_RETURN) || key(VK_SPACE)) pressed |= 0x0008; // start
+    if (key(VK_UP)) pressed |= 0x0010;
+    if (key(VK_RIGHT)) { pressed |= 0x0020; axes[2] = 0xFF; }
+    if (key(VK_DOWN)) pressed |= 0x0040;
+    if (key(VK_LEFT)) { pressed |= 0x0080; axes[2] = 0x00; }
+    if (key('1')) pressed |= 0x0100;  // L2
+    if (key('2')) pressed |= 0x0200;  // R2
+    if (key('Q')) pressed |= 0x0400;  // L1
+    if (key('W')) pressed |= 0x0800;  // R1
+    if (key('S')) pressed |= 0x1000;  // triangle
+    if (key('X')) pressed |= 0x2000;  // circle
+    if (key('Z')) pressed |= 0x4000;  // cross
+    if (key('A')) pressed |= 0x8000;  // square
+  }
+  if (xinput) {
+    struct { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; } st = {};
+    if (xinput(0, &st) == 0) {
+      struct PadMap { unsigned xi, ps; };
+      static const PadMap map[] = {{0x0001, 0x0010}, {0x0008, 0x0020}, {0x0002, 0x0040}, {0x0004, 0x0080}, {0x0010, 0x0008},
+                                                            {0x0020, 0x0001}, {0x0040, 0x0002}, {0x0080, 0x0004}, {0x0100, 0x0400}, {0x0200, 0x0800},
+                                                            {0x1000, 0x4000}, {0x2000, 0x2000}, {0x4000, 0x8000}, {0x8000, 0x1000}};
+      for (const PadMap& m : map) if (st.buttons & m.xi) pressed = static_cast<std::uint16_t>(pressed | m.ps);
+      if (st.lt > 100) pressed |= 0x0100;
+      if (st.rt > 100) pressed |= 0x0200;
+      auto axis = [](SHORT v, bool invert) { int a = (v + 32768) >> 8; if (invert) a = 255 - a; return static_cast<std::uint8_t>(a < 0 ? 0 : a > 255 ? 255 : a); };
+      if (std::abs(st.lx) > 7000) axes[2] = axis(st.lx, false);
+      if (std::abs(st.ly) > 7000) axes[3] = axis(st.ly, true);
+      if (std::abs(st.rx) > 7000) axes[0] = axis(st.rx, false);
+      if (std::abs(st.ry) > 7000) axes[1] = axis(st.ry, true);
+    }
+  }
+  {  // development: HP2_PRESS="start@10-11,cross@14-15" presses buttons at given seconds of the run (no keyboard needed)
+    static const std::string spec = [] { const char* e = getenv("HP2_PRESS"); return std::string(e ? e : ""); }();
+    if (!spec.empty()) {
+      struct NamedBit { const char* name; unsigned bit; };
+      static const NamedBit names[] = {{"select", 1}, {"start", 8}, {"up", 0x10}, {"right", 0x20}, {"down", 0x40}, {"left", 0x80}, {"l2", 0x100}, {"r2", 0x200},
+                                                                    {"l1", 0x400}, {"r1", 0x800}, {"triangle", 0x1000}, {"circle", 0x2000}, {"cross", 0x4000}, {"square", 0x8000}};
+      const double now = static_cast<double>(g_vblanks) / 59.94;
+      for (std::size_t i = 0; i < spec.size();) {
+        const std::size_t end = spec.find(',', i), stop = end == std::string::npos ? spec.size() : end;
+        const std::string item = spec.substr(i, stop - i);
+        const std::size_t at = item.find('@'), dash = item.find('-');
+        if (at != std::string::npos && dash != std::string::npos) {
+          const double from = atof(item.c_str() + at + 1), to = atof(item.c_str() + dash + 1);
+          if (now >= from && now < to)
+            for (const NamedBit& nb : names) if (item.compare(0, at, nb.name) == 0) pressed = static_cast<std::uint16_t>(pressed | nb.bit);
+        }
+        i = stop + 1;
+      }
+    }
+    static const int dumpEvery = [] { const char* e = getenv("HP2_DUMP_EVERY"); return e ? atoi(e) : 0; }();
+    if (dumpEvery > 0 && g_vblanks % static_cast<std::uint64_t>(dumpEvery * 60) == 0) gs::DumpFrame((".cache/native/frame_" + std::to_string(g_vblanks / 60) + ".bmp").c_str());
+  }
+  g_padButtons = static_cast<std::uint16_t>(~pressed);
+  memcpy(g_padAxes, axes, 4);
+  PadWrite(g_pad[0], 1);  // (the reference's pad module also updates only the second struct)
+  PadWrite(g_pad[1], 1);
+}
+
 std::map<std::uint32_t, std::uint64_t> g_entryCount;  // entry place -> times entered (what is the game doing?)
 std::map<std::uint32_t, std::uint32_t> g_rpcServer;  // client structure -> server number
 std::map<std::uint64_t, std::uint64_t> g_rpcCount;   // (server, function) -> calls
@@ -1005,11 +1132,10 @@ void Hook(NativeState& s) {
       for (int i = 0; i < 64; ++i) snprintf(hex + i * 3, 4, "%02X ", g_ram[Phys(A(s, 3)) + i]);
       Log("io:   streamer command #%llu: %s", static_cast<unsigned long long>(g_rpcCount[(static_cast<std::uint64_t>(server) << 32) | fn]), hex);
     }
+    std::uint32_t padArgs[8] = {};  // the pad server answers in the buffer it was called with: read the arguments first
+    if (server == 0x80000100 && A(s, 3) && InRam(A(s, 3), 32)) memcpy(padArgs, g_ram + Phys(A(s, 3)), 32);
     if (recv && rsize && InRam(recv, rsize)) memset(g_ram + Phys(recv), 0, rsize);
-    if (server == 0x80000100 && fn == 1 && recv && rsize >= 24 && InRam(recv, 24)) {  // pad library, function 1: the reference's answer
-      static const std::uint32_t reply[6] = {0x0A, 1, 0, 0x0FFF, 1, 1};
-      memcpy(g_ram + Phys(recv), reply, sizeof reply);
-    }
+    if (server == 0x80000100 && fn == 1) PadService(padArgs, recv, rsize);
     if (server == 0x80000400 && fn == 254 && recv && rsize >= 12 && InRam(recv, 12)) {
       // The game's file manager (0x0028DD40) checks the I/O side's version words: word 1 >= 522 and word 2 >= 526,
       // otherwise it prints an error and drops the server (every later open returns -100).

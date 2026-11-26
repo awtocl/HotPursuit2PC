@@ -190,3 +190,20 @@ Next: (1) input: pad server 80000100/101 from keyboard/XInput so the menus can b
 GPU (D3D11 back end fed by the same register stream) - this is also where the owner's QoL goes (internal resolution multiplier, texture
 filtering, aspect, widescreen) and where requirement 2's in-game options menu hooks in; (3) sound (EA streamer + SPU2 mixer);
 (4) ADR 0012 and `docs/recomp-analysis.md` section 18; (5) GitHub dev build `v0.2.0-dev.1` (only if the owner asks).
+
+## Stage 5, 2026-11-26: input and a faster GS
+
+- **Pad** (`PadService`, `PadPoll` in `native/src/main.cpp`): libpad's server `80000100` is answered per the protocol (method word = first send
+  word: 0x1/0x80000100 open (port, slot, area = word 4), 0x80000105 set mode, 0x8000010D close, 0x8 actuator, 0x10 init, 0x12 version 0x400).
+  The reply goes into the same buffer as the call, so the arguments are copied before it is cleared. The game's pad area (layout detected:
+  here the extended 0x80-byte layout, ports at 0x002DFB40/0x002DFC40) is refreshed at every vblank from the keyboard (arrows = D-pad and left
+  stick X, Z cross, X circle, A square, S triangle, Q/W L1/R1, 1/2 L2/R2, Enter/Space start, Backspace/RShift select; only while the window has
+  focus) and the first XInput pad. Not verified with a real key press: only the scripted presses below. Pressure bytes are not modelled.
+- Development switches: `HP2_PRESS="start@12-13,cross@20-21"` (seconds of game time), `HP2_DUMP_EVERY=10` writes `.cache/native/frame_<s>.bmp`
+  every 10 s, `HP2_NOGS=1` skips rasterising (measures the rest: the runtime alone runs at the full 60 refreshes/s).
+- **GS speed**: decoded texture cache (`GetTexture`, invalidated per 8 KB page through `g_pageVersion`), per-primitive pipeline state (`Pipe`),
+  incremental edge functions, a sprite fast path (`DrawSprite`) and direct surface access (`Surf`). 22 fps -> ~46 fps in the intro movie.
+  Next speed steps: threads (tile the screen) or the GPU back end.
+- Seen on screen (frame dumps): EA logo, the intro movie with the "EA GAMES TRAX" caption. The game is still in the intro; I have not yet seen
+  the title screen or a menu (scripted Start presses at 12-13 s had no visible effect before the movie ended - not investigated).
+- Next: confirm the title/menu appears and responds to the pad; sound; GPU back end + owner's QoL (see Stage 4 next list).

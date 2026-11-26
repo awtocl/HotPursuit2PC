@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -25,6 +26,7 @@ constexpr u32 kRamSize = 4u << 20;
 std::vector<u8> g_mem;
 Stats g_stats;
 
+u64 g_pageVersion[512] = {};  // bumped on every write into an 8 KB page of local memory (texture cache)
 // ---- pixel storage formats -------------------------------------------------------------------
 enum Psm : u32 {
   CT32 = 0x00, CT24 = 0x01, CT16 = 0x02, CT16S = 0x0A, T8 = 0x13, T4 = 0x14, T8H = 0x1B, T4HL = 0x24, T4HH = 0x2C,
@@ -160,6 +162,7 @@ u32 ReadPixel(u32 psm, u32 bp, u32 bw, u32 x, u32 y) {  // raw stored value
 
 void WritePixel(u32 psm, u32 bp, u32 bw, u32 x, u32 y, u32 value, u32 mask = 0xFFFFFFFFu) {
   const u32 a = PixelAddress(psm, bp, bw, x, y);
+  ++g_pageVersion[((KindOf(psm) == Kind::I4 ? a >> 1 : a) >> 13) & 511];
   switch (KindOf(psm)) {
     case Kind::C32: case Kind::Z32: {
       u32 old;
@@ -192,6 +195,50 @@ u32 BitsOf(u32 psm) {
     case Kind::I8: return 8;
     case Kind::I4: return 4;
     default: return 16;
+  }
+}
+
+
+// ---- fast surface access (frame and depth buffers) and page change tracking (texture cache) ----------------
+struct Surf { Kind kind; u32 psm, base, perRow, pw, ph; const u32* table; };
+Surf MakeSurf(u32 psm, u32 bp, u32 bw) {
+  Surf s = {};
+  s.kind = KindOf(psm);
+  BuildOffsets(s.kind);
+  const PageGeometry pg = PageOf(s.kind);
+  s.psm = psm; s.base = bp * 256; s.pw = pg.w; s.ph = pg.h;
+  s.perRow = std::max<u32>(1, bw * 64 / pg.w);
+  s.table = g_pageOffset[static_cast<int>(s.kind)].data();
+  return s;
+}
+inline u32 SurfAddr(const Surf& s, u32 x, u32 y) {
+  return (s.base + (x / s.pw + (y / s.ph) * s.perRow) * 8192 + s.table[(y % s.ph) * s.pw + x % s.pw]) & (kRamSize - 1);
+}
+inline u32 SurfRead(const Surf& s, u32 x, u32 y) {
+  const u32 a = SurfAddr(s, x, y);
+  if (s.kind == Kind::C32 || s.kind == Kind::Z32) {
+    u32 v;
+    memcpy(&v, &g_mem[a & ~3u], 4);
+    return (s.psm == CT24 || s.psm == Z24) ? (v & 0xFFFFFF) : v;
+  }
+  u16 h;
+  memcpy(&h, &g_mem[a & ~1u], 2);
+  return h;
+}
+inline void SurfWrite(const Surf& s, u32 x, u32 y, u32 value, u32 mask) {
+  const u32 a = SurfAddr(s, x, y);
+  ++g_pageVersion[a >> 13];
+  if (s.kind == Kind::C32 || s.kind == Kind::Z32) {
+    if (s.psm == CT24 || s.psm == Z24) mask &= 0x00FFFFFFu;
+    u32 old;
+    memcpy(&old, &g_mem[a & ~3u], 4);
+    old = (old & ~mask) | (value & mask);
+    memcpy(&g_mem[a & ~3u], &old, 4);
+  } else {
+    u16 old;
+    memcpy(&old, &g_mem[a & ~1u], 2);
+    old = static_cast<u16>((old & ~mask) | (value & mask));
+    memcpy(&g_mem[a & ~1u], &old, 2);
   }
 }
 
@@ -303,21 +350,8 @@ Rgba ClutLookup(const Ctx& c, u32 index) {
   return Unpack16(ReadPixel(CT16, cbp, 1, x, y), 128, 0);
 }
 
-Rgba TexelAt(const Ctx& c, i32 tx, i32 ty) {
+Rgba TexelRaw(const Ctx& c, u32 x, u32 y) {  // texel (x, y) of the texture of context `c`, no wrapping (inside the texture)
   const u32 tbp = static_cast<u32>(c.tex0 & 0x3FFF), tbw = static_cast<u32>((c.tex0 >> 14) & 63), psm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
-  const u32 tw = 1u << ((c.tex0 >> 26) & 15), th = 1u << ((c.tex0 >> 30) & 15);
-  const u64 clamp = c.clamp;
-  const u32 wms = static_cast<u32>(clamp & 3), wmt = static_cast<u32>((clamp >> 2) & 3);
-  auto wrap = [](i32 v, u32 size, u32 mode, u32 minv, u32 maxv) -> u32 {
-    switch (mode) {
-      case 0: return static_cast<u32>(v) & (size - 1);
-      case 1: return v < 0 ? 0 : (static_cast<u32>(v) >= size ? size - 1 : static_cast<u32>(v));
-      case 2: return static_cast<u32>(std::clamp<i32>(v, static_cast<i32>(minv), static_cast<i32>(maxv)));
-      default: return (static_cast<u32>(v) & minv) | maxv;
-    }
-  };
-  const u32 x = wrap(tx, tw, wms, static_cast<u32>((clamp >> 4) & 0x3FF), static_cast<u32>((clamp >> 14) & 0x3FF));
-  const u32 y = wrap(ty, th, wmt, static_cast<u32>((clamp >> 24) & 0x3FF), static_cast<u32>((clamp >> 34) & 0x3FF));
   const int ta0 = static_cast<int>(g_texa & 255), ta1 = static_cast<int>((g_texa >> 32) & 255);
   const bool aem = ((g_texa >> 15) & 1) != 0;
   Rgba t = {0, 0, 0, 0};
@@ -340,136 +374,248 @@ Rgba TexelAt(const Ctx& c, i32 tx, i32 ty) {
   return t;
 }
 
-void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool flat) {
-  const Ctx& c = g_ctx[(g_prim >> 9) & 1];
-  const bool tme = (g_prim >> 4) & 1, abe = (g_prim >> 6) & 1, fst = (g_prim >> 8) & 1;
-  const u32 fbp = static_cast<u32>(c.frame & 0x1FF) * 32, fbw = static_cast<u32>((c.frame >> 16) & 63), fpsm = static_cast<u32>((c.frame >> 24) & 0x3F);
-  const u32 fbmsk = static_cast<u32>(c.frame >> 32);
-  const u32 zbp = static_cast<u32>(c.zbuf & 0x1FF) * 32, zpsm = 0x30 | static_cast<u32>((c.zbuf >> 24) & 15);
-  const bool zmsk = ((c.zbuf >> 32) & 1) != 0;
-  const bool zte = ((c.test >> 16) & 1) != 0;
-  const u32 ztst = static_cast<u32>((c.test >> 17) & 3);
-  const bool ate = (c.test & 1) != 0;
-  const u32 atst = static_cast<u32>((c.test >> 1) & 7), aref = static_cast<u32>((c.test >> 4) & 255);
-  const int sx0 = static_cast<int>(c.scissor & 0x7FF), sx1 = static_cast<int>((c.scissor >> 16) & 0x7FF);
-  const int sy0 = static_cast<int>((c.scissor >> 32) & 0x7FF), sy1 = static_cast<int>((c.scissor >> 48) & 0x7FF);
-  const u32 tfx = static_cast<u32>((c.tex0 >> 35) & 3);
-  const bool tcc = ((c.tex0 >> 34) & 1) != 0;
-  const u32 tw = 1u << ((c.tex0 >> 26) & 15), th = 1u << ((c.tex0 >> 30) & 15);
-  const bool linear = ((c.tex1 >> 5) & 1) != 0;
+// A decoded copy of a texture (and its palette), valid while the GS memory pages it came from are unchanged.
+struct TexCache {
+  u64 tex0 = 0, texa = 0;
+  u32 w = 0, h = 0, firstPage = 0, pages = 0, clutPage = 0;
+  u64 version = 0;
+  u64 used = 0;
+  std::vector<u32> pix;  // packed RGBA, row after row
+};
+std::vector<TexCache> g_texCache;
+u64 g_texClock = 0;
 
+u64 PageVersionSum(u32 first, u32 count) {
+  u64 s = 0;
+  for (u32 i = 0; i < count; ++i) s += g_pageVersion[(first + i) & 511];
+  return s;
+}
+
+const TexCache& GetTexture(const Ctx& c) {
+  const u32 tbp = static_cast<u32>(c.tex0 & 0x3FFF), tbw = static_cast<u32>((c.tex0 >> 14) & 63), psm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
+  const u32 tw = 1u << ((c.tex0 >> 26) & 15), th = 1u << ((c.tex0 >> 30) & 15);
+  const Kind k = KindOf(psm == T8H || psm == T4HL || psm == T4HH ? CT32 : psm);
+  const PageGeometry pg = PageOf(k);
+  const u32 perRow = std::max<u32>(1, tbw * 64 / pg.w);
+  const u32 first = tbp * 256 / 8192, pages = perRow * ((th + pg.h - 1) / pg.h) + 1;
+  const u32 cbp = static_cast<u32>((c.tex0 >> 37) & 0x3FFF);
+  const bool indexed = psm == T8 || psm == T4 || psm == T8H || psm == T4HL || psm == T4HH;
+  const u32 clutPage = cbp * 256 / 8192;
+  const u64 ver = PageVersionSum(first, pages) + (indexed ? PageVersionSum(clutPage, 2) * 7 : 0);
+  const u64 key = c.tex0 & ~(0x7ull << 61);  // CLD (clut load control) does not change the pixels
+  for (TexCache& e : g_texCache)
+    if (e.tex0 == key && e.texa == g_texa && e.version == ver) { e.used = ++g_texClock; return e; }
+  TexCache* slot = nullptr;
+  if (g_texCache.size() < 48) slot = &g_texCache.emplace_back();
+  else slot = &*std::min_element(g_texCache.begin(), g_texCache.end(), [](const TexCache& a, const TexCache& b) { return a.used < b.used; });
+  slot->tex0 = key; slot->texa = g_texa; slot->version = ver; slot->used = ++g_texClock;
+  slot->w = tw; slot->h = th; slot->firstPage = first; slot->pages = pages; slot->clutPage = clutPage;
+  slot->pix.resize(static_cast<std::size_t>(tw) * th);
+  for (u32 y = 0; y < th; ++y)
+    for (u32 x = 0; x < tw; ++x) slot->pix[static_cast<std::size_t>(y) * tw + x] = Pack32(TexelRaw(c, x, y));
+  return *slot;
+}
+
+// Everything a pixel needs, decoded once per primitive.
+struct Pipe {
+  const Ctx* c;
+  bool tme, abe, fst, flat, linear, tcc, ate, zte, zmsk, aem;
+  u32 tfx, atst, aref, ztst, zpsm, fpsm, fbmsk, afail;
+  int sx0, sx1, sy0, sy1;
+  u32 tw, th, wms, wmt, minu, maxu, minv, maxv;
+  const TexCache* tex;
+  Surf fb, zb;
+};
+
+u32 WrapCoord(i32 v, u32 size, u32 mode, u32 minv, u32 maxv) {
+  switch (mode) {
+    case 0: return static_cast<u32>(v) & (size - 1);
+    case 1: return v < 0 ? 0 : (static_cast<u32>(v) >= size ? size - 1 : static_cast<u32>(v));
+    case 2: return static_cast<u32>(std::clamp<i32>(v, static_cast<i32>(minv), static_cast<i32>(maxv)));
+    default: return (static_cast<u32>(v) & minv) | maxv;
+  }
+}
+inline Rgba Texel(const Pipe& p, i32 x, i32 y) {
+  const u32 ux = WrapCoord(x, p.tw, p.wms, p.minu, p.maxu), uy = WrapCoord(y, p.th, p.wmt, p.minv, p.maxv);
+  return Unpack32(p.tex->pix[static_cast<std::size_t>(uy & (p.th - 1)) * p.tw + (ux & (p.tw - 1))]);
+}
+
+Pipe MakePipe(bool flat) {
+  Pipe p = {};
+  const Ctx& c = g_ctx[(g_prim >> 9) & 1];
+  p.c = &c;
+  p.tme = (g_prim >> 4) & 1; p.abe = (g_prim >> 6) & 1; p.fst = (g_prim >> 8) & 1; p.flat = flat;
+  const u32 fbp = static_cast<u32>(c.frame & 0x1FF) * 32, fbw = static_cast<u32>((c.frame >> 16) & 63);
+  p.fpsm = static_cast<u32>((c.frame >> 24) & 0x3F);
+  p.fbmsk = static_cast<u32>(c.frame >> 32);
+  p.zpsm = 0x30 | static_cast<u32>((c.zbuf >> 24) & 15);
+  p.zmsk = ((c.zbuf >> 32) & 1) != 0;
+  p.zte = ((c.test >> 16) & 1) != 0;
+  p.ztst = static_cast<u32>((c.test >> 17) & 3);
+  p.ate = (c.test & 1) != 0;
+  p.atst = static_cast<u32>((c.test >> 1) & 7); p.aref = static_cast<u32>((c.test >> 4) & 255);
+  p.afail = static_cast<u32>((c.test >> 12) & 3);
+  p.sx0 = static_cast<int>(c.scissor & 0x7FF); p.sx1 = static_cast<int>((c.scissor >> 16) & 0x7FF);
+  p.sy0 = static_cast<int>((c.scissor >> 32) & 0x7FF); p.sy1 = static_cast<int>((c.scissor >> 48) & 0x7FF);
+  p.tfx = static_cast<u32>((c.tex0 >> 35) & 3);
+  p.tcc = ((c.tex0 >> 34) & 1) != 0;
+  p.tw = 1u << ((c.tex0 >> 26) & 15); p.th = 1u << ((c.tex0 >> 30) & 15);
+  p.linear = ((c.tex1 >> 5) & 1) != 0;
+  p.wms = static_cast<u32>(c.clamp & 3); p.wmt = static_cast<u32>((c.clamp >> 2) & 3);
+  p.minu = static_cast<u32>((c.clamp >> 4) & 0x3FF); p.maxu = static_cast<u32>((c.clamp >> 14) & 0x3FF);
+  p.minv = static_cast<u32>((c.clamp >> 24) & 0x3FF); p.maxv = static_cast<u32>((c.clamp >> 34) & 0x3FF);
+  p.fb = MakeSurf(p.fpsm, fbp, fbw);
+  p.zb = MakeSurf(p.zpsm, static_cast<u32>(c.zbuf & 0x1FF) * 32, fbw);
+  p.tex = p.tme ? &GetTexture(c) : nullptr;
+  return p;
+}
+
+// One pixel: texture, depth/alpha tests, blending, write. `col` is the interpolated vertex colour, (tu, tv) the texel position.
+inline void Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, float tv) {
+  const u32 zv = p.zpsm == Z24 ? (z >> 8) : (p.zpsm == Z32 ? z : (z >> 16) & 0xFFFF);
+  if (p.zte && p.ztst != 1) {
+    if (p.ztst == 0) return;
+    const u32 old = SurfRead(p.zb, static_cast<u32>(px), static_cast<u32>(py));
+    if (p.ztst == 2 ? zv < old : zv <= old) return;  // GEQUAL / GREATER
+  }
+  if (p.tme) {
+    Rgba tex;
+    if (p.linear) {
+      const float fx = tu - 0.5f, fy = tv - 0.5f;
+      const i32 ix = static_cast<i32>(std::floor(fx)), iy = static_cast<i32>(std::floor(fy));
+      const float ux = fx - static_cast<float>(ix), uy = fy - static_cast<float>(iy);
+      const Rgba t00 = Texel(p, ix, iy), t10 = Texel(p, ix + 1, iy), t01 = Texel(p, ix, iy + 1), t11 = Texel(p, ix + 1, iy + 1);
+      auto mix = [&](int a, int b, int c, int d) { return static_cast<int>((static_cast<float>(a) * (1 - ux) + static_cast<float>(b) * ux) * (1 - uy) + (static_cast<float>(c) * (1 - ux) + static_cast<float>(d) * ux) * uy); };
+      tex = {mix(t00.r, t10.r, t01.r, t11.r), mix(t00.g, t10.g, t01.g, t11.g), mix(t00.b, t10.b, t01.b, t11.b), mix(t00.a, t10.a, t01.a, t11.a)};
+    } else {
+      i32 ix = static_cast<i32>(tu), iy = static_cast<i32>(tv);
+      if (tu < 0 && static_cast<float>(ix) != tu) --ix;
+      if (tv < 0 && static_cast<float>(iy) != tv) --iy;
+      tex = Texel(p, ix, iy);
+    }
+    switch (p.tfx) {
+      case 0: col = {Clamp8(tex.r * col.r >> 7), Clamp8(tex.g * col.g >> 7), Clamp8(tex.b * col.b >> 7), p.tcc ? Clamp8(tex.a * col.a >> 7) : col.a}; break;
+      case 1: col = {tex.r, tex.g, tex.b, p.tcc ? tex.a : col.a}; break;
+      default: col = {Clamp8((tex.r * col.r >> 7) + col.a), Clamp8((tex.g * col.g >> 7) + col.a), Clamp8((tex.b * col.b >> 7) + col.a), p.tcc ? Clamp8(tex.a + col.a) : col.a}; break;
+    }
+  } else {
+    col = {Clamp8(col.r), Clamp8(col.g), Clamp8(col.b), Clamp8(col.a)};
+  }
+  if (p.ate) {
+    const u32 av = static_cast<u32>(col.a);
+    bool pass = true;
+    switch (p.atst) {
+      case 0: pass = false; break;
+      case 2: pass = av < p.aref; break;
+      case 3: pass = av <= p.aref; break;
+      case 4: pass = av == p.aref; break;
+      case 5: pass = av >= p.aref; break;
+      case 6: pass = av > p.aref; break;
+      case 7: pass = av != p.aref; break;
+      default: break;
+    }
+    if (!pass) return;  // (the other fail modes would still update parts of the buffers)
+  }
+  const bool is16 = p.fpsm == CT16 || p.fpsm == CT16S;
+  if (p.abe && (!(g_pabe & 1) || (col.a & 0x80))) {
+    const u32 raw = SurfRead(p.fb, static_cast<u32>(px), static_cast<u32>(py));
+    const Rgba dst = is16 ? Unpack16(raw, 128, 0) : Unpack32(raw);
+    const Ctx& c = *p.c;
+    const u32 A = static_cast<u32>(c.alpha & 3), B = static_cast<u32>((c.alpha >> 2) & 3), C = static_cast<u32>((c.alpha >> 4) & 3), D = static_cast<u32>((c.alpha >> 6) & 3);
+    const int fix = static_cast<int>((c.alpha >> 32) & 255);
+    auto pick = [&](u32 sel, int cs, int cd) { return sel == 0 ? cs : sel == 1 ? cd : 0; };
+    const int ac = C == 0 ? col.a : C == 1 ? dst.a : fix;
+    auto channel = [&](int cs, int cd) { return Clamp8(((pick(A, cs, cd) - pick(B, cs, cd)) * ac >> 7) + pick(D, cs, cd)); };
+    col = {channel(col.r, dst.r), channel(col.g, dst.g), channel(col.b, dst.b), col.a};
+  }
+  const u32 out = is16 ? static_cast<u32>((col.r >> 3) | ((col.g >> 3) << 5) | ((col.b >> 3) << 10) | ((col.a & 0x80) << 8)) : Pack32(col);
+  SurfWrite(p.fb, static_cast<u32>(px), static_cast<u32>(py), out, ~p.fbmsk);
+  if (!p.zmsk && p.zte) SurfWrite(p.zb, static_cast<u32>(px), static_cast<u32>(py), zv, 0xFFFFFFFFu);
+  ++g_stats.pixels;
+  if (p.tme) ++g_stats.textured;
+}
+
+void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool flat) {
+  static const bool skip = getenv("HP2_NOGS") != nullptr;  // development: measure the rest of the runtime without rasterising
+  if (skip) return;
+  const Pipe p = MakePipe(flat);
   Vertex a = v0, b = v1_, d = v2_;
   const i64 area = static_cast<i64>(b.x - a.x) * (d.y - a.y) - static_cast<i64>(b.y - a.y) * (d.x - a.x);
   if (area == 0) return;
   if (area < 0) std::swap(b, d);
-  const i64 ar = area < 0 ? -area : area;
-  const int minx = std::max((std::min({a.x, b.x, d.x}) >> 4), sx0), maxx = std::min((std::max({a.x, b.x, d.x}) + 15) >> 4, sx1);
-  const int miny = std::max((std::min({a.y, b.y, d.y}) >> 4), sy0), maxy = std::min((std::max({a.y, b.y, d.y}) + 15) >> 4, sy1);
-  auto bias = [](const Vertex& p, const Vertex& q) {  // top-left rule for edge p->q (counter-clockwise in y-down space after the swap)
-    const i32 dx = q.x - p.x, dy = q.y - p.y;
+  const double inv = 1.0 / static_cast<double>(area < 0 ? -area : area);
+  const int minx = std::max((std::min({a.x, b.x, d.x}) >> 4), p.sx0), maxx = std::min((std::max({a.x, b.x, d.x}) + 15) >> 4, p.sx1);
+  const int miny = std::max((std::min({a.y, b.y, d.y}) >> 4), p.sy0), maxy = std::min((std::max({a.y, b.y, d.y}) + 15) >> 4, p.sy1);
+  if (minx > maxx || miny > maxy) return;
+  auto bias = [](const Vertex& s, const Vertex& e) {  // top-left rule
+    const i32 dx = e.x - s.x, dy = e.y - s.y;
     return (dy > 0 || (dy == 0 && dx < 0)) ? 0 : -1;
   };
-  const int b01 = bias(a, b), b12 = bias(b, d), b20 = bias(d, a);
-  for (int py = miny; py <= maxy; ++py)
-    for (int px = minx; px <= maxx; ++px) {
-      const i64 X = px * 16 + 8, Y = py * 16 + 8;
-      const i64 w2 = (static_cast<i64>(b.x - a.x) * (Y - a.y) - static_cast<i64>(b.y - a.y) * (X - a.x)) + b01;  // weight of d
-      const i64 w0 = (static_cast<i64>(d.x - b.x) * (Y - b.y) - static_cast<i64>(d.y - b.y) * (X - b.x)) + b12;  // weight of a
-      const i64 w1 = (static_cast<i64>(a.x - d.x) * (Y - d.y) - static_cast<i64>(a.y - d.y) * (X - d.x)) + b20;  // weight of b
-      if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-      const double l0 = static_cast<double>(w0) / static_cast<double>(ar), l1 = static_cast<double>(w1) / static_cast<double>(ar), l2 = static_cast<double>(w2) / static_cast<double>(ar);
-      const u32 z = static_cast<u32>(std::clamp(l0 * a.z + l1 * b.z + l2 * d.z, 0.0, 4294967295.0));
-      // depth test
-      if (zte && ztst != 1) {
-        const u32 old = ReadPixel(zpsm, zbp, fbw, static_cast<u32>(px), static_cast<u32>(py));
-        const u32 zv = (zpsm == Z24) ? (z >> 8) : (zpsm == Z32 ? z : (z >> 16) & 0xFFFF);
-        if (ztst == 0) continue;                    // never
-        if (ztst == 2 && zv < old) continue;        // GEQUAL
-        if (ztst == 3 && zv <= old) continue;       // GREATER
-      }
+  const i64 bias2 = bias(a, b), bias0 = bias(b, d), bias1 = bias(d, a);
+  // edge functions: w2 (weight of d) on a->b, w0 (weight of a) on b->d, w1 (weight of b) on d->a; each steps linearly in x and y
+  const i64 dx2 = -(static_cast<i64>(b.y - a.y)) * 16, dy2 = static_cast<i64>(b.x - a.x) * 16;
+  const i64 dx0 = -(static_cast<i64>(d.y - b.y)) * 16, dy0 = static_cast<i64>(d.x - b.x) * 16;
+  const i64 dx1 = -(static_cast<i64>(a.y - d.y)) * 16, dy1 = static_cast<i64>(a.x - d.x) * 16;
+  const i64 X0 = minx * 16 + 8, Y0 = miny * 16 + 8;
+  i64 r2 = static_cast<i64>(b.x - a.x) * (Y0 - a.y) - static_cast<i64>(b.y - a.y) * (X0 - a.x) + bias2;
+  i64 r0 = static_cast<i64>(d.x - b.x) * (Y0 - b.y) - static_cast<i64>(d.y - b.y) * (X0 - b.x) + bias0;
+  i64 r1 = static_cast<i64>(a.x - d.x) * (Y0 - d.y) - static_cast<i64>(a.y - d.y) * (X0 - d.x) + bias1;
+  const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
+  for (int py = miny; py <= maxy; ++py, r0 += dy0, r1 += dy1, r2 += dy2) {
+    i64 w0 = r0, w1 = r1, w2 = r2;
+    for (int px = minx; px <= maxx; ++px, w0 += dx0, w1 += dx1, w2 += dx2) {
+      if ((w0 | w1 | w2) < 0) continue;
+      const float l0 = static_cast<float>(static_cast<double>(w0) * inv), l1 = static_cast<float>(static_cast<double>(w1) * inv), l2 = 1.0f - l0 - l1;
+      const u32 z = static_cast<u32>(std::clamp(static_cast<double>(l0) * a.z + static_cast<double>(l1) * b.z + static_cast<double>(l2) * d.z, 0.0, 4294967295.0));
       Rgba col;
-      if (flat) {
-        col = {static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)};
-      } else {
-        col = {static_cast<int>(l0 * a.r + l1 * b.r + l2 * d.r), static_cast<int>(l0 * a.g + l1 * b.g + l2 * d.g),
-               static_cast<int>(l0 * a.b + l1 * b.b + l2 * d.b), static_cast<int>(l0 * a.a + l1 * b.a + l2 * d.a)};
-      }
-      if (tme) {
-        double tu, tv;
-        if (fst) {
-          tu = (l0 * a.u + l1 * b.u + l2 * d.u) / 16.0;
-          tv = (l0 * a.v + l1 * b.v + l2 * d.v) / 16.0;
+      if (p.flat) col = {static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)};
+      else col = {static_cast<int>(l0 * a.r + l1 * b.r + l2 * d.r), static_cast<int>(l0 * a.g + l1 * b.g + l2 * d.g),
+                  static_cast<int>(l0 * a.b + l1 * b.b + l2 * d.b), static_cast<int>(l0 * a.a + l1 * b.a + l2 * d.a)};
+      float tu = 0, tv = 0;
+      if (p.tme) {
+        if (p.fst) {
+          tu = (l0 * a.u + l1 * b.u + l2 * d.u) * (1.0f / 16.0f);
+          tv = (l0 * a.v + l1 * b.v + l2 * d.v) * (1.0f / 16.0f);
         } else {
-          const double q = l0 * a.q + l1 * b.q + l2 * d.q;
-          const double s = l0 * a.s + l1 * b.s + l2 * d.s, t = l0 * a.t + l1 * b.t + l2 * d.t;
-          tu = q != 0.0 ? s / q * tw : 0.0;
-          tv = q != 0.0 ? t / q * th : 0.0;
-        }
-        Rgba tex;
-        if (linear) {
-          const double fx = tu - 0.5, fy = tv - 0.5;
-          const i32 ix = static_cast<i32>(std::floor(fx)), iy = static_cast<i32>(std::floor(fy));
-          const double ux = fx - ix, uy = fy - iy;
-          const Rgba t00 = TexelAt(c, ix, iy), t10 = TexelAt(c, ix + 1, iy), t01 = TexelAt(c, ix, iy + 1), t11 = TexelAt(c, ix + 1, iy + 1);
-          auto mix = [&](int p00, int p10, int p01, int p11) {
-            return static_cast<int>((p00 * (1 - ux) + p10 * ux) * (1 - uy) + (p01 * (1 - ux) + p11 * ux) * uy);
-          };
-          tex = {mix(t00.r, t10.r, t01.r, t11.r), mix(t00.g, t10.g, t01.g, t11.g), mix(t00.b, t10.b, t01.b, t11.b), mix(t00.a, t10.a, t01.a, t11.a)};
-        } else {
-          tex = TexelAt(c, static_cast<i32>(std::floor(tu)), static_cast<i32>(std::floor(tv)));
-        }
-        ++g_stats.textured;
-        switch (tfx) {
-          case 0: col = {Clamp8(tex.r * col.r >> 7), Clamp8(tex.g * col.g >> 7), Clamp8(tex.b * col.b >> 7), tcc ? Clamp8(tex.a * col.a >> 7) : col.a}; break;
-          case 1: col = {tex.r, tex.g, tex.b, tcc ? tex.a : col.a}; break;
-          default: col = {Clamp8((tex.r * col.r >> 7) + col.a), Clamp8((tex.g * col.g >> 7) + col.a), Clamp8((tex.b * col.b >> 7) + col.a), tcc ? Clamp8(tex.a + col.a) : col.a}; break;
+          const float q = l0 * a.q + l1 * b.q + l2 * d.q;
+          if (q != 0.0f) {
+            const float rq = 1.0f / q;
+            tu = (l0 * a.s + l1 * b.s + l2 * d.s) * rq * tw;
+            tv = (l0 * a.t + l1 * b.t + l2 * d.t) * rq * th;
+          }
         }
       }
-      col = {Clamp8(col.r), Clamp8(col.g), Clamp8(col.b), Clamp8(col.a)};
-      // alpha test
-      if (ate) {
-        const u32 av = static_cast<u32>(col.a);
-        bool pass = true;
-        switch (atst) {
-          case 0: pass = false; break;
-          case 2: pass = av < aref; break;
-          case 3: pass = av <= aref; break;
-          case 4: pass = av == aref; break;
-          case 5: pass = av >= aref; break;
-          case 6: pass = av > aref; break;
-          case 7: pass = av != aref; break;
-          default: break;
-        }
-        if (!pass) {
-          const u32 afail = static_cast<u32>((c.test >> 12) & 3);
-          if (afail == 0) continue;  // KEEP
-          // other fail modes (FB only, ZB only, RGB only): the frame is left alone for now
-          continue;
-        }
-      }
-      // blend
-      if (abe && (!((g_pabe) & 1) || col.a & 0x80)) {
-        const Rgba dst = fpsm == CT16 || fpsm == CT16S ? Unpack16(ReadPixel(fpsm, fbp, fbw, static_cast<u32>(px), static_cast<u32>(py)), 128, 0)
-                                                        : Unpack32(ReadPixel(fpsm, fbp, fbw, static_cast<u32>(px), static_cast<u32>(py)));
-        const u32 A = static_cast<u32>(c.alpha & 3), B = static_cast<u32>((c.alpha >> 2) & 3), C = static_cast<u32>((c.alpha >> 4) & 3), D = static_cast<u32>((c.alpha >> 6) & 3);
-        const int fix = static_cast<int>((c.alpha >> 32) & 255);
-        auto pick = [&](u32 sel, int cs, int cd) { return sel == 0 ? cs : sel == 1 ? cd : 0; };
-        const int ac = C == 0 ? col.a : C == 1 ? dst.a : fix;
-        auto channel = [&](int cs, int cd) { return Clamp8(((pick(A, cs, cd) - pick(B, cs, cd)) * ac >> 7) + pick(D, cs, cd)); };
-        col = {channel(col.r, dst.r), channel(col.g, dst.g), channel(col.b, dst.b), col.a};
-      }
-      u32 out;
-      if (fpsm == CT16 || fpsm == CT16S)
-        out = static_cast<u32>((col.r >> 3) | ((col.g >> 3) << 5) | ((col.b >> 3) << 10) | ((col.a & 0x80) << 8));
-      else
-        out = Pack32(col);
-      WritePixel(fpsm, fbp, fbw, static_cast<u32>(px), static_cast<u32>(py), out, ~fbmsk);
-      if (!zmsk && zte) {
-        const u32 zv = (zpsm == Z24) ? (z >> 8) : (zpsm == Z32 ? z : (z >> 16) & 0xFFFF);
-        WritePixel(zpsm, zbp, fbw, static_cast<u32>(px), static_cast<u32>(py), zv);
-      }
-      ++g_stats.pixels;
+      Shade(p, px, py, z, col, tu, tv);
     }
+  }
+}
+
+// An axis-aligned sprite: corners (a = upper left, b = lower right) with the texture coordinates of each, flat colour.
+void DrawSprite(const Vertex& a, const Vertex& b) {
+  static const bool skip = getenv("HP2_NOGS") != nullptr;
+  if (skip) return;
+  const Pipe p = MakePipe(true);
+  const i32 x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+  if (x1 == x0 || y1 == y0) return;
+  const int minx = std::max((x0 + 15) >> 4, p.sx0), maxx = std::min(((x1 + 15) >> 4) - 1, p.sx1);  // pixel centres inside [x0, x1)
+  const int miny = std::max((y0 + 15) >> 4, p.sy0), maxy = std::min(((y1 + 15) >> 4) - 1, p.sy1);
+  const Rgba col = {static_cast<int>(b.r), static_cast<int>(b.g), static_cast<int>(b.b), static_cast<int>(b.a)};
+  const float tw = static_cast<float>(p.tw), th = static_cast<float>(p.th);
+  float su0, su1, sv0, sv1;  // texel coordinates at the corners
+  if (p.fst) { su0 = a.u / 16.0f; su1 = b.u / 16.0f; sv0 = a.v / 16.0f; sv1 = b.v / 16.0f; }
+  else {
+    su0 = a.q != 0 ? a.s / a.q * tw : 0; su1 = b.q != 0 ? b.s / b.q * tw : 0;
+    sv0 = a.q != 0 ? a.t / a.q * th : 0; sv1 = b.q != 0 ? b.t / b.q * th : 0;
+  }
+  const float fw = static_cast<float>(x1 - x0), fh = static_cast<float>(y1 - y0);
+  for (int py = miny; py <= maxy; ++py) {
+    const float fy = (static_cast<float>(py * 16 + 8 - y0)) / fh;
+    const float tv = sv0 + (sv1 - sv0) * fy;
+    for (int px = minx; px <= maxx; ++px) {
+      const float fx = (static_cast<float>(px * 16 + 8 - x0)) / fw;
+      Shade(p, px, py, b.z, col, su0 + (su1 - su0) * fx, tv);
+    }
+  }
 }
 
 Vertex MakeVertex(u64 xyz, bool hasF) {
@@ -517,14 +663,7 @@ void Kick(bool hasF, u64 xyz) {
     case 6: {  // sprite: two corners, flat colour of the second vertex
       g_queue[g_queued++] = v;
       if (g_queued == 2) {
-        Vertex a = g_queue[0], b = g_queue[1];
-        a.r = b.r; a.g = b.g; a.b = b.b; a.a = b.a;
-        Vertex c = b, d = a;
-        c.x = b.x; c.y = a.y; c.s = b.s; c.t = a.t; c.q = b.q; c.u = b.u; c.v = a.v; c.z = b.z;
-        d.x = a.x; d.y = b.y; d.s = a.s; d.t = b.t; d.q = a.q; d.u = a.u; d.v = b.v; d.z = b.z;
-        a.z = b.z;
-        DrawTriangle(a, c, b, true);
-        DrawTriangle(a, b, d, true);
+        DrawSprite(g_queue[0], g_queue[1]);
         ++g_stats.sprites;
         g_queued = 0;
       }
@@ -711,6 +850,7 @@ bool DumpFrame(const char* path) {
   return true;
 }
 bool WindowClosed() { return g_closed; }
+bool WindowFocused() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 const Stats& GetStats() { return g_stats; }
 void SetWindowScale(int percent) { g_scalePercent = percent; }
 
