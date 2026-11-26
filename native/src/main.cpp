@@ -179,6 +179,201 @@ std::uint8_t* VuMemory(std::uint32_t a) {
   return a >= 0x11004000 ? g_vu0Data + (a - 0x11004000) : g_vu0Micro + (a - 0x11000000);
 }
 
+// ---- GIF / GS register stream (the renderer comes later; for now the packets are decoded and counted) ----
+std::uint64_t g_gsReg[0x80] = {};        // last value written to each GS register
+std::uint64_t g_gsRegCount[0x80] = {};   // writes per register
+std::uint64_t g_gifTags = 0, g_gifImageBytes = 0, g_gsVertices = 0, g_gsKicks = 0, g_gsPrims = 0;
+struct GifStream {  // streaming decoder: packets may continue across calls
+  std::uint32_t nloop = 0, nreg = 0, flg = 0, index = 0;
+  std::uint64_t regs = 0;
+  bool eop = true;
+  std::uint64_t imageLeft = 0;
+} g_gif[3];  // path 1 (VU1 XGKICK), path 2 (VIF1 DIRECT), path 3 (DMA channel 2)
+
+void GsRegWrite(std::uint32_t reg, std::uint64_t value) {
+  reg &= 0x7F;
+  g_gsReg[reg] = value;
+  ++g_gsRegCount[reg];
+  if (reg == 0x00) ++g_gsPrims;                                     // PRIM
+  if (reg == 0x04 || reg == 0x05) { ++g_gsVertices; ++g_gsKicks; }  // XYZF2, XYZ2 (drawing kicks)
+  if (reg == 0x0C || reg == 0x0D) ++g_gsVertices;                   // XYZF3, XYZ3 (no kick)
+}
+
+void GifFeed(int path, const std::uint8_t* d, std::size_t bytes) {
+  GifStream& g = g_gif[path];
+  for (std::size_t pos = 0; pos + 16 <= bytes; pos += 16) {
+    std::uint64_t lo, hi;
+    memcpy(&lo, d + pos, 8);
+    memcpy(&hi, d + pos + 8, 8);
+    if (g.imageLeft) { --g.imageLeft; g_gifImageBytes += 16; continue; }
+    if (g.nloop == 0) {  // a new tag
+      g.nloop = lo & 0x7FFF;
+      g.eop = ((lo >> 15) & 1) != 0;
+      g.flg = (lo >> 58) & 3;
+      g.nreg = (lo >> 60) & 15;
+      if (g.nreg == 0) g.nreg = 16;
+      g.regs = hi;
+      g.index = 0;
+      ++g_gifTags;
+      static int shown[3] = {};
+      if ((g.flg >= 2 && g.nloop > 2000) || shown[path] < 6) {  // diagnostic: the first tags of each path and every big transfer
+        static int big = 0;
+        if (shown[path] < 6 || big++ < 12) Log("gif: path %d tag nloop=%u eop=%d flg=%u nreg=%u regs=%016llX", path + 1, g.nloop, g.eop, g.flg, g.nreg, static_cast<unsigned long long>(g.regs));
+        ++shown[path];
+      }
+      if (((lo >> 46) & 1) && g.flg == 0) GsRegWrite(0x00, (lo >> 47) & 0x7FF);  // PRE: the tag's PRIM
+      if (g.nloop != 0 && g.flg >= 2) { g.imageLeft = g.nloop; g.nloop = 0; }
+      continue;
+    }
+    const std::uint32_t reg = (g.regs >> (g.index * 4)) & 15;
+    if (g.flg == 0) {  // PACKED
+      std::uint32_t w[4];
+      memcpy(w, d + pos, 16);
+      const std::uint64_t xy = (w[0] & 0xFFFFull) | ((w[1] & 0xFFFFull) << 16);
+      switch (reg) {
+        case 0: GsRegWrite(0x00, lo & 0x7FF); break;
+        case 1: GsRegWrite(0x01, (w[0] & 0xFFull) | ((w[1] & 0xFFull) << 8) | ((w[2] & 0xFFull) << 16) | ((w[3] & 0xFFull) << 24)); break;
+        case 2: GsRegWrite(0x02, lo); break;
+        case 3: GsRegWrite(0x03, (w[0] & 0x3FFFull) | ((w[1] & 0x3FFFull) << 16)); break;
+        case 4: GsRegWrite((w[3] & 0x8000) ? 0x0C : 0x04, xy | (((w[2] >> 4) & 0xFFFFFFull) << 32) | (((w[3] >> 4) & 0xFFull) << 56)); break;
+        case 5: GsRegWrite((w[3] & 0x8000) ? 0x0D : 0x05, xy | (static_cast<std::uint64_t>(w[2]) << 32)); break;
+        case 6: GsRegWrite(0x06, lo); break;
+        case 7: GsRegWrite(0x07, lo); break;
+        case 8: GsRegWrite(0x08, lo); break;
+        case 9: GsRegWrite(0x09, lo); break;
+        case 10: GsRegWrite(0x0A, (static_cast<std::uint64_t>(w[3] >> 4) & 0xFF) << 56); break;
+        case 12: GsRegWrite(0x0C, xy | (((w[2] >> 4) & 0xFFFFFFull) << 32) | (((w[3] >> 4) & 0xFFull) << 56)); break;
+        case 13: GsRegWrite(0x0D, xy | (static_cast<std::uint64_t>(w[2]) << 32)); break;
+        case 14: GsRegWrite(static_cast<std::uint32_t>(hi & 0x7F), lo); break;  // A+D
+        default: break;
+      }
+      if (++g.index == g.nreg) { g.index = 0; --g.nloop; }
+    } else {  // REGLIST: two 64-bit values per quadword
+      GsRegWrite(reg, lo);
+      if (++g.index == g.nreg) { g.index = 0; --g.nloop; }
+      if (g.nloop) {
+        GsRegWrite((g.regs >> (g.index * 4)) & 15, hi);
+        if (++g.index == g.nreg) { g.index = 0; --g.nloop; }
+      }
+    }
+  }
+}
+
+// ---- VU1 ---------------------------------------------------------------------------------
+NativeState g_vu1;
+std::uint32_t g_vifBase = 0, g_vifOfst = 0, g_vifTops = 0, g_vifTop = 0, g_vifItops = 0, g_vifItop = 0, g_vifMode = 0, g_vifDbf = 0;
+std::uint32_t g_vifMask = 0, g_vifRow[4] = {}, g_vifCol[4] = {};
+std::vector<int> g_vuImageState;  // 0 unknown, 1 microcode memory equals the image, -1 it does not
+std::uint64_t g_vuRuns = 0, g_vuCalls = 0, g_vuMissing = 0, g_xgkicks = 0;
+
+std::uint32_t VuPortRead(std::uint8_t*, std::uint32_t address) {
+  return address == native_code_layout().addr_top ? g_vifTop : address == native_code_layout().addr_itop ? g_vifItop : 0;
+}
+void VuPortWrite(std::uint8_t*, std::uint32_t address, std::uint32_t value) {
+  if (address != native_code_layout().addr_xgkick) return;
+  ++g_xgkicks;
+  std::uint32_t a = (value & 0x3FF) * 16;  // (the register holds a quadword index) a packet in VU1 data memory, ends at its tag's EOP (wraps at 16 KB)
+  for (int guard = 0; guard < 4096; ++guard) {
+    GifFeed(0, g_vu1Data + a, 16);
+    a = (a + 16) & 0x3FFF;
+    if (g_gif[0].nloop == 0 && g_gif[0].imageLeft == 0 && g_gif[0].eop) break;
+  }
+}
+struct VuRuntimeTable {
+  std::uint32_t (*read)(std::uint8_t*, std::uint32_t);
+  void (*write)(std::uint8_t*, std::uint32_t, std::uint32_t);
+};
+const VuRuntimeTable g_vuRuntime{&VuPortRead, &VuPortWrite};
+using VuCodeFn = void (*)(std::uint8_t*, std::uint8_t*, const void*);
+
+VuCodeFn VuCodeAt(std::uint32_t pc) {
+  if (!g_table) return nullptr;
+  if (g_vuImageState.size() != g_table->vu_image_count) g_vuImageState.assign(g_table->vu_image_count, 0);
+  for (std::uint32_t i = 0; i < g_table->vu_image_count; ++i) {
+    const Hp2VuImageTable& im = g_table->vu_images[i];
+    if (pc < im.address || pc >= im.address + im.word_count * 4) continue;
+    if (g_vuImageState[i] == 0) g_vuImageState[i] = memcmp(g_vu1Micro + im.address, im.words, im.word_count * 4) == 0 ? 1 : -1;
+    if (g_vuImageState[i] != 1) continue;
+    if (std::binary_search(im.block_starts, im.block_starts + im.block_count, pc)) return reinterpret_cast<VuCodeFn>(im.code);
+    const Hp2CodeEntry* end = im.entries + im.entry_count;
+    const Hp2CodeEntry* it = std::lower_bound(im.entries, end, pc, [](const Hp2CodeEntry& e, std::uint32_t a) { return e.address < a; });
+    return it != end && it->address == pc ? reinterpret_cast<VuCodeFn>(it->code) : nullptr;
+  }
+  return nullptr;
+}
+
+void RunVu1(std::uint32_t pc) {
+  ++g_vuRuns;
+  g_vu1.pc = pc & 0x3FFF;
+  g_vu1.has_exception = 0;
+  for (int guard = 0; guard < 200000; ++guard) {
+    g_vu1.cycle_quota = 1 << 20;
+    VuCodeFn code = VuCodeAt(g_vu1.pc);
+    if (!code) {
+      ++g_vuMissing;
+      static int shown = 0;
+      if (shown++ < 10) Log("vu1: no translated microcode at %04X (microprogram not among the executable's images)", g_vu1.pc);
+      break;
+    }
+    code(reinterpret_cast<std::uint8_t*>(&g_vu1), g_vu1Data, &g_vuRuntime);
+    ++g_vuCalls;
+    if (g_vu1.has_exception & ~kNativeQuotaDone) break;  // E-bit / D-bit / T-bit: the program ended
+    g_vu1.has_exception = 0;
+  }
+  g_vu1.has_exception = 0;
+}
+
+void VifUnpack(std::uint32_t cmd, std::uint32_t num, std::uint32_t imm, const std::vector<std::uint8_t>& d, std::size_t& pos) {
+  const std::uint32_t cl = g_vifCycle & 0xFF, wl = (g_vifCycle >> 8) & 0xFF, vn = (cmd >> 2) & 3, vl = cmd & 3;
+  const bool usn = (imm & 0x4000) != 0;
+  std::uint32_t dest = imm & 0x3FF;
+  if (imm & 0x8000) dest += g_vifTops;
+  const std::uint32_t total = num ? num : 256;
+  const std::uint32_t bits = (vn == 3 && vl == 3) ? 16 : (32u >> vl) * (vn + 1);
+  const std::size_t in = pos;
+  auto fetch = [&](std::uint32_t bitOffset, std::uint32_t width) -> std::uint32_t {  // one element, sign/zero extended
+    std::uint32_t v = 0;
+    const std::size_t at = in + bitOffset / 8;
+    for (std::uint32_t i = 0; i < width / 8 && at + i < d.size(); ++i) v |= static_cast<std::uint32_t>(d[at + i]) << (8 * i);
+    if (!usn && width < 32) v = static_cast<std::uint32_t>(static_cast<std::int32_t>(v << (32 - width)) >> (32 - width));
+    return v;
+  };
+  std::uint32_t consumed = 0;  // input vectors read so far
+  const std::uint32_t wlz = wl ? wl : 1;
+  for (std::uint32_t j = 0; j < total; ++j) {
+    std::uint32_t slot = j;
+    bool real = true;
+    if (wl > cl) real = (j % wl) < cl;  // fill-write: cycles beyond CL write only mask/row/col values
+    else if (cl > wl) slot = (j / wlz) * cl + (j % wlz);
+    std::uint32_t e[4] = {0, 0, 0, 0};
+    if (real) {
+      const std::uint32_t o = consumed * bits;
+      if (vn == 3 && vl == 3) {  // V4-5: RGBA5551
+        const std::uint32_t p = fetch(o, 16) & 0xFFFF;
+        e[0] = (p & 31) << 3; e[1] = ((p >> 5) & 31) << 3; e[2] = ((p >> 10) & 31) << 3; e[3] = ((p >> 15) & 1) << 7;
+      } else {
+        const std::uint32_t width = 32u >> vl;
+        for (std::uint32_t k = 0; k <= vn; ++k) e[k] = fetch(o + k * width, width);
+        if (vn == 0) e[1] = e[2] = e[3] = e[0];  // S: replicated
+      }
+      ++consumed;
+    }
+    const std::uint32_t addr = ((dest + slot) & 0x3FF) * 16;
+    const std::uint32_t mi = (std::min)(j % wlz, 3u);
+    for (std::uint32_t k = 0; k < 4; ++k) {
+      const std::uint32_t m = (g_vifMask >> ((mi * 4 + k) * 2)) & 3;  // 0 data, 1 row, 2 col, 3 write-protected
+      if (m == 3) continue;
+      std::uint32_t value = e[k];
+      if (m == 1) value = g_vifRow[k];
+      else if (m == 2) value = g_vifCol[mi];
+      else if (g_vifMode == 1) value += g_vifRow[k];
+      else if (g_vifMode == 2) { value += g_vifRow[k]; g_vifRow[k] = value; }
+      memcpy(g_vu1Data + addr + k * 4, &value, 4);
+    }
+  }
+  pos += (static_cast<std::size_t>(consumed) * bits + 31) / 32 * 4;
+}
+
 void ParseVif1(const std::vector<std::uint8_t>& d) {
   std::size_t pos = 0;
   auto word = [&](std::size_t at) { std::uint32_t v = 0; if (at + 4 <= d.size()) memcpy(&v, d.data() + at, 4); return v; };
@@ -198,21 +393,33 @@ void ParseVif1(const std::vector<std::uint8_t>& d) {
       Log("hw: VIF1 stream: unknown code %08X at byte %zu of %zu", code, pos - 4, d.size());
     if (cmd == 0x07) g_vifMark = imm;                                    // MARK: the game polls VIF1_MARK for it
     else if (cmd == 0x01) g_vifCycle = imm;
-    else if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) ++g_vifStarts;  // MSCAL, MSCALF, MSCNT: VU1 programs (not run yet)
-    else if (cmd == 0x20) pos += 4;                                      // STMASK
-    else if (cmd == 0x30 || cmd == 0x31) pos += 16;                      // STROW, STCOL
+    else if (cmd == 0x02) { g_vifOfst = imm & 0x3FF; g_vifDbf = 0; g_vifTops = g_vifBase; }  // OFFSET
+    else if (cmd == 0x03) g_vifBase = imm & 0x3FF;                       // BASE
+    else if (cmd == 0x04) g_vifItops = imm & 0x3FF;                      // ITOP
+    else if (cmd == 0x05) g_vifMode = imm & 3;                           // STMOD
+    else if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) {                // MSCAL, MSCALF, MSCNT: run the microprogram now
+      ++g_vifStarts;
+      g_vifItop = g_vifItops;
+      g_vifTop = g_vifTops;
+      g_vifTops = g_vifDbf ? g_vifBase : g_vifBase + g_vifOfst;
+      g_vifDbf ^= 1;
+      RunVu1(cmd == 0x17 ? g_vu1.pc : imm * 8);
+    }
+    else if (cmd == 0x20) { g_vifMask = word(pos); pos += 4; }          // STMASK
+    else if (cmd == 0x30 || cmd == 0x31) {                               // STROW, STCOL
+      for (int k = 0; k < 4; ++k) (cmd == 0x30 ? g_vifRow : g_vifCol)[k] = word(pos + k * 4);
+      pos += 16;
+    }
     else if (cmd == 0x4A) {                                                // MPG: microprogram into VU1 code memory
       const std::size_t bytes = static_cast<std::size_t>(num ? num : 256) * 8;
       for (std::size_t i = 0; i < bytes && pos + i < d.size(); ++i) g_vu1Micro[(imm * 8 + i) & 0x3FFF] = d[pos + i];
+      std::fill(g_vuImageState.begin(), g_vuImageState.end(), 0);
       pos += bytes;
-    } else if (cmd == 0x50 || cmd == 0x51) pos += static_cast<std::size_t>(imm ? imm : 0x10000) * 16;  // DIRECT(HL)
-    else if (cmd >= 0x60) {                                              // UNPACK
-      const std::uint32_t cl = g_vifCycle & 0xFF, wl = (g_vifCycle >> 8) & 0xFF, vn = (cmd >> 2) & 3, vl = cmd & 3;
-      std::uint32_t count = num ? num : 256;
-      if (wl > cl && cl > 0) count = (count / wl) * cl + (std::min)(count % wl, cl);
-      const std::uint32_t bits = (vn == 3 && vl == 3) ? 16 : (32u >> vl) * (vn + 1);
-      pos += (static_cast<std::size_t>(count) * bits + 31) / 32 * 4;
-    }
+    } else if (cmd == 0x50 || cmd == 0x51) {                             // DIRECT(HL): GIF packets (path 2)
+      const std::size_t bytes = static_cast<std::size_t>(imm ? imm : 0x10000) * 16;
+      if (pos < d.size()) GifFeed(1, d.data() + pos, (std::min)(bytes, d.size() - pos));
+      pos += bytes;
+    } else if (cmd >= 0x60) VifUnpack(cmd, num, imm, d, pos);          // UNPACK
   }
 }
 
@@ -244,6 +451,7 @@ void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
     }
   }
   if (channel == 1) ParseVif1(data);
+  else if (channel == 2) GifFeed(2, data.data(), data.size());
 }
 
 // ---- hardware registers (slow path of the translated code) -----------------------
@@ -1064,6 +1272,14 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(g_vifCodes), static_cast<unsigned long long>(g_vifInterrupts),
         static_cast<unsigned long long>(g_vifStarts), g_vifMark, g_intcStat, g_intcMask, g_intcPending,
         static_cast<unsigned long long>(g_discReads));
+    Log("  VU1: %llu runs, %llu translated calls, %llu without translated microcode, %llu XGKICKs", static_cast<unsigned long long>(g_vuRuns),
+        static_cast<unsigned long long>(g_vuCalls), static_cast<unsigned long long>(g_vuMissing), static_cast<unsigned long long>(g_xgkicks));
+    Log("  GIF: %llu tags, %llu image bytes, %llu PRIM writes, %llu vertices (%llu kicks)", static_cast<unsigned long long>(g_gifTags),
+        static_cast<unsigned long long>(g_gifImageBytes), static_cast<unsigned long long>(g_gsPrims),
+        static_cast<unsigned long long>(g_gsVertices), static_cast<unsigned long long>(g_gsKicks));
+    for (std::uint32_t r = 0; r < 0x80; ++r)
+      if (g_gsRegCount[r]) Log("    GS reg %02X: %llu writes, last %016llX", r, static_cast<unsigned long long>(g_gsRegCount[r]),
+                               static_cast<unsigned long long>(g_gsReg[r]));
     for (const auto& [key, n] : g_rpcCount)
       Log("  rpc server %08X function %u: %llu calls", static_cast<std::uint32_t>(key >> 32), static_cast<std::uint32_t>(key),
           static_cast<unsigned long long>(n));
