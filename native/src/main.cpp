@@ -797,6 +797,12 @@ void Hook(NativeState& s) {
       static const std::uint32_t reply[6] = {0x0A, 1, 0, 0x0FFF, 1, 1};
       memcpy(g_ram + Phys(recv), reply, sizeof reply);
     }
+    if (server == 0x80000400 && fn == 254 && recv && rsize >= 12 && InRam(recv, 12)) {
+      // The game's file manager (0x0028DD40) checks the I/O side's version words: word 1 >= 522 and word 2 >= 526,
+      // otherwise it prints an error and drops the server (every later open returns -100).
+      static const std::uint32_t reply[3] = {0, 522, 526};
+      memcpy(g_ram + Phys(recv), reply, sizeof reply);
+    }
     if (server == 0x80000593 && recv && InRam(recv, 4)) {  // libcdvd system commands
       if (fn == 3) Wr<std::uint32_t>(recv, 0x14);          // sceCdGetDiskType: PS2 DVD
       else if (fn == 4) Wr<std::uint32_t>(recv, 0);        // sceCdGetError: none
@@ -1066,6 +1072,22 @@ int wmain(int argc, wchar_t** argv) {
       if (t.used)
         Log("  thread %zu: status %d, priority %d, at %08X (called from %08X)%s", i, t.status, t.priority, t.s.pc,
             static_cast<std::uint32_t>(t.s.gpr[31][0]), t.wait_sema >= 0 ? " waiting for a semaphore" : t.sleeping ? " sleeping" : "");
+      if (t.used && t.s.pc == 0x00245830) {  // the state loop: show what it is running (diagnostic)
+        const std::uint32_t v1 = static_cast<std::uint32_t>(t.s.gpr[3][0]), a3 = static_cast<std::uint32_t>(t.s.gpr[7][0]);
+        if (InRam(v1 + 24) && InRam(a3 + 384))
+          Log("    loop: v1=%08X target=%08X obj=%08X state292=%u state376=%08X", v1, Rd<std::uint32_t>(v1 + 20), a3,
+              Rd<std::uint32_t>(a3 + 292), Rd<std::uint32_t>(a3 + 376));
+        if (InRam(a3 + 512)) {
+          std::string d = "    obj words:";
+          for (std::uint32_t o = 0; o < 400; o += 4) {
+            const std::uint32_t w = Rd<std::uint32_t>(a3 + o);
+            if (w) d += " +" + std::to_string(o) + "=" + [&] { char b[12]; snprintf(b, sizeof b, "%X", w); return std::string(b); }();
+          }
+          Log("%s", d.c_str());
+          const std::uint32_t o2 = Rd<std::uint32_t>(a3 + 380);
+          if (InRam(o2 + 1200)) Log("    obj380=%08X +1160=%08X +1168=%08X", o2, Rd<std::uint32_t>(o2 + 1160), Rd<std::uint32_t>(o2 + 1168));
+        }
+      }
     }
     if (g_log) fclose(g_log);
     return 0;

@@ -237,6 +237,8 @@ class FunctionLifter : public VectorCode {
     if (in.flow == Flow::Branch && !branch_supported(in)) return false;
     if (!inside(pc + 4)) return false;
     const Insn& slot = insn(pc + 4);
+    // The division check "beql divisor, zero; break 7" (see control()) is translated, so it can be entered too.
+    if (in.flow == Flow::Branch && in.likely && slot.flow == Flow::Break && pc != f_.start) return true;
     return slot.flow == Flow::None && supported(slot, L_.yield_in_idle_loops);
   }
 
