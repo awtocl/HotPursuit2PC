@@ -169,3 +169,24 @@ memory card calls (80000400 fn 1/2/3/5, answered with zeros = no card). Thread 1
 The 80000006 loader is still only called with fn 255 (the game does not need IRX loading in this path).
 Next: see what the game does now (add logging of the first calls of each new server function and of GIF/VIF1 packets), then VU1 execution
 from `g_vu1Micro` on MSCAL/MSCNT, XGKICK -> GIF, own GS renderer, input (pad 80000100/101), sound.
+
+## Stage 4, 2026-11-26: the native runtime draws
+
+New in `native/src/main.cpp`: VIF1 UNPACK (all formats, CL/WL, STMASK/STROW/STCOL, STMOD, BASE/OFFSET/ITOP, TOPS double buffering), VU1
+microprograms run on MSCAL/MSCNT with the translated images from `hp2code.dll` (`RunVu1`, `VuCodeAt`; XGKICK port write = quadword
+index, so address = value*16), and a streaming GIF decoder (`GifFeed`, paths 1 XGKICK / 2 DIRECT / 3 DMA2).
+New `native/src/gs.cpp` + `gs.h` (own code): GS local memory 4 MB with the page/block/column layouts (CT32/24/16/16S, T8, T4, T8H,
+T4HL/HH, Z32/24/16/16S), host-to-local and local-to-local transfers, registers (PRIM, RGBAQ, ST/Q, UV, XYZ(F)2/3, TEX0/1, CLAMP,
+XYOFFSET, SCISSOR, ALPHA, TEST, FRAME, ZBUF, TEXA, PABE...), a software rasteriser (triangles, strips, fans, sprites; Gouraud, perspective
+ST or UV, nearest or bilinear, CLUT, modulate/decal, alpha blend, alpha test, Z test, frame mask) and a Win32 window that shows the display
+buffer (PMODE/DISPFB/DISPLAY) at every vblank. `gs::DumpFrame` writes `.cache/native/frame.bmp` at the end of a run (dev only).
+Verified by eye (frame dump): the EA Games logo and, 45 s later, the Ferrari intro movie render correctly; 15 VU1 runs per frame with no
+missing microprogram; 1034 frames in 45 s (software GS ~23 fps wall: needs speed work); tests 15/15 (dev).
+Not done / known gaps: lines and points (counted, not drawn), fog, dithering, AA, the CLUT CSM2 path is approximate, TFX highlight modes
+approximate, alpha-fail modes other than KEEP, local-to-host transfers, Z24 buffer shares the frame width, no mip-maps. No sound, no input
+(pad 80000100/101 returns the reference's constant reply), memory card = none.
+Display is 512x444 here (DISPLAY DW/MAGH of the game); window scale setting `gs::SetWindowScale` exists but nothing calls it yet.
+Next: (1) input: pad server 80000100/101 from keyboard/XInput so the menus can be driven; (2) speed: tile/threads or move the rasteriser to the
+GPU (D3D11 back end fed by the same register stream) - this is also where the owner's QoL goes (internal resolution multiplier, texture
+filtering, aspect, widescreen) and where requirement 2's in-game options menu hooks in; (3) sound (EA streamer + SPU2 mixer);
+(4) ADR 0012 and `docs/recomp-analysis.md` section 18; (5) GitHub dev build `v0.2.0-dev.1` (only if the owner asks).
