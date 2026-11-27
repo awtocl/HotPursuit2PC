@@ -21,6 +21,7 @@ endforeach()
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/disc_manifest.inc" CONTENT "${hp2_manifest_body}" @ONLY)
 
 add_executable(hp2-frontend WIN32 src/main.cpp src/tasks.cpp src/tasks.h src/app.manifest
+               "${PROJECT_SOURCE_DIR}/native/src/hp2_style.cpp"
                "${PROJECT_SOURCE_DIR}/native/src/overlay.cpp")  # the settings table and hp2native.ini, shared with the game
 set_target_properties(hp2-frontend PROPERTIES OUTPUT_NAME HotPursuit2Launcher)
 target_include_directories(hp2-frontend PRIVATE "${PROJECT_SOURCE_DIR}/native/src" "${CMAKE_CURRENT_BINARY_DIR}/generated")

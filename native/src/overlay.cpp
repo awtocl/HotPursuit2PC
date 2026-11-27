@@ -1,8 +1,9 @@
-// Native settings overlay (ADR 0013). Visual language of Hot Pursuit 2's menus: steel-blue translucent panels with angled
-// edges, light grey bold italic items, the selected item in orange with an angled highlight, an orange accent stripe.
+// Native settings overlay (ADR 0013). Drawn in Hot Pursuit 2's own front-end style (hp2_style, shared with the launcher):
+// a blueprint-grid card with the steel title strip, the outlined italic title, the red and white rules, menu rows with
+// the selection in orange and underlined, and a steel ticker with the keys.
 #include "overlay.h"
 
-#include <windows.h>
+#include "hp2_style.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,35 +43,6 @@ std::wstring IniPath() {
 }
 
 const wchar_t* Key(int i) { return kItems[i].key; }
-
-// GDI helpers. Every drawn colour keeps at least one non-zero channel: untouched pixels (0) become the dimmed backdrop.
-COLORREF Rgb(int r, int g, int b) { return RGB(std::max(r, 1), g, b); }
-
-void FillPoly(HDC dc, const POINT* p, int n, COLORREF fill) {
-  HBRUSH br = CreateSolidBrush(fill);
-  HPEN pen = CreatePen(PS_SOLID, 1, fill);
-  HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pen);
-  Polygon(dc, p, n);
-  SelectObject(dc, ob);
-  SelectObject(dc, op);
-  DeleteObject(br);
-  DeleteObject(pen);
-}
-void Parallelogram(HDC dc, int x, int y, int w, int h, int skew, COLORREF fill) {
-  const POINT p[4] = {{x + skew, y}, {x + w + skew, y}, {x + w, y + h}, {x, y + h}};
-  FillPoly(dc, p, 4, fill);
-}
-void Text(HDC dc, HFONT font, int x, int y, int w, int h, const wchar_t* s, COLORREF c, UINT align) {
-  HGDIOBJ of = SelectObject(dc, font);
-  SetTextColor(dc, c);
-  RECT r = {x, y, x + w, y + h};
-  DrawTextW(dc, s, -1, &r, align | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-  SelectObject(dc, of);
-}
-HFONT Font(int height, int weight, const wchar_t* face) {
-  return CreateFontW(-height, 0, 0, 0, weight, TRUE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                     ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
-}
 
 }  // namespace
 
@@ -135,86 +107,56 @@ bool Navigate(Input in, Settings& s) {
 
 bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>& out) {
   if (!g_visible || width < 64 || height < 64) return false;
+  using namespace Gdiplus;
+  namespace st = hp2style;
+  st::Startup();
   out.assign(static_cast<std::size_t>(width) * height, 0);
-  BITMAPINFO bi = {};
-  bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-  bi.bmiHeader.biWidth = width;
-  bi.bmiHeader.biHeight = -height;
-  bi.bmiHeader.biPlanes = 1;
-  bi.bmiHeader.biBitCount = 32;
-  bi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HDC dc = CreateCompatibleDC(nullptr);
-  HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (!bmp || !bits) {
-    DeleteDC(dc);
-    return false;
-  }
-  HGDIOBJ old = SelectObject(dc, bmp);
-  SetBkMode(dc, TRANSPARENT);
+  {
+    // premultiplied BGRA straight into `out`
+    Bitmap bmp(width, height, width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(out.data()));
+    Graphics g(&bmp);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    g.Clear(Color(0x90, 0, 0, 0));  // the game picture, dimmed
+    // a 1280x720 design space, centred and scaled to the window
+    const float k = std::min(height / 720.0f, width / 1280.0f);
+    g.TranslateTransform((width - 1280 * k) / 2, (height - 720 * k) / 2);
+    g.ScaleTransform(k, k);
 
-  // layout in a 1280x720 design space scaled to the client height
-  const double k = std::min(height / 720.0, width / 1280.0);
-  auto S = [k](int v) { return static_cast<int>(v * k + 0.5); };
-  const int pw = S(760), rowH = S(52), headH = S(78), skew = S(26);
-  const int gap = S(14), ph = headH + S(24) + rowH * kRows + gap + S(70);
-  const int px = (width - pw) / 2, py = (height - ph) / 2;
-
-  // panel: dark steel body, lighter rim, header band with the orange accent stripe
-  Parallelogram(dc, px - S(4), py - S(4), pw + S(8), ph + S(8), skew, Rgb(96, 122, 156));
-  Parallelogram(dc, px, py, pw, ph, skew, Rgb(16, 26, 42));
-  auto edge = [&](int y) { return px + skew * (py + ph - y) / ph; };  // left edge of the slanted panel at height y
-  Parallelogram(dc, edge(py + headH), py, pw, headH, skew * headH / ph, Rgb(34, 62, 104));
-  Parallelogram(dc, edge(py + headH) + S(6), py + headH - S(6), pw - S(12), S(6), 1, Rgb(255, 146, 28));
-
-  HFONT title = Font(S(40), FW_BLACK, L"Arial Black"), item = Font(S(27), FW_BOLD, L"Arial"),
-        small = Font(S(19), FW_BOLD, L"Arial");
-  Text(dc, title, edge(py + headH / 2) + S(36), py, pw - S(88), headH - S(6), L"SETTINGS", Rgb(236, 240, 246), DT_LEFT);
-
-  const int listY = py + headH + S(24);
-  for (int i = 0; i < kRows; ++i) {
-    const int y = listY + i * rowH + (i == kItemCount ? gap : 0), x = edge(y + rowH / 2);
-    const bool sel = i == g_selected;
-    if (sel) {
-      Parallelogram(dc, x + S(18), y + S(4), pw - S(40), rowH - S(8), skew * (rowH - S(8)) / ph, Rgb(46, 78, 120));
-      const POINT chevron[3] = {{x + S(28), y + S(14)}, {x + S(42), y + rowH / 2}, {x + S(28), y + rowH - S(14)}};
-      FillPoly(dc, chevron, 3, Rgb(255, 146, 28));
+    const float x0 = 290, x1 = 990, y0 = 104, rowH = 38, gap = 12;
+    const float listY = 206, y1 = listY + rowH * kRows + gap + 52;
+    {
+      const GraphicsState clip = g.Save();
+      g.SetClip(RectF(x0, y0, x1 - x0, y1 - y0));
+      st::Grid(g, RectF(x0, y0, x1 - x0, y1 - y0), 34, 0.94f);
+      g.Restore(clip);
     }
-    const COLORREF label = sel ? Rgb(255, 156, 40) : Rgb(204, 210, 220);
-    if (i == kItemCount) {  // Quit game
-      Parallelogram(dc, x + S(18), y - gap / 2 - S(1), pw - S(40), S(2), 1, Rgb(60, 84, 116));
-      Text(dc, item, x + S(56), y, pw / 2, rowH, L"Quit game", label, DT_LEFT);
-      Text(dc, item, x + pw / 2, y, pw / 2 - S(48), rowH, g_quitArmed && sel ? L"Press again to quit" : L"Exit to Windows",
-           g_quitArmed && sel ? Rgb(255, 214, 150) : Rgb(150, 170, 196), DT_RIGHT);
-      continue;
-    }
-    Text(dc, item, x + S(56), y, pw / 2, rowH, kItems[i].label, label, DT_LEFT);
-    std::wstring name = kItems[i].names[s.*kItems[i].field];
-    if (kItems[i].field == &Settings::aspect && (s.aspect == 0) != g_wideActive) name += L" (restart)";  // 16:9 <-> 4:3
-    const std::wstring value = sel ? L"‹  " + name + L"  ›" : name;
-    Text(dc, item, x + pw / 2, y, pw / 2 - S(48), rowH, value.c_str(), sel ? Rgb(255, 214, 150) : Rgb(150, 170, 196), DT_RIGHT);
-  }
-  Text(dc, small, edge(py + ph - S(38)) + S(30), py + ph - S(58), pw - S(80), S(40),
-       L"↑↓ Select    ←→ / Enter / ✕ Change    F1 / Esc / Select+Start Close", Rgb(132, 150, 176), DT_CENTER);
+    st::SteelStrip(g, RectF(x0, 136, x1 - x0, 42));
+    st::Title(g, L"Settings", x0 + 28, 116, 56);
+    st::Rules(g, x0, x1, 184, x0 + 16);
 
-  GdiFlush();
-  const std::uint32_t* src = static_cast<const std::uint32_t*>(bits);
-  for (std::size_t i = 0; i < out.size(); ++i) {
-    const std::uint32_t p = src[i] & 0xFFFFFF;
-    if (p == 0) {
-      out[i] = 0x60000000u;  // dimmed game picture around the panel (premultiplied black, alpha 0x60)
-    } else {
-      const std::uint32_t a = 0xEE;
-      const std::uint32_t b = (p & 255) * a / 255, g = ((p >> 8) & 255) * a / 255, r = ((p >> 16) & 255) * a / 255;
-      out[i] = (a << 24) | (r << 16) | (g << 8) | b;
+    for (int i = 0; i < kRows; ++i) {
+      const float y = listY + i * rowH + (i == kItemCount ? gap : 0);
+      const RectF row(x0 + 16, y, x1 - x0 - 32, rowH - 4);
+      const bool sel = i == g_selected;
+      st::Row(g, row, sel);
+      const RectF label(row.X + 16, y, 300, row.Height), value(row.X + 300, y, row.Width - 316, row.Height);
+      if (i == kItemCount) {  // Quit game
+        st::Item(g, L"Quit Game", label, 23, sel);
+        st::Item(g, g_quitArmed && sel ? L"Press again to quit" : L"Exit to Windows", value, 21, g_quitArmed && sel, st::Align::Right);
+        continue;
+      }
+      st::Item(g, kItems[i].label, label, 23, sel);
+      std::wstring name = kItems[i].names[s.*kItems[i].field];
+      if (kItems[i].field == &Settings::aspect && (s.aspect == 0) != g_wideActive) name += L" (restart)";  // 16:9 <-> 4:3
+      st::Item(g, sel ? L"\u2039  " + name + L"  \u203A" : name, value, 21, sel, st::Align::Right);
     }
+    st::SteelStrip(g, RectF(x0, y1 - 38, x1 - x0, 30));
+    st::Outlined(g, L"\u2191\u2193 Select    \u2190\u2192 / Enter / \u2715 Change    F1 / Esc / Select+Start Close",
+                 RectF(x0 + 20, y1 - 38, x1 - x0 - 40, 30), st::ItemFamily(), FontStyleBold, 17, st::col::silver, st::Align::Center,
+                 0.2f, 2.2f);
   }
-  SelectObject(dc, old);
-  DeleteObject(bmp);
-  DeleteObject(title);
-  DeleteObject(item);
-  DeleteObject(small);
-  DeleteDC(dc);
   return true;
 }
 

@@ -18,8 +18,8 @@ public coverage of its 1.0 release; its own pages were not read). Its look and c
 Two facts make a launcher able to do the whole setup on the player's PC:
 
 - `hp2recomp package` compiles *and links* `hp2code.dll` itself (LLVM and LLD inside the executable): preparing the game
-  needs no compiler on the player's PC, only `hp2recomp.exe`. On the development PC: 2.4 s translation, 26–28 s compilation
-  (16 threads), 0.1 s link.
+  needs no compiler on the player's PC, only `hp2recomp.exe`. On the development PC: 2.4 s translation, 26–28 s
+  compilation (16 threads), 0.1 s link.
 - The converter's manifest (`converter/data/slus20362_rom_manifest.tsv`) has the size and SHA-256 of all 27 files of the
   supported disc, so the launcher can check a copy file by file.
 
@@ -29,9 +29,13 @@ A new program, `HotPursuit2Launcher.exe` (`launcher/`), sits next to the game in
 `HotPursuit2Native.exe` and `hp2recomp.exe`.
 
 - **Drawing:** Win32 + GDI+ (a Windows component; no new dependency), a 1280×720 logical layout scaled to the monitor's
-  DPI, its own title bar on a frameless window (DWM shadow and rounded corners). Hot Pursuit 2's visual language as in
-  ADR 0013: steel-blue angled translucent panels, light bold italic lettering, orange/amber selection, the orange accent
-  stripe. Bahnschrift (shipped with Windows 10/11), Segoe UI as fallback. Every image is drawn; none is in the repository.
+  DPI, its own title bar on a frameless window (DWM shadow and rounded corners). **The game's own front-end style**,
+  matched by eye against its main menu and shared with the in-game settings menu (`native/src/hp2_style.*`): a navy
+  blueprint grid on near-black, brushed-steel strips (title and ticker), a heavy italic silver page title with a black
+  outline (Arial Black, leaned), a red rule with a thin white one under it, menu rows on dark translucent bands with
+  condensed bold outlined lettering (Bahnschrift SemiBold Condensed), the focus in orange with an orange underline, small
+  list cells like the game's music list. Every image and letter is drawn by the program; no image or font of the game
+  is used and none is in the repository.
 - **Input:** mouse, keyboard and the first Xbox controller (XInput, loaded at run time): D-pad/stick move, A select,
   B back, LB/RB pages, Start plays.
 - **First-run setup (when there is no usable disc):** 1 Disc — the drives that hold the game (a DVD or a mounted `.iso`,
