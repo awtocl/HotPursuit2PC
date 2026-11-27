@@ -25,6 +25,21 @@
 namespace gs {
 void FlushGs();  // (the GS thread: defined at the end) everything queued done
 void StopGs();
+
+// Development: threads the HP2_SAMPLE profiler also samples (each registers itself when it starts).
+std::mutex g_profiledMutex;
+std::vector<std::pair<std::string, void*>> g_profiled;
+void RegisterProfiledThread(const char* group) {
+  HANDLE h = nullptr;
+  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
+                  THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
+  std::lock_guard<std::mutex> lock(g_profiledMutex);
+  g_profiled.emplace_back(group, h);
+}
+std::vector<std::pair<std::string, void*>> ProfiledThreads() {
+  std::lock_guard<std::mutex> lock(g_profiledMutex);
+  return g_profiled;
+}
 namespace {
 
 using u8 = std::uint8_t;
@@ -323,26 +338,28 @@ void BumpRect(const Surf& s, int x0, int x1, int y0, int y1) {
 // Pages that queued (not yet drawn) primitives write or read as frame/depth buffers. Anything that reads or writes GS
 // memory outside the workers (texture and palette decoding, image transfers, the display read-out) first waits for the
 // workers when it touches one of them.
-bool g_pendingPage[512] = {};
-bool g_anyPending = false;
-void DrawBarrier();  // (defined with the band pool) every queued primitive drawn; clears the pending pages
+// Each page remembers the queue position just after the last queued primitive that draws to (or depth-tests on) it; a
+// sync waits until the workers have passed that position - not until everything queued is drawn (full barriers made the
+// GS thread wait ~11% of its time, and longer in scenes of large sprites).
+u64 g_pageJob[512] = {};
+std::string g_waitNotes;  // (HP2_LOG_WAITS) long texture syncs, read with WaitNotes()
+void DrawBarrier();          // (defined with the band pool) every queued primitive drawn
+u64 NextJobEnd();            // the queue position after the primitive being queued
+enum WaitReason { kWaitTexture, kWaitUpload, kWaitPalette, kWaitDisplay, kWaitFull };  // (perf line: why the GS thread waited)
+void WaitForJobs(u64 end, int reason);   // every primitive before `end` drawn
 void MarkPending(const Surf& s, int x0, int x1, int y0, int y1) {
-  ForPages(s, x0, x1, y0, y1, [](u32 page) { g_pendingPage[page] = true; });
-  g_anyPending = true;
+  const u64 end = NextJobEnd();
+  ForPages(s, x0, x1, y0, y1, [&](u32 page) { g_pageJob[page] = end; });
 }
-void SyncPages(u32 first, u32 count) {
-  if (!g_anyPending) return;
-  for (u32 i = 0; i < count; ++i)
-    if (g_pendingPage[(first + i) & 511]) {
-      DrawBarrier();
-      return;
-    }
+void SyncPages(u32 first, u32 count, int reason) {
+  u64 end = 0;
+  for (u32 i = 0; i < count; ++i) end = std::max(end, g_pageJob[(first + i) & 511]);
+  if (end) WaitForJobs(end, reason);
 }
-void SyncRect(const Surf& s, int x0, int x1, int y0, int y1) {
-  if (!g_anyPending) return;
-  bool hit = false;
-  ForPages(s, x0, x1, y0, y1, [&](u32 page) { hit |= g_pendingPage[page]; });
-  if (hit) DrawBarrier();
+void SyncRect(const Surf& s, int x0, int x1, int y0, int y1, int reason) {
+  u64 end = 0;
+  ForPages(s, x0, x1, y0, y1, [&](u32 page) { end = std::max(end, g_pageJob[page]); });
+  if (end) WaitForJobs(end, reason);
 }
 
 // ---- row-parallel rasterisation ------------------------------------------------------------------------
@@ -427,7 +444,8 @@ RowPool& Pool() {
   return pool;
 }
 constexpr i64 kParallelArea = 4096;  // bounding-box pixels from which a primitive is split between threads
-std::atomic<u64> g_pixelCount{0}, g_texturedCount{0}, g_unsupportedTexels{0};
+std::atomic<u64> g_pixelCount{0}, g_texturedCount{0}, g_unsupportedTexels{0}, g_shadedCount{0};
+thread_local u64 tl_shaded = 0;  // pixels given to Shade by this thread (written or not), flushed by CountPixels
 std::atomic<u64> g_targetPixels[512] = {};  // diagnostic: pixels written per frame-buffer base page (FBP / 32)
 
 // ---- register state -----------------------------------------------------------------------------
@@ -708,7 +726,7 @@ void LoadClut(u64 tex0) {
   const u32 entries = is4 ? 16 : 256;
   FlushTransferPages();
   if (csm2) DrawBarrier();               // (a line anywhere in a buffer)
-  else SyncPages(cbp * 256 / 8192, 2);   // the palette block may have just been drawn
+  else SyncPages(cbp * 256 / 8192, 2, kWaitPalette);   // the palette block may have just been drawn
   g_clut16 = c16;
   const u32 fmt = cpsm == CT16S ? CT16S : (c16 ? CT16 : CT32);
   const Surf src = MakeSurf(fmt, cbp, csm2 ? static_cast<u32>(g_texclut & 63) : 1);  // (a palette load comes with most TEX0 writes)
@@ -852,12 +870,20 @@ u64 PageVersionSum(const PageList& list) {
   return s;
 }
 void SyncPageList(const PageList& list) {
-  if (!g_anyPending) return;
-  for (u16 page : list)
-    if (g_pendingPage[page]) {
-      DrawBarrier();
-      return;
-    }
+  u64 end = 0;
+  for (u16 page : list) end = std::max(end, g_pageJob[page]);
+  if (!end) return;
+  const u64 before = g_stats.waitByReason[kWaitTexture];
+  WaitForJobs(end, kWaitTexture);
+  static int noted = 0;  // development: which textures are read back while being drawn, when that costs > 2 ms
+  if (g_stats.waitByReason[kWaitTexture] - before > 8'000'000 && noted < 12 && std::getenv("HP2_LOG_WAITS")) {
+    ++noted;
+    char line[96];
+    snprintf(line, sizeof line, "gs: waited %.1f Mcycles for texture pages %u.. (%zu pages)", static_cast<double>(g_stats.waitByReason[kWaitTexture] - before) / 1e6,
+             list.empty() ? 0u : list[0], list.size());
+    g_waitNotes += line;
+    g_waitNotes += "\n";
+  }
 }
 u64 RawHash(const PageList& list) {  // the stored bytes of the pages (64-bit words, four independent lanes)
   u64 h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
@@ -952,7 +978,9 @@ const TexCache& GetTexture(const Ctx& c) {
 // registers that the game keeps changing; `c` is only for the diagnostic log at submission).
 struct Pipe {
   const Ctx* c;
-  bool tme, abe, fst, flat, linear, tcc, ate, zte, zmsk, aem, date, datm, fba, is16, pabe;
+  bool tme, abe, fst, flat, linear, tcc, ate, zte, zmsk, aem, date, datm, fba, is16, pabe, repeat;
+  bool direct;    // CT32 texels read straight from GS memory (texSurf): see DrawSprite
+  Surf texSurf;
   u32 tfx, atst, aref, ztst, zpsm, fpsm, fbmsk, afail;
   int sx0, sx1, sy0, sy1;
   u32 tw, th, wms, wmt, minu, maxu, minv, maxv;
@@ -962,17 +990,13 @@ struct Pipe {
   Surf fb, zb;
 };
 
-u32 WrapCoord(i32 v, u32 size, u32 mode, u32 minv, u32 maxv) {
+__forceinline u32 WrapCoord(i32 v, u32 size, u32 mode, u32 minv, u32 maxv) {
   switch (mode) {
     case 0: return static_cast<u32>(v) & (size - 1);
     case 1: return v < 0 ? 0 : (static_cast<u32>(v) >= size ? size - 1 : static_cast<u32>(v));
     case 2: return static_cast<u32>(std::clamp<i32>(v, static_cast<i32>(minv), static_cast<i32>(maxv)));
     default: return (static_cast<u32>(v) & minv) | maxv;
   }
-}
-inline Rgba Texel(const Pipe& p, i32 x, i32 y) {
-  const u32 ux = WrapCoord(x, p.tw, p.wms, p.minu, p.maxu), uy = WrapCoord(y, p.th, p.wmt, p.minv, p.maxv);
-  return Unpack32(p.texPix[static_cast<std::size_t>(uy & (p.th - 1)) * p.tw + (ux & (p.tw - 1))]);
 }
 
 bool g_pipeValid = false;  // (cleared by every register write but vertex data: RegWrite)
@@ -981,7 +1005,7 @@ std::vector<u16> g_pipeTexPages;
 u64 g_pipeTexVer = 0;
 bool g_pipeTexIndexed = false;
 
-Pipe BuildPipe(bool flat) {
+Pipe BuildPipe(bool flat, bool direct = false) {
   Pipe p = {};
   const Ctx& c = g_ctx[(g_prim >> 9) & 1];
   p.c = &c;
@@ -1007,13 +1031,17 @@ Pipe BuildPipe(bool flat) {
   p.tw = 1u << ((c.tex0 >> 26) & 15); p.th = 1u << ((c.tex0 >> 30) & 15);
   p.linear = ((c.tex1 >> 5) & 1) != 0;
   p.wms = static_cast<u32>(c.clamp & 3); p.wmt = static_cast<u32>((c.clamp >> 2) & 3);
+  p.repeat = p.wms == 0 && p.wmt == 0;  // REPEAT both ways: a mask (Texel's fast path)
   p.minu = static_cast<u32>((c.clamp >> 4) & 0x3FF); p.maxu = static_cast<u32>((c.clamp >> 14) & 0x3FF);
   p.minv = static_cast<u32>((c.clamp >> 24) & 0x3FF); p.maxv = static_cast<u32>((c.clamp >> 34) & 0x3FF);
   p.fb = MakeSurf(p.fpsm, fbp, fbw);
   p.zb = MakeSurf(p.zpsm, static_cast<u32>(c.zbuf & 0x1FF) * 32, fbw);
   p.alpha = c.alpha;
   p.pabe = (g_pabe & 1) != 0;
-  if (p.tme) {
+  if (p.tme && direct) {
+    p.direct = true;
+    p.texSurf = MakeSurf(CT32, static_cast<u32>(c.tex0 & 0x3FFF), static_cast<u32>((c.tex0 >> 14) & 63));
+  } else if (p.tme) {
     const TexCache& t = GetTexture(c);
     p.texKeep = t.pix;
     p.texPix = p.texKeep.get();
@@ -1043,45 +1071,139 @@ Pipe MakePipe(bool flat) {
   return g_pipe;
 }
 
+// Colour lanes (r, g, b, a as 32-bit integers: the layout of Rgba) for the per-pixel arithmetic, four channels at once.
+static_assert(sizeof(Rgba) == 16, "Rgba is four ints: loaded as one vector");
+inline __m128i Lanes(u32 packed) { return _mm_cvtepu8_epi32(_mm_cvtsi32_si128(static_cast<int>(packed))); }
+inline __m128i LanesOf(const Rgba& c) { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(&c)); }
+inline Rgba RgbaOf(__m128i v) {
+  Rgba c;
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(&c), v);
+  return c;
+}
+inline __m128i Clamp255(__m128i v) { return _mm_min_epi32(_mm_max_epi32(v, _mm_setzero_si128()), _mm_set1_epi32(255)); }
+inline u32 PackLanes(__m128i v) {  // (lanes already 0..255)
+  const __m128i w = _mm_packus_epi32(v, v);
+  return static_cast<u32>(_mm_cvtsi128_si32(_mm_packus_epi16(w, w)));
+}
+__forceinline u32 TexelPacked(const Pipe& p, i32 x, i32 y) {
+  if (p.direct) {
+    const u32 ux = (p.repeat ? static_cast<u32>(x) : WrapCoord(x, p.tw, p.wms, p.minu, p.maxu)) & (p.tw - 1);
+    const u32 uy = (p.repeat ? static_cast<u32>(y) : WrapCoord(y, p.th, p.wmt, p.minv, p.maxv)) & (p.th - 1);
+    return SurfReadRaw(p.texSurf, ux, uy);
+  }
+  if (p.repeat) return p.texPix[static_cast<std::size_t>(static_cast<u32>(y) & (p.th - 1)) * p.tw + (static_cast<u32>(x) & (p.tw - 1))];
+  const u32 ux = WrapCoord(x, p.tw, p.wms, p.minu, p.maxu), uy = WrapCoord(y, p.th, p.wmt, p.minv, p.maxv);
+  return p.texPix[static_cast<std::size_t>(uy & (p.th - 1)) * p.tw + (ux & (p.tw - 1))];
+}
+inline u32 ReadAt(const Surf& s, u32 a) {  // a stored pixel at a byte address from SurfAddr
+  if (s.kind == Kind::C32 || s.kind == Kind::Z32) {
+    u32 v;
+    memcpy(&v, &g_mem[a & ~3u], 4);
+    return (s.psm == CT24 || s.psm == Z24) ? (v & 0xFFFFFF) : v;
+  }
+  u16 h;
+  memcpy(&h, &g_mem[a & ~1u], 2);
+  return h;
+}
+inline void WriteAt(const Surf& s, u32 a, u32 value, u32 mask) {
+  if (s.kind == Kind::C32 || s.kind == Kind::Z32) {
+    if (s.psm == CT24 || s.psm == Z24) mask &= 0x00FFFFFFu;
+    u32 old;
+    memcpy(&old, &g_mem[a & ~3u], 4);
+    old = (old & ~mask) | (value & mask);
+    memcpy(&g_mem[a & ~3u], &old, 4);
+  } else {
+    u16 old;
+    memcpy(&old, &g_mem[a & ~1u], 2);
+    old = static_cast<u16>((old & ~mask) | (value & mask));
+    memcpy(&g_mem[a & ~1u], &old, 2);
+  }
+}
+
 // One pixel: texture, depth/alpha tests, blending, write. `col` is the interpolated vertex colour, (tu, tv) the texel position.
-inline bool Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, float tv) {
+// Compiled for each combination of texturing, bilinear filtering and blending (DrawRows picks one per primitive): no
+// per-pixel branches on them. Colour arithmetic runs on four channels at once; bilinear weights are 8-bit fixed point (the
+// GS's own precision); each buffer address is worked out once per pixel.
+template <bool kTme, bool kLinear, bool kAbe>
+inline bool Shade(const Pipe& p, int px, int py, u32 z, __m128i vcol, float tu, float tv) {  // vcol: vertex colour lanes
   const u32 zv = p.zpsm == Z24 ? (z >> 8) : (p.zpsm == Z32 ? z : (z >> 16) & 0xFFFF);
+  const u32 za = p.zte ? SurfAddr(p.zb, static_cast<u32>(px), static_cast<u32>(py)) : 0;
   if (p.zte && p.ztst != 1) {
     if (p.ztst == 0) return false;
-    const u32 old = SurfRead(p.zb, static_cast<u32>(px), static_cast<u32>(py));
+    const u32 old = ReadAt(p.zb, za);
     if (p.ztst == 2 ? zv < old : zv <= old) return false;  // GEQUAL / GREATER
   }
+  const u32 fa = SurfAddr(p.fb, static_cast<u32>(px), static_cast<u32>(py));
   if (p.date) {  // destination alpha test (stencil-like masks: car shadows, effects): a failed pixel is not written at all
-    const u32 d = SurfRead(p.fb, static_cast<u32>(px), static_cast<u32>(py));
+    const u32 d = ReadAt(p.fb, fa);
     if (((d & (p.is16 ? 0x8000u : 0x80000000u)) != 0) != p.datm) return false;
   }
-  if (p.tme) {
-    Rgba tex;
-    if (p.linear) {
+  __m128i c;
+  if constexpr (kTme) {
+    __m128i tex;
+    if constexpr (kLinear) {
       const float fx = tu - 0.5f, fy = tv - 0.5f;
-      const i32 ix = static_cast<i32>(std::floor(fx)), iy = static_cast<i32>(std::floor(fy));
-      const float ux = fx - static_cast<float>(ix), uy = fy - static_cast<float>(iy);
-      const Rgba t00 = Texel(p, ix, iy), t10 = Texel(p, ix + 1, iy), t01 = Texel(p, ix, iy + 1), t11 = Texel(p, ix + 1, iy + 1);
-      auto mix = [&](int a, int b, int c, int d) { return static_cast<int>((static_cast<float>(a) * (1 - ux) + static_cast<float>(b) * ux) * (1 - uy) + (static_cast<float>(c) * (1 - ux) + static_cast<float>(d) * ux) * uy); };
-      tex = {mix(t00.r, t10.r, t01.r, t11.r), mix(t00.g, t10.g, t01.g, t11.g), mix(t00.b, t10.b, t01.b, t11.b), mix(t00.a, t10.a, t01.a, t11.a)};
+      const __m128 fl = _mm_floor_ps(_mm_setr_ps(fx, fy, 0, 0));  // (inline: std::floor was a library call per pixel)
+      const float flx = _mm_cvtss_f32(fl), fly = _mm_cvtss_f32(_mm_shuffle_ps(fl, fl, 1));
+      const i32 ix = static_cast<i32>(flx), iy = static_cast<i32>(fly);
+      const int wx = static_cast<int>((fx - flx) * 256.0f), wy = static_cast<int>((fy - fly) * 256.0f);
+      // the two columns and two rows wrapped once each (CLAMP / REGION textures wrapped every one of the four texels twice)
+      u32 x0, x1, y0, y1;
+      if (p.repeat) {
+        x0 = static_cast<u32>(ix) & (p.tw - 1); x1 = static_cast<u32>(ix + 1) & (p.tw - 1);
+        y0 = static_cast<u32>(iy) & (p.th - 1); y1 = static_cast<u32>(iy + 1) & (p.th - 1);
+      } else {
+        x0 = WrapCoord(ix, p.tw, p.wms, p.minu, p.maxu) & (p.tw - 1); x1 = WrapCoord(ix + 1, p.tw, p.wms, p.minu, p.maxu) & (p.tw - 1);
+        y0 = WrapCoord(iy, p.th, p.wmt, p.minv, p.maxv) & (p.th - 1); y1 = WrapCoord(iy + 1, p.th, p.wmt, p.minv, p.maxv) & (p.th - 1);
+      }
+      u32 t00, t10, t01, t11;
+      if (p.direct) {
+        t00 = SurfReadRaw(p.texSurf, x0, y0); t10 = SurfReadRaw(p.texSurf, x1, y0);
+        t01 = SurfReadRaw(p.texSurf, x0, y1); t11 = SurfReadRaw(p.texSurf, x1, y1);
+      } else {
+        const u32* r0 = p.texPix + static_cast<std::size_t>(y0) * p.tw;
+        const u32* r1 = p.texPix + static_cast<std::size_t>(y1) * p.tw;
+        t00 = r0[x0]; t10 = r0[x1]; t01 = r1[x0]; t11 = r1[x1];
+      }
+      // 16-bit lanes, both rows at once: left = (t00 | t01), right = (t10 | t11); each step a * (256 - w) + b * w <= 255 * 256
+      const __m128i left = _mm_cvtepu8_epi16(_mm_set_epi32(0, 0, static_cast<int>(t01), static_cast<int>(t00)));
+      const __m128i right = _mm_cvtepu8_epi16(_mm_set_epi32(0, 0, static_cast<int>(t11), static_cast<int>(t10)));
+      const __m128i rows = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(left, _mm_set1_epi16(static_cast<short>(256 - wx))),
+                                                         _mm_mullo_epi16(right, _mm_set1_epi16(static_cast<short>(wx)))), 8);  // top | bottom
+      const __m128i both = _mm_add_epi16(_mm_mullo_epi16(rows, _mm_setr_epi16(static_cast<short>(256 - wy), static_cast<short>(256 - wy), static_cast<short>(256 - wy),
+                                                                              static_cast<short>(256 - wy), static_cast<short>(wy), static_cast<short>(wy),
+                                                                              static_cast<short>(wy), static_cast<short>(wy))),
+                                         _mm_setzero_si128());
+      tex = _mm_cvtepu16_epi32(_mm_srli_epi16(_mm_add_epi16(both, _mm_srli_si128(both, 8)), 8));
     } else {
       i32 ix = static_cast<i32>(tu), iy = static_cast<i32>(tv);
       if (tu < 0 && static_cast<float>(ix) != tu) --ix;
       if (tv < 0 && static_cast<float>(iy) != tv) --iy;
-      tex = Texel(p, ix, iy);
+      tex = Lanes(TexelPacked(p, ix, iy));
     }
     switch (p.tfx) {
-      case 0: col = {Clamp8(tex.r * col.r >> 7), Clamp8(tex.g * col.g >> 7), Clamp8(tex.b * col.b >> 7), p.tcc ? Clamp8(tex.a * col.a >> 7) : col.a}; break;
-      case 1: col = {tex.r, tex.g, tex.b, p.tcc ? tex.a : col.a}; break;
-      default: col = {Clamp8((tex.r * col.r >> 7) + col.a), Clamp8((tex.g * col.g >> 7) + col.a), Clamp8((tex.b * col.b >> 7) + col.a), p.tcc ? Clamp8(tex.a + col.a) : col.a}; break;
+      case 0:  // MODULATE
+        c = Clamp255(_mm_srai_epi32(_mm_mullo_epi32(tex, vcol), 7));
+        if (!p.tcc) c = _mm_insert_epi32(c, _mm_extract_epi32(vcol, 3), 3);
+        break;
+      case 1:  // DECAL
+        c = p.tcc ? tex : _mm_insert_epi32(tex, _mm_extract_epi32(vcol, 3), 3);
+        break;
+      default: {  // HIGHLIGHT, HIGHLIGHT2
+        const Rgba t = RgbaOf(tex), col = RgbaOf(vcol);
+        c = LanesOf(Rgba{Clamp8((t.r * col.r >> 7) + col.a), Clamp8((t.g * col.g >> 7) + col.a), Clamp8((t.b * col.b >> 7) + col.a),
+                         p.tcc ? Clamp8(t.a + col.a) : col.a});
+        break;
+      }
     }
   } else {
-    col = {Clamp8(col.r), Clamp8(col.g), Clamp8(col.b), Clamp8(col.a)};
+    c = Clamp255(vcol);
   }
+  const int sa = _mm_extract_epi32(c, 3);  // source alpha
   bool writeZ = true;  // (alpha test fail modes can drop the depth write or the alpha channel)
   u32 keep = 0;
   if (p.ate) {
-    const u32 av = static_cast<u32>(col.a);
+    const u32 av = static_cast<u32>(sa);
     bool pass = true;
     switch (p.atst) {
       case 0: pass = false; break;
@@ -1097,7 +1219,7 @@ inline bool Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, floa
       switch (p.afail) {
         case 1: writeZ = false; break;  // FB_ONLY: colour and alpha, no depth
         case 2:                         // ZB_ONLY: depth only
-          if (!p.zmsk && p.zte) SurfWrite(p.zb, static_cast<u32>(px), static_cast<u32>(py), zv, 0xFFFFFFFFu);
+          if (!p.zmsk && p.zte) WriteAt(p.zb, za, zv, 0xFFFFFFFFu);
           return true;
         case 3: writeZ = false; keep |= p.is16 ? 0x8000u : 0xFF000000u; break;  // RGB_ONLY: no alpha, no depth
         default: return false;  // KEEP
@@ -1105,20 +1227,27 @@ inline bool Shade(const Pipe& p, int px, int py, u32 z, Rgba col, float tu, floa
     }
   }
   const bool is16 = p.is16;
-  if (p.abe && (!p.pabe || (col.a & 0x80))) {
-    const u32 raw = SurfRead(p.fb, static_cast<u32>(px), static_cast<u32>(py));
-    const Rgba dst = is16 ? Unpack16(raw, 128, 0) : Unpack32(raw);
+  bool blend = false;
+  if constexpr (kAbe) blend = !p.pabe || (sa & 0x80);
+  if (blend) {  // ((A - B) * C >> 7) + D, A/B/D from source, destination or 0, C from source alpha, destination alpha or FIX
+    const u32 raw = ReadAt(p.fb, fa);
+    const __m128i d = is16 ? LanesOf(Unpack16(raw, 128, 0)) : Lanes(raw);
     const u32 A = static_cast<u32>(p.alpha & 3), B = static_cast<u32>((p.alpha >> 2) & 3), C = static_cast<u32>((p.alpha >> 4) & 3), D = static_cast<u32>((p.alpha >> 6) & 3);
-    const int fix = static_cast<int>((p.alpha >> 32) & 255);
-    auto pick = [&](u32 sel, int cs, int cd) { return sel == 0 ? cs : sel == 1 ? cd : 0; };
-    const int ac = C == 0 ? col.a : C == 1 ? dst.a : fix;
-    auto channel = [&](int cs, int cd) { return Clamp8(((pick(A, cs, cd) - pick(B, cs, cd)) * ac >> 7) + pick(D, cs, cd)); };
-    col = {channel(col.r, dst.r), channel(col.g, dst.g), channel(col.b, dst.b), col.a};
+    const int ac = C == 0 ? sa : C == 1 ? _mm_extract_epi32(d, 3) : static_cast<int>((p.alpha >> 32) & 255);
+    auto pick = [&](u32 sel) { return sel == 0 ? c : sel == 1 ? d : _mm_setzero_si128(); };
+    const __m128i r = _mm_add_epi32(_mm_srai_epi32(_mm_mullo_epi32(_mm_sub_epi32(pick(A), pick(B)), _mm_set1_epi32(ac)), 7), pick(D));
+    c = _mm_insert_epi32(Clamp255(r), sa, 3);  // (alpha stays the source's)
   }
-  if (p.fba) col.a |= 0x80;
-  const u32 out = is16 ? static_cast<u32>((col.r >> 3) | ((col.g >> 3) << 5) | ((col.b >> 3) << 10) | ((col.a & 0x80) << 8)) : Pack32(col);
-  SurfWrite(p.fb, static_cast<u32>(px), static_cast<u32>(py), out, ~(p.fbmsk | keep));
-  if (writeZ && !p.zmsk && p.zte) SurfWrite(p.zb, static_cast<u32>(px), static_cast<u32>(py), zv, 0xFFFFFFFFu);
+  if (p.fba) c = _mm_insert_epi32(c, sa | 0x80, 3);
+  u32 out;
+  if (is16) {
+    const Rgba o = RgbaOf(c);
+    out = static_cast<u32>((o.r >> 3) | ((o.g >> 3) << 5) | ((o.b >> 3) << 10) | ((o.a & 0x80) << 8));
+  } else {
+    out = PackLanes(c);
+  }
+  WriteAt(p.fb, fa, out, ~(p.fbmsk | keep));
+  if (writeZ && !p.zmsk && p.zte) WriteAt(p.zb, za, zv, 0xFFFFFFFFu);
   return true;
 }
 
@@ -1157,6 +1286,7 @@ struct Job {
   i32 x0 = 0, y0 = 0;
 };
 
+template <bool kTme, bool kLinear, bool kAbe>
 u64 TriangleRow(const Job& j, int py) {
   const Pipe& p = j.p;
   const Vertex &a = j.a, &b = j.b, &d = j.d;
@@ -1185,23 +1315,24 @@ u64 TriangleRow(const Job& j, int py) {
   auto step = [&](float va, float vb, float vd) { return static_cast<float>((va - vd) * s0 + (vb - vd) * s1); };
   double z = static_cast<double>(d.z) + (static_cast<double>(a.z) - d.z) * l0 + (static_cast<double>(b.z) - d.z) * l1;
   const double zs = (static_cast<double>(a.z) - d.z) * s0 + (static_cast<double>(b.z) - d.z) * s1;
-  float r = at(a.r, b.r, d.r), g = at(a.g, b.g, d.g), bl = at(a.b, b.b, d.b), al = at(a.a, b.a, d.a);
-  const float rs = step(a.r, b.r, d.r), gs = step(a.g, b.g, d.g), bs = step(a.b, b.b, d.b), as = step(a.a, b.a, d.a);
+  __m128 vc = _mm_setr_ps(at(a.r, b.r, d.r), at(a.g, b.g, d.g), at(a.b, b.b, d.b), at(a.a, b.a, d.a));  // colour, four lanes
+  const __m128 vcs = _mm_setr_ps(step(a.r, b.r, d.r), step(a.g, b.g, d.g), step(a.b, b.b, d.b), step(a.a, b.a, d.a));
   float tx = 0, ty = 0, tq = 0, txs = 0, tys = 0, tqs = 0;  // u, v (fixed) or s, t, q (perspective)
-  if (p.tme) {
+  if constexpr (kTme) {
     if (p.fst) { tx = at(a.u, b.u, d.u); ty = at(a.v, b.v, d.v); txs = step(a.u, b.u, d.u); tys = step(a.v, b.v, d.v); }
     else {
       tx = at(a.s, b.s, d.s); ty = at(a.t, b.t, d.t); tq = at(a.q, b.q, d.q);
       txs = step(a.s, b.s, d.s); tys = step(a.t, b.t, d.t); tqs = step(a.q, b.q, d.q);
     }
   }
-  const Rgba flatCol = {static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)};
+  tl_shaded += static_cast<u64>(hi - lo + 1);
+  const __m128i flatCol = LanesOf(Rgba{static_cast<int>(d.r), static_cast<int>(d.g), static_cast<int>(d.b), static_cast<int>(d.a)});
   u64 written = 0;
-  for (int px = lo; px <= hi; ++px, z += zs, r += rs, g += gs, bl += bs, al += as, tx += txs, ty += tys, tq += tqs) {
+  for (int px = lo; px <= hi; ++px, z += zs, vc = _mm_add_ps(vc, vcs), tx += txs, ty += tys, tq += tqs) {
     const u32 zi = static_cast<u32>(std::clamp(z, 0.0, 4294967295.0));
-    const Rgba col = p.flat ? flatCol : Rgba{static_cast<int>(r), static_cast<int>(g), static_cast<int>(bl), static_cast<int>(al)};
+    const __m128i col = p.flat ? flatCol : _mm_cvttps_epi32(vc);
     float tu = 0, tv = 0;
-    if (p.tme) {
+    if constexpr (kTme) {
       if (p.fst) {
         tu = tx * (1.0f / 16.0f);
         tv = ty * (1.0f / 16.0f);
@@ -1211,28 +1342,44 @@ u64 TriangleRow(const Job& j, int py) {
         tv = ty * rq * th;
       }
     }
-    written += Shade(p, px, py, zi, col, tu, tv) ? 1 : 0;
+    written += Shade<kTme, kLinear, kAbe>(p, px, py, zi, col, tu, tv) ? 1 : 0;
   }
   return written;
 }
 
+template <bool kTme, bool kLinear, bool kAbe>
 u64 SpriteRow(const Job& j, int py) {
-  const float fy = (static_cast<float>(py * 16 + 8 - j.y0)) / j.fh;
+  // texture coordinates at the pixel's integer position, as the GS samples (texel i's centre is at i + 0.5: a 1:1 copy sends
+  // u = x + 0.5); at the pixel centre they were half a texel off and bilinear copies blurred every row and column
+  const float fy = (static_cast<float>(py * 16 - j.y0)) / j.fh;
   const float tv = j.sv0 + (j.sv1 - j.sv0) * fy;
+  const float du = (j.su1 - j.su0) / j.fw;  // texel step per 1/16 pixel (a multiply per pixel, not a division)
+  const __m128i col = LanesOf(j.col);
+  tl_shaded += static_cast<u64>(j.maxx - j.minx + 1);
   u64 written = 0;
-  for (int px = j.minx; px <= j.maxx; ++px) {
-    const float fx = (static_cast<float>(px * 16 + 8 - j.x0)) / j.fw;
-    written += Shade(j.p, px, py, j.z, j.col, j.su0 + (j.su1 - j.su0) * fx, tv) ? 1 : 0;
-  }
+  for (int px = j.minx; px <= j.maxx; ++px)
+    written += Shade<kTme, kLinear, kAbe>(j.p, px, py, j.z, col, j.su0 + du * static_cast<float>(px * 16 - j.x0), tv) ? 1 : 0;
   return written;
 }
 
-u64 DrawRows(const Job& j, int y0, int y1) {
+template <bool kTme, bool kLinear, bool kAbe>
+u64 DrawRowsT(const Job& j, int y0, int y1) {
   u64 written = 0;
-  for (int py = y0; py <= y1; ++py) written += j.sprite ? SpriteRow(j, py) : TriangleRow(j, py);
+  for (int py = y0; py <= y1; ++py) written += j.sprite ? SpriteRow<kTme, kLinear, kAbe>(j, py) : TriangleRow<kTme, kLinear, kAbe>(j, py);
   return written;
+}
+u64 DrawRows(const Job& j, int y0, int y1) {
+  switch ((j.p.tme ? 4 : 0) | (j.p.tme && j.p.linear ? 2 : 0) | (j.p.abe ? 1 : 0)) {
+    case 0: return DrawRowsT<false, false, false>(j, y0, y1);
+    case 1: return DrawRowsT<false, false, true>(j, y0, y1);
+    case 4: return DrawRowsT<true, false, false>(j, y0, y1);
+    case 5: return DrawRowsT<true, false, true>(j, y0, y1);
+    case 6: return DrawRowsT<true, true, false>(j, y0, y1);
+    default: return DrawRowsT<true, true, true>(j, y0, y1);
+  }
 }
 void CountPixels(const Job& j, u64 written) {
+  if (tl_shaded) { g_shadedCount.fetch_add(tl_shaded, std::memory_order_relaxed); tl_shaded = 0; }
   if (!written) return;
   g_pixelCount.fetch_add(written, std::memory_order_relaxed);
   g_targetPixels[(j.p.fb.base >> 13) & 511].fetch_add(written, std::memory_order_relaxed);
@@ -1244,9 +1391,9 @@ class BandPool {
   BandPool() {
     const unsigned n = std::thread::hardware_concurrency();
     const char* env = std::getenv("HP2_GS_THREADS");  // 0 = draw on the game's thread
-    // default: about one per physical core besides the game's thread (two threads per core assumed from 12 up); more workers
-    // spinning on the game thread's sibling hardware thread slowed the game down
-    unsigned want = env ? static_cast<unsigned>(std::atoi(env)) : (n >= 12 ? n / 2 - 1 : n > 3 ? n - 2 : 0);
+    // default: 5/8 of the hardware threads from 12 up (10 of 16: fill test, HP2_GS_FILLTEST, best there; 12 slowed flat fills
+    // and the game's and GS threads share cores with them), else all but the game's and GS threads
+    unsigned want = env ? static_cast<unsigned>(std::atoi(env)) : (n >= 12 ? n * 5 / 8 : n > 3 ? n - 2 : 0);
     want = std::min(want, 16u);
     if (want < 2) want = 0;  // a single worker gains nothing over drawing in place
     m_count = want;
@@ -1278,6 +1425,20 @@ class BandPool {
     }
   }
   void Barrier() { WaitDone(m_seq); }
+  bool Drawn(u64 end) {  // every primitive before `end` drawn already (no waiting)
+    if (m_doneCache >= end) return true;
+    m_doneCache = MinDone();
+    return m_doneCache >= end;
+  }
+  u64 NextEnd() const { return m_seq + 1; }
+  void WaitUntil(u64 end) {  // (cheap when the workers are already past it)
+    if (end > m_seq) end = m_seq;
+    if (m_doneCache >= end) return;
+    m_doneCache = MinDone();
+    if (m_doneCache >= end) return;
+    WaitDone(end);
+    m_doneCache = MinDone();
+  }
 
  private:
   static constexpr u64 kCapacity = 16384;
@@ -1301,6 +1462,7 @@ class BandPool {
       }
   }
   void Worker(unsigned w) {
+    RegisterProfiledThread("workers");
     u64 next = 0;
     const int n = static_cast<int>(m_count);
     for (;;) {
@@ -1332,7 +1494,7 @@ class BandPool {
   std::vector<Job> m_jobs;
   std::unique_ptr<Done[]> m_done;
   std::vector<std::thread> m_workers;
-  u64 m_seq = 0, m_freeUntil = kCapacity;  // game's thread only
+  u64 m_seq = 0, m_freeUntil = kCapacity, m_doneCache = 0;  // GS thread only
   std::atomic<u64> m_published{0};
   std::atomic<u32> m_signal{0};
   std::atomic<int> m_sleepers{0};
@@ -1343,14 +1505,23 @@ BandPool& Bands() {
   return pool;
 }
 void DrawBarrier() {
-  if (Bands().Active()) {
-    Ticks timer(g_stats.waitTicks);
-    Bands().Barrier();
-  }
-  if (g_anyPending) {
-    memset(g_pendingPage, 0, sizeof g_pendingPage);
-    g_anyPending = false;
-  }
+  if (!Bands().Active()) return;
+  const u64 t0 = __rdtsc();
+  Bands().Barrier();
+  const u64 dt = __rdtsc() - t0;
+  g_stats.waitTicks += dt;
+  g_stats.waitByReason[kWaitFull] += dt;
+  if (dt > 20000) ++g_stats.waitsByReason[kWaitFull];
+}
+u64 NextJobEnd() { return Bands().NextEnd(); }
+void WaitForJobs(u64 end, int reason) {
+  if (!Bands().Active()) return;
+  const u64 t0 = __rdtsc();
+  Bands().WaitUntil(end);
+  const u64 dt = __rdtsc() - t0;
+  g_stats.waitTicks += dt;
+  g_stats.waitByReason[reason] += dt;
+  if (dt > 20000) ++g_stats.waitsByReason[reason];  // (more than a few microseconds: an actual wait)
 }
 
 // Where a primitive is set up: its queue slot, or (no workers, or the primitive log wants pixel counts) a local one.
@@ -1428,10 +1599,43 @@ void DrawSprite(const Vertex& a, const Vertex& b) {
       if (!noted) { noted = true; ++g_stats.skippedDepthFog; }
       return;
     }
+    // ... and its preparation: 8-pixel strips that read the depth buffer as a texture and copy depth bits into the frame
+    // buffer's alpha (alpha test NEVER, fail mode FB_ONLY). Only the fog reads that alpha; drawing it forced a wait for the
+    // whole scene and a 512x1024 texture decode in every frame (the deepest dips: dust in front of the camera).
+    const u32 tpsm = static_cast<u32>((c.tex0 >> 20) & 0x3F);
+    if (!keepFog && ((g_prim >> 4) & 1) && (tpsm == Z32 || tpsm == Z24 || tpsm == Z16 || tpsm == Z16S) && (c.test & 1) &&
+        ((c.test >> 1) & 7) == 0 && ((c.test >> 12) & 3) == 1)
+      return;
+  }
+  // A copy of a buffer still being drawn (the game copies each finished frame between its buffers): normally a wait for
+  // the whole frame and a decode of the full texture. When texel row v maps to screen row v exactly, the worker drawing a
+  // row also drew that row of the source, earlier in its own queue: it reads the texels straight from GS memory instead.
+  bool direct = false;
+  if (Queued() && ((g_prim >> 4) & 1)) {
+    const Ctx& c = g_ctx[(g_prim >> 9) & 1];
+    if (((c.tex0 >> 20) & 0x3F) == CT32) {
+      const float th = static_cast<float>(1u << ((c.tex0 >> 30) & 15));
+      const float sv0 = ((g_prim >> 8) & 1) ? a.v / 16.0f : (a.q != 0 ? a.t / a.q * th : 0);
+      const float sv1 = ((g_prim >> 8) & 1) ? b.v / 16.0f : (b.q != 0 ? b.t / b.q * th : 0);
+      const float top = static_cast<float>(a.y) / 16.0f, bottom = static_cast<float>(b.y) / 16.0f;
+      // (texel row = screen row + 0.5: row py reads its own row only; bilinear gives the next row a weight of 0)
+      if (a.y < b.y && std::fabs(sv0 - top - 0.5f) < 0.01f && std::fabs(sv1 - bottom - 0.5f) < 0.01f) {
+        const Surf ts = MakeSurf(CT32, static_cast<u32>(c.tex0 & 0x3FFF), static_cast<u32>((c.tex0 >> 14) & 63));
+        static PageList pages;
+        TexturePages(ts, 1u << ((c.tex0 >> 26) & 15), 1u << ((c.tex0 >> 30) & 15), pages);
+        u64 end = 0;
+        for (u16 page : pages) end = std::max(end, g_pageJob[page]);
+        direct = end && !Bands().Drawn(end);
+      }
+    }
   }
   Job& j = NewJob();
   j.sprite = true;
-  j.p = MakePipe(true);
+  j.p = direct ? BuildPipe(true, true) : MakePipe(true);
+  if (direct) {
+    g_pipeValid = false;  // (the cached pipe is the decoded kind)
+    ++g_stats.directTextures;
+  }
   const Pipe& p = j.p;
   const i32 x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
   if (x1 == x0 || y1 == y0) return;
@@ -1546,7 +1750,7 @@ void BeginTransfer() {
   g_xferSurf = MakeSurf(high ? CT32 : psm, g_xfer.bp, g_xfer.bw);
   if (g_xfer.w == 0 || g_xfer.h == 0) g_xfer.active = false;
   else SyncRect(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
-                static_cast<int>(g_xfer.y0 + g_xfer.h) - 1);  // pages still being drawn by queued primitives
+                static_cast<int>(g_xfer.y0 + g_xfer.h) - 1, kWaitUpload);  // pages still being drawn by queued primitives
   ++g_stats.transfers;
 }
 
@@ -1813,8 +2017,6 @@ void SetInterruptCallback(void (*callback)()) { g_irqCallback = callback; }
 
 void DoPresent() {
   if (g_mem.empty()) return;
-  DrawBarrier();  // the display buffer complete (counted as waiting, not as read-out)
-  Ticks timer(g_stats.presentTicks);
   if (!g_windowThread.joinable()) g_windowThread = std::thread(WindowThread);
   // circuit 2 over circuit 1 when both are enabled (the game normally enables one); pick the first enabled
   const int c = (g_pmode & 1) ? 0 : (g_pmode & 2) ? 1 : -1;
@@ -1830,6 +2032,9 @@ void DoPresent() {
   static std::vector<u32> img;  // (after the swap below it holds the previous picture: same size, no new allocation)
   img.resize(static_cast<std::size_t>(w) * h);
   const Surf src = MakeSurf(psm, fbp, fbw);
+  // only the shown buffer's pages must be drawn (the game draws the next frame into the other buffer meanwhile)
+  SyncRect(src, static_cast<int>(dbx), static_cast<int>(dbx + w) - 1, static_cast<int>(dby), static_cast<int>(dby + h) - 1, kWaitDisplay);
+  Ticks timer(g_stats.presentTicks);
   Pool().Run(0, static_cast<int>(h) - 1, [&](int yi) {  // display read-out, rows split between threads
     const u32 y = static_cast<u32>(yi);
     for (u32 x = 0; x < w; ++x) {
@@ -1900,9 +2105,11 @@ const Stats& GetStats() {  // the per-pixel and texel counters are atomics (seve
     const u64 cycles = __rdtsc() - g_tscBase.tsc;
     const double ratio = cycles ? static_cast<double>(now.QuadPart - g_tscBase.qpc.QuadPart) / static_cast<double>(cycles) : 0.0;
     for (u64* t : {&s.drawTicks, &s.textureTicks, &s.presentTicks, &s.transferTicks, &s.waitTicks}) *t = static_cast<u64>(static_cast<double>(*t) * ratio);
+    for (u64& t : s.waitByReason) t = static_cast<u64>(static_cast<double>(t) * ratio);
   }
   s.pixels = g_pixelCount.load();
   s.textured = g_texturedCount.load();
+  s.shaded = g_shadedCount.load();
   s.unsupported = g_stats.unsupported + g_unsupportedTexels.load();
   return s;
 }
@@ -2008,6 +2215,7 @@ class GsThread {
     else { m_pauses = 0; std::this_thread::yield(); }
   }
   void Run() {
+    RegisterProfiledThread("gs");
     u64 tail = 0;
     for (;;) {
       u64 pub = m_published.load(std::memory_order_acquire);
@@ -2083,6 +2291,51 @@ void PrivWrite(std::uint32_t address, std::uint64_t value, std::uint32_t size) {
 void Present() {
   if (Gs().On()) Gs().PushPresent();
   else DoPresent();
+}
+
+double FillTest(int quads, bool linear, bool blend) {  // development: see gs.h
+  RegWrite(0x50, (0x2000ull << 32) | (4ull << 48));  // BITBLTBUF: a 256x256 CT32 texture at block 0x2000
+  RegWrite(0x51, 0);
+  RegWrite(0x52, 256ull | (256ull << 32));
+  RegWrite(0x53, 0);
+  std::vector<u8> tex(256 * 256 * 4);
+  for (std::size_t i = 0; i < tex.size(); ++i) tex[i] = static_cast<u8>((i * 2654435761u) >> 13);
+  ImageData(tex.data(), tex.size());
+  RegWrite(0x4C, 10ull << 16);                       // FRAME: page 0, 640 wide, CT32
+  RegWrite(0x4E, 256ull | (1ull << 24));             // ZBUF: page 256, Z24
+  RegWrite(0x47, (1ull << 16) | (2ull << 17));       // TEST: depth GEQUAL
+  RegWrite(0x18, 0);                                 // XYOFFSET
+  RegWrite(0x40, 511ull << 16 | (447ull << 48));     // SCISSOR 512x448
+  RegWrite(0x06, 0x2000ull | (4ull << 14) | (8ull << 26) | (8ull << 30) | (1ull << 34));  // TEX0: 256x256, TCC, modulate
+  RegWrite(0x14, linear ? (1ull << 5) : 0);          // TEX1: bilinear magnification
+  RegWrite(0x08, 0);                                 // CLAMP: repeat
+  RegWrite(0x42, 0x44);                              // ALPHA: (Cs - Cd) * As + Cd
+  RegWrite(0x00, 3 | 8 | 16 | (blend ? 64 : 0) | 256);  // PRIM: triangles, Gouraud, textured, (blended), UV
+  RegWrite(0x01, 0x80808080u);
+  FlushGs();
+  DrawBarrier();
+  LARGE_INTEGER t0, t1, f;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&t0);
+  auto vtx = [](int x, int y, int u, int v, u64 z) {
+    RegWrite(0x03, static_cast<u64>(u * 16) | (static_cast<u64>(v * 16) << 16));
+    RegWrite(0x05, static_cast<u64>(x * 16) | (static_cast<u64>(y * 16) << 16) | (z << 32));
+  };
+  for (int q = 0; q < quads; ++q) {
+    const u64 z = 1000 + static_cast<u64>(q);
+    vtx(0, 0, 0, 0, z); vtx(512, 0, 300, 0, z); vtx(0, 448, 0, 260, z);
+    vtx(512, 0, 300, 0, z); vtx(512, 448, 300, 260, z); vtx(0, 448, 0, 260, z);
+  }
+  FlushGs();
+  DrawBarrier();
+  QueryPerformanceCounter(&t1);
+  const double seconds = static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f.QuadPart);
+  return static_cast<double>(quads) * 512.0 * 448.0 / seconds / 1e6;
+}
+
+std::string WaitNotes() {
+  FlushGs();
+  return g_waitNotes;
 }
 
 }  // namespace gs

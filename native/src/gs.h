@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace gs {
 
@@ -55,7 +57,11 @@ struct Stats {
   std::uint64_t unsupported = 0;
   // time spent (QPC ticks) drawing primitives, decoding textures (and how many), reading out the display, transfers
   std::uint64_t drawTicks = 0, textureTicks = 0, textureDecodes = 0, presentTicks = 0, transferTicks = 0;
-  std::uint64_t waitTicks = 0;  // the game's thread waiting for the band workers (display read-out, render-to-texture, uploads)
+  std::uint64_t waitTicks = 0;  // the GS thread waiting for the band workers (display read-out, render-to-texture, uploads)
+  // ... by reason: texture (render to texture), upload, palette, display read-out, full barrier; time and number of waits
+  std::uint64_t waitByReason[5] = {}, waitsByReason[5] = {};
+  std::uint64_t shaded = 0;  // pixels shaded (written or rejected by the depth/alpha tests)
+  std::uint64_t directTextures = 0;  // buffer copies that read GS memory directly (no wait, no decode)
   std::uint64_t skippedDepthFog = 0;  // 1 once the race's depth-fog pass has been skipped
   std::uint64_t flips = 0;            // changes of DISPFB1: frames the game finished
   std::uint64_t textureStale = 0, textureSame = 0;  // cached textures whose pages changed; of those, same bytes (not decoded)
@@ -63,5 +69,11 @@ struct Stats {
 const Stats& GetStats();
 // Prefer this window size (client area); 0 = the game's own display size.
 void SetWindowScale(int percent);
+// Development (HP2_GS_FILLTEST=1): full-screen textured triangles through the whole GS path; million pixels per second.
+double FillTest(int quads, bool linear, bool blend);
+// Development (HP2_LOG_WAITS=1): texture read-backs that waited long for the band workers.
+std::string WaitNotes();
+// Development (HP2_SAMPLE profiler): the GS's own threads, by group ("gs", "workers"), as thread handles.
+std::vector<std::pair<std::string, void*>> ProfiledThreads();
 
 }  // namespace gs

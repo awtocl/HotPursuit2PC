@@ -118,10 +118,11 @@ std::atomic<bool> g_sampleOn{false}, g_sampleQuit{false};
 std::thread g_sampler;
 struct SampleKey {
   std::uint64_t rip, caller;  // caller: the first return address into this executable on the stack (system calls: who made them)
-  bool operator==(const SampleKey& o) const { return rip == o.rip && caller == o.caller; }
+  std::string group;          // "game" (the game's thread) or a group of the GS's threads (gs::ProfiledThreads)
+  bool operator==(const SampleKey& o) const { return rip == o.rip && caller == o.caller && group == o.group; }
 };
 struct SampleKeyHash {
-  std::size_t operator()(const SampleKey& k) const { return std::hash<std::uint64_t>()(k.rip * 31 + k.caller); }
+  std::size_t operator()(const SampleKey& k) const { return std::hash<std::uint64_t>()(k.rip * 31 + k.caller) ^ std::hash<std::string>()(k.group); }
 };
 std::unordered_map<SampleKey, std::uint32_t, SampleKeyHash> g_samples;
 void StartSampler() {
@@ -138,21 +139,34 @@ void StartSampler() {
         exeHi = exeLo + sec[i].VirtualAddress + sec[i].Misc.VirtualSize;
         exeLo += sec[i].VirtualAddress;
       }
-    while (!g_sampleQuit) {
+    std::vector<std::pair<std::string, void*>> threads;
+    for (unsigned tick = 0; !g_sampleQuit; ++tick) {
       Sleep(1);
-      if (!g_sampleOn || SuspendThread(self) == static_cast<DWORD>(-1)) continue;
-      CONTEXT c = {};
-      c.ContextFlags = CONTEXT_CONTROL;
-      const bool ok = GetThreadContext(self, &c) != 0;
-      std::uint64_t stack[96] = {};
-      if (ok) memcpy(stack, reinterpret_cast<const void*>(c.Rsp), sizeof stack);  // (the stack's top is committed memory)
-      ResumeThread(self);  // (before touching the heap: the game's thread may hold its lock)
-      if (!ok) continue;
-      std::uint64_t caller = 0;
-      if (c.Rip < exeLo || c.Rip >= exeHi)
-        for (std::uint64_t v : stack)
-          if (v >= exeLo && v < exeHi) { caller = v; break; }
-      ++g_samples[{c.Rip, caller}];
+      if (!g_sampleOn) continue;
+      if (tick % 256 == 0) {  // the GS's threads (they start late)
+        threads = gs::ProfiledThreads();
+        threads.insert(threads.begin(), {"game", self});
+      }
+      for (const auto& [group, handle] : threads) {
+        HANDLE h = static_cast<HANDLE>(handle);
+        if (SuspendThread(h) == static_cast<DWORD>(-1)) continue;
+        CONTEXT c = {};
+        c.ContextFlags = CONTEXT_CONTROL;
+        const bool ok = GetThreadContext(h, &c) != 0;
+        std::uint64_t stack[96] = {};
+        if (ok) {  // (a shallow stack ends sooner: ReadProcessMemory fails instead of faulting; then a shorter read)
+          SIZE_T got = 0;
+          if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rsp), stack, sizeof stack, &got))
+            ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rsp), stack, 64, &got);
+        }
+        ResumeThread(h);  // (before touching the heap: the thread may hold its lock)
+        if (!ok) continue;
+        std::uint64_t caller = 0;
+        if (c.Rip < exeLo || c.Rip >= exeHi)
+          for (std::uint64_t v : stack)
+            if (v >= exeLo && v < exeHi) { caller = v; break; }
+        ++g_samples[{c.Rip, caller, group}];
+      }
     }
     CloseHandle(self);
   });
@@ -170,8 +184,6 @@ void ReportSamples() {
   HMODULE codeModule = nullptr;
   GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                      reinterpret_cast<LPCWSTR>(g_table->functions[0].code), &codeModule);
-  std::map<std::string, std::uint64_t> byName;
-  std::uint64_t total = 0;
   auto nameOf = [&](std::uint64_t rip) -> std::string {
     HMODULE m = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(rip), &m);
@@ -192,16 +204,21 @@ void ReportSamples() {
     snprintf(name, sizeof name, "[%ls]", std::filesystem::path(file).filename().c_str());
     return name;
   };
+  std::map<std::string, std::map<std::string, std::uint64_t>> byGroup;  // group -> name -> samples
+  std::map<std::string, std::uint64_t> totals;
   for (const auto& [key, n] : g_samples) {
-    total += n;
-    byName[key.caller ? nameOf(key.rip) + " <- " + nameOf(key.caller) : nameOf(key.rip)] += n;
+    totals[key.group] += n;
+    byGroup[key.group][key.caller ? nameOf(key.rip) + " <- " + nameOf(key.caller) : nameOf(key.rip)] += n;
   }
-  std::vector<std::pair<std::uint64_t, std::string>> top;
-  for (const auto& [k, v] : byName) top.emplace_back(v, k);
-  std::sort(top.rbegin(), top.rend());
-  Log("profile: %llu samples of the game's thread (1 ms apart)", static_cast<unsigned long long>(total));
-  for (std::size_t i = 0; i < top.size() && i < 50; ++i)
-    Log("profile: %5.1f%%  %s", 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total ? total : 1), top[i].second.c_str());
+  for (const auto& [group, names] : byGroup) {
+    std::vector<std::pair<std::uint64_t, std::string>> top;
+    for (const auto& [k, v] : names) top.emplace_back(v, k);
+    std::sort(top.rbegin(), top.rend());
+    const std::uint64_t total = totals[group];
+    Log("profile: %s threads: %llu samples (1 ms apart, all threads of the group together)", group.c_str(), static_cast<unsigned long long>(total));
+    for (std::size_t i = 0; i < top.size() && i < 30; ++i)
+      Log("profile: %s %5.1f%%  %s", group.c_str(), 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total ? total : 1), top[i].second.c_str());
+  }
   SymCleanup(GetCurrentProcess());
 }
 
@@ -1482,6 +1499,19 @@ void PadPoll() {
       Log("perf:   game frames: %.1f per second (real time); textures with changed pages %llu, of those unchanged bytes %llu",
           seconds > 0 ? static_cast<double>(st.flips - prevFlips) / seconds : 0.0, static_cast<unsigned long long>(st.textureStale - prevStale),
           static_cast<unsigned long long>(st.textureSame - prevSame));
+      {  // why the GS thread waited for its workers (ms per refresh, waits per refresh)
+        static gs::Stats prevWait;
+        char why[256] = {};
+        static const char* const kNames[5] = {"texture", "upload", "palette", "display", "full"};
+        for (int r = 0; r < 5; ++r)
+          snprintf(why + strlen(why), sizeof why - strlen(why), " %s %.2f ms (%.1f)", kNames[r],
+                   static_cast<double>(st.waitByReason[r] - prevWait.waitByReason[r]) * ms,
+                   static_cast<double>(st.waitsByReason[r] - prevWait.waitsByReason[r]) / 600.0);
+        Log("perf:   GS waits per refresh:%s; shaded %.0f, written %.0f thousand pixels per refresh; direct copies %.1f", why,
+            static_cast<double>(st.shaded - prevWait.shaded) / 600e3, static_cast<double>(st.pixels - prevWait.pixels) / 600e3,
+            static_cast<double>(st.directTextures - prevWait.directTextures) / 600.0);
+        prevWait = st;
+      }
       prevFlips = st.flips;
       prevStale = st.textureStale;
       prevSame = st.textureSame;
@@ -1888,6 +1918,15 @@ int wmain(int argc, wchar_t** argv) {
     LARGE_INTEGER start = g_nextVblank;
     g_mainFiber = ConvertThreadToFiber(nullptr);
     if (std::getenv("HP2_SAMPLE")) StartSampler();
+    if (std::getenv("HP2_GS_FILLTEST")) {  // development: GS fill rate, then exit (no game)
+      gs::Reset();
+      for (int round = 0; round < 2; ++round)  // (the first round warms up)
+        Log("fill test%s: flat %.0f, bilinear %.0f, bilinear + blend %.0f million pixels/s", round ? "" : " (warm-up)",
+            gs::FillTest(60, false, false), gs::FillTest(60, true, false), gs::FillTest(60, true, true));
+      gs::Shutdown();
+      if (g_log) fclose(g_log);
+      return 0;
+    }
     g_threads.push_back(new Thread());  // id 0 unused
     g_threads.push_back(new Thread());
     Thread& main_thread = *g_threads[1];
@@ -1958,6 +1997,7 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(g_steps), static_cast<unsigned long long>(g_syscalls),
         static_cast<unsigned long long>(g_rpcCalls));
     ReportSamples();
+    if (std::getenv("HP2_LOG_WAITS")) Log("%s", gs::WaitNotes().c_str());
     {
       std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
       for (const auto& [pc, n] : g_entryCount) top.emplace_back(n, pc);
