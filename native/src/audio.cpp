@@ -8,6 +8,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,16 +25,20 @@ namespace {
 
 using CreateFn = HRESULT(WINAPI*)(IXAudio2**, UINT32, XAUDIO2_PROCESSOR);
 
-constexpr std::uint32_t kRate = 48000, kFrames = 256, kQueued = 4;  // ~21 ms queued ahead
+// ~43 ms queued ahead of the device. The mixing thread never waits for the disc: a second thread (Feeder) reads and decodes
+// the disc streams about half a second ahead, so the game's own disc reads and loading cannot starve the output.
+constexpr std::uint32_t kRate = 48000, kFrames = 256, kQueued = 8;
 constexpr std::uint32_t kSpuSize = 2u << 20, kVoices = 48, kStreams = 8;
+constexpr std::size_t kDecodedAhead = 24000;  // source samples kept decoded per stream
 
 IXAudio2* g_xa = nullptr;
 IXAudio2MasteringVoice* g_master = nullptr;
 IXAudio2SourceVoice* g_out = nullptr;
 HANDLE g_event = nullptr;
-std::thread g_thread;
+std::thread g_thread, g_feeder;
 std::atomic<bool> g_quit{false};
 std::mutex g_mutex;
+std::condition_variable g_feed;  // wakes the feeder (a stream started, was queued or ran low)
 std::vector<std::uint8_t> g_spu(kSpuSize);
 
 int DecodeBlock(const std::uint8_t* blk, int hist[2], std::int16_t* out, std::size_t stride) {  // returns the flags byte
@@ -57,6 +64,7 @@ struct Voice {
   int hist[2] = {}, pos = 28, s0 = 0, s1 = 0;
   std::int16_t pcm[28] = {};
   float left = 0, right = 0, env = 0;
+  float outL = 0, outR = 0, tailL = 0, tailR = 0;  // last output; at a key on the old output fades out (~2 ms), no click
   int Next() {  // next source sample; clears `on` after the last block
     if (pos == 28) {
       if (last) {
@@ -154,7 +162,20 @@ void Refill(std::unique_lock<std::mutex>& lock, int id, std::vector<std::uint8_t
 
 void Mix(float* out) {  // kFrames stereo frames, lock held
   std::memset(out, 0, sizeof(float) * kFrames * 2);
+  // development: HP2_AUDIO_ONLY=voices (sound effects) or =streams (music and speech) mixes only that part
+  static const char* only = std::getenv("HP2_AUDIO_ONLY");
+  static const bool noVoices = only && std::strcmp(only, "streams") == 0, noStreams = only && std::strcmp(only, "voices") == 0;
   for (Voice& v : g_voice) {
+    if (noVoices) break;
+    if (v.tailL != 0 || v.tailR != 0) {
+      for (std::uint32_t f = 0; f < kFrames; ++f) {
+        out[f * 2] += v.tailL;
+        out[f * 2 + 1] += v.tailR;
+        v.tailL *= 0.97f;
+        v.tailR *= 0.97f;
+      }
+      if (std::fabs(v.tailL) + std::fabs(v.tailR) < 1e-5f) v.tailL = v.tailR = 0;
+    }
     if (!v.on) continue;
     for (std::uint32_t f = 0; f < kFrames && v.on; ++f) {
       v.frac += v.pitch;
@@ -173,16 +194,19 @@ void Mix(float* out) {  // kFrames stereo frames, lock held
       } else if (v.env < 1.0f) {
         v.env = std::min(1.0f, v.env + 1.0f / 64.0f);  // no click at key on
       }
-      out[f * 2] += s * v.left * v.env;
-      out[f * 2 + 1] += s * v.right * v.env;
+      v.outL = s * v.left * v.env;
+      v.outR = s * v.right * v.env;
+      out[f * 2] += v.outL;
+      out[f * 2 + 1] += v.outR;
     }
+    if (!v.on) v.outL = v.outR = 0;
   }
   for (Stream& s : g_stream) {
     if (!s.on) continue;
+    if (!s.eof && s.Available() < kDecodedAhead / 2) g_feed.notify_one();
     for (std::uint32_t f = 0; f < kFrames; ++f) {
-      s.frac += s.pitch;
-      while (s.frac >= 0x1000) {
-        if (s.Available() == 0) break;
+      if (s.Available() > 0) s.frac += s.pitch;  // starved (the feeder is late): hold the last sample, no jump later
+      while (s.frac >= 0x1000 && s.Available() > 0) {
         s.frac -= 0x1000;
         for (int c = 0; c < s.channels; ++c) {
           s.s0[c] = s.s1[c];
@@ -191,14 +215,16 @@ void Mix(float* out) {  // kFrames stereo frames, lock held
         ++s.rd;
         ++s.played;
       }
+      s.frac = std::min<std::uint32_t>(s.frac, 0x1000);
       if (s.Available() == 0 && s.eof) {
         s.on = false;
         break;
       }
       float o[2];
       for (int c = 0; c < s.channels; ++c)
-        o[c] = (static_cast<float>(s.s0[c]) + static_cast<float>(s.s1[c] - s.s0[c]) * static_cast<float>(std::min<std::uint32_t>(s.frac, 0x1000)) / 4096.0f) / 32768.0f;
+        o[c] = (static_cast<float>(s.s0[c]) + static_cast<float>(s.s1[c] - s.s0[c]) * static_cast<float>(s.frac) / 4096.0f) / 32768.0f;
       if (s.channels == 1) o[1] = o[0];
+      if (noStreams) continue;  // still played at its rate, so the game sees it end on time
       out[f * 2] += o[0] * s.left;
       out[f * 2 + 1] += o[1] * s.right;
     }
@@ -216,11 +242,41 @@ class Callback : public IXAudio2VoiceCallback {
   void STDMETHODCALLTYPE OnVoiceError(void*, HRESULT) noexcept override {}
 } g_callback;
 
+void Feeder() {  // keeps every playing disc stream decoded ahead (Refill releases the lock while it reads the disc)
+  std::vector<std::uint8_t> raw;
+  std::unique_lock<std::mutex> lock(g_mutex);
+  while (!g_quit) {
+    bool busy = false;
+    for (int id = 0; id < static_cast<int>(kStreams); ++id) {
+      Stream& s = g_stream[id];
+      if (s.on && !s.eof && s.Available() < kDecodedAhead) {
+        Refill(lock, id, raw);
+        busy = true;
+      }
+    }
+    if (!busy) g_feed.wait_for(lock, std::chrono::milliseconds(20));
+  }
+}
+
+// Above 0.9 of full scale the output gain drops at once and recovers over ~0.3 s, so a loud race does not hard-clip.
+float g_gain = 1.0f;
+void Limit(std::vector<float>& mix) {
+  float peak = 0;
+  for (const float x : mix) peak = std::max(peak, std::fabs(x));
+  const float target = peak * g_gain > 0.9f ? 0.9f / peak : std::min(1.0f, g_gain + static_cast<float>(kFrames) / (kRate * 0.3f));
+  const float from = g_gain, step = (target - from) / static_cast<float>(kFrames);
+  for (std::uint32_t f = 0; f < kFrames; ++f) {
+    const float g = target < from ? target : from + step * static_cast<float>(f);  // attack at once, release ramped
+    mix[f * 2] *= g;
+    mix[f * 2 + 1] *= g;
+  }
+  g_gain = target;
+}
+
 void Worker() {
   std::vector<std::int16_t> bufs[kQueued + 2];
   for (auto& b : bufs) b.resize(kFrames * 2);
   std::vector<float> mix(kFrames * 2);
-  std::vector<std::uint8_t> raw;
   std::size_t next = 0;
   // development: HP2_AUDIO_DUMP=1 writes the mixed output (48 kHz 16-bit stereo, up to 10 minutes) to .cache/native/audio.raw
   FILE* dump = nullptr;
@@ -233,14 +289,10 @@ void Worker() {
       g_out->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
       if (st.BuffersQueued >= kQueued || g_quit) break;
       {
-        std::unique_lock<std::mutex> lock(g_mutex);
-        for (int id = 0; id < static_cast<int>(kStreams); ++id) {
-          Stream& s = g_stream[id];
-          // keep about a quarter of a second decoded
-          for (int guard = 0; s.on && !s.eof && s.Available() < 12000 && guard < 4; ++guard) Refill(lock, id, raw);
-        }
+        std::lock_guard<std::mutex> lock(g_mutex);
         Mix(mix.data());
       }
+      Limit(mix);
       std::vector<std::int16_t>& pcm = bufs[next];
       next = (next + 1) % (kQueued + 2);
       for (std::size_t i = 0; i < mix.size(); ++i) pcm[i] = static_cast<std::int16_t>(std::clamp(mix[i], -1.0f, 1.0f) * 32767.0f);
@@ -302,13 +354,19 @@ bool Init() {
   g_out->Start();
   g_quit = false;
   g_thread = std::thread(Worker);
+  g_feeder = std::thread(Feeder);
   return true;
 }
 
 void Shutdown() {
-  g_quit = true;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_quit = true;
+  }
+  g_feed.notify_all();
   if (g_event) SetEvent(g_event);
   if (g_thread.joinable()) g_thread.join();
+  if (g_feeder.joinable()) g_feeder.join();
   if (g_out) g_out->DestroyVoice();
   g_out = nullptr;
   if (g_master) g_master->DestroyVoice();
@@ -324,6 +382,13 @@ void SpuWrite(std::uint32_t address, const void* data, std::uint32_t bytes) {
   address &= kSpuSize - 1;
   bytes = std::min(bytes, kSpuSize - address);
   std::memcpy(g_spu.data() + address, data, bytes);
+  if (std::getenv("HP2_SPU_DUMP")) {  // development: the sound memory after every bank load
+    FILE* f = nullptr;
+    if (fopen_s(&f, ".cache/native/spu.bin", "wb") == 0 && f) {
+      fwrite(g_spu.data(), 1, g_spu.size(), f);
+      fclose(f);
+    }
+  }
 }
 
 void VoiceSetup(int voice, std::uint32_t address, std::uint16_t pitch, std::uint16_t left, std::uint16_t right) {
@@ -340,6 +405,11 @@ void VoiceKeyOn(int voice) {
   if (voice < 0 || voice >= static_cast<int>(kVoices) || !g_out) return;
   std::lock_guard<std::mutex> lock(g_mutex);
   Voice& v = g_voice[voice];
+  if (v.on) {
+    v.tailL += v.outL;
+    v.tailR += v.outR;
+  }
+  v.outL = v.outR = 0;
   v.on = true;
   v.release = v.last = false;
   v.addr = v.loop = v.block = v.start;
@@ -402,6 +472,7 @@ void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t byt
   s.rd = 0;
   s.played = 0;
   ++s.generation;
+  g_feed.notify_one();
 }
 
 void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes) {
@@ -411,6 +482,7 @@ void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes) {
   if (!s.on) return;
   s.queue.emplace_back(start, bytes);
   s.eof = false;
+  g_feed.notify_one();
 }
 
 void StreamStop(int stream) {

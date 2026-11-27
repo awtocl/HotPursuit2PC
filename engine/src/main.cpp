@@ -565,6 +565,36 @@ namespace
 		}
 	};
 
+	// Development: HP2_REF_AUDIO_DUMP=<file> writes the reference core's mix (16-bit stereo, 44100 Hz) to that file
+	// instead of the speakers, the oracle for the native mixer (audio.cpp).
+	class CSH_Hp2Dump : public CSoundHandler
+	{
+	public:
+		static CSoundHandler* Factory()
+		{
+			return new CSH_Hp2Dump();
+		}
+		CSH_Hp2Dump()
+		{
+			if(const char* path = std::getenv("HP2_REF_AUDIO_DUMP")) m_file = std::fopen(path, "wb");
+		}
+		~CSH_Hp2Dump() override
+		{
+			if(m_file) std::fclose(m_file);
+		}
+		void Reset() override {}
+		void Write(int16* samples, unsigned int sampleCount, unsigned int) override
+		{
+			g_audioSamples += sampleCount;
+			if(m_file) std::fwrite(samples, sizeof(int16), sampleCount, m_file);
+		}
+		bool HasFreeBuffers() override { return true; }
+		void RecycleBuffers() override {}
+
+	private:
+		std::FILE* m_file = nullptr;
+	};
+
 	struct Options
 	{
 		fs::path rom;   // ROM folder -> virtual disc (the normal way)
@@ -926,7 +956,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 		g_vm->ReloadFrameRateLimit();
 		if(ownPacer) g_pacer.Start(60.0);
 
-		if(!options.mute) g_vm->CreateSoundHandler(&CSH_Hp2Sound::Factory);
+		if(std::getenv("HP2_REF_AUDIO_DUMP")) g_vm->CreateSoundHandler(&CSH_Hp2Dump::Factory);
+		else if(!options.mute) g_vm->CreateSoundHandler(&CSH_Hp2Sound::Factory);
 		g_vm->CreatePadHandler(CPH_Generic::GetFactoryFunction());
 		Log("step: sound and pad handlers created");
 		g_vm->CreateGSHandler(CGSH_OpenGL_Hp2::GetFactoryFunction(window));

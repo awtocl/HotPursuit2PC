@@ -1188,7 +1188,7 @@ int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
 // the radio phrases restarted every 4 refreshes and the music player skipped to the next track every frame.
 // Commands (stream = the word after nargs):
 //   1E [stream, LSN hi, lo, file size hi, lo, 1, offset hi, lo]  opens a disc file on a stream
-//   34 [stream, SPU address hi, lo, bytes hi, lo]                 copies the stream file's next bytes into sound memory
+//   34 [stream, 0, SPU address hi, lo, bytes hi, lo]              copies the stream file's next bytes into sound memory
 //                                                                 (the sound banks: 14 + 44 samples in the menus, ~90 in races)
 //   1C [sample, SPU address hi, lo]                               a sample's start in sound memory
 //   00 [sample, voice, left, right, pitch, ...]                   sets a voice up (volumes 0..0x3FFF, pitch 0x1000 = 48 kHz)
@@ -1231,13 +1231,13 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
         if (na >= 2) result = word(2);
         break;
       case 0x34:
-        if (na >= 5 && s < 8) {
+        if (na >= 6 && s < 8) {  // [stream, 0, SPU address hi, lo, bytes hi, lo]
           if (!have34) {
             have34 = true;
             buf = word(2);
           }
           StreamerFile& f = g_streamFile[s];
-          const std::uint32_t bytes = std::min<std::uint32_t>(word(5), 0x200000), at = word(3);
+          const std::uint32_t bytes = std::min<std::uint32_t>(word(6), 0x200000), at = word(4);
           if (f.lsn && bytes) {
             std::vector<std::uint8_t> data(bytes);
             if (DiscRead(f.lsn * 2048ull + f.pos, data.data(), bytes)) audio::SpuWrite(at, data.data(), bytes);
