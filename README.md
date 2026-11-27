@@ -18,15 +18,20 @@ original console left in the way.
 
 ## Status
 
-> **Development build — work in progress (2026-11-25).** Two things exist today:
+> **Development build — work in progress (2026-11-27).** Two things exist today:
 >
-> 1. **A converter and a launcher** that play the game on top of an embedded
->    emulator core. This is the *reference*, kept to compare against; it is not the goal.
-> 2. **The native runtime** (`native/`, `HotPursuit2Native.exe`), the real goal:
+> 1. **The native game** (`native/`, `HotPursuit2Native.exe`), the real goal:
 >    the game's program recompiled to x64 and run with **no emulator code at
->    all**. It boots the game's own start-up and kernel layer natively and is
->    being brought up step by step: still missing are graphics, sound, input and
->    disc streaming, so **it does not play yet**.
+>    all**. **It plays**: intro movies with sound, menus, races, music, sound
+>    effects, police radio, pause, keyboard and Xbox-style controllers, a GPU
+>    renderer up to 8x internal resolution, 16:9 and 60 fps by default. It is a
+>    development build: see [Known problems](#known-problems).
+> 2. **A converter and a launcher** that play the game on top of an embedded
+>    emulator core. This was the first milestone and is now the *reference* the
+>    native game is compared against; it is not the goal.
+>
+> **You need your own copy of the game.** Nothing of the game is in this
+> repository; every tool here works only from a dump you made of your own disc.
 >
 > The honest way to follow progress: [`docs/STATUS.md`](docs/STATUS.md) and
 > [`docs/HANDOVER.md`](docs/HANDOVER.md).
@@ -53,7 +58,9 @@ original console left in the way.
 
 ## What this is — and is not
 
-**It is** a build tool plus a launcher:
+**It is** a native build of the PS2 game made on your PC from your own disc
+(`tools/install-native.ps1`, see [Using it](#using-it)), plus a build tool
+and a reference launcher:
 
 - `HotPursuit2PC.exe` / `hp2pc-cli.exe` — the **converter**. You point it at
   the extracted contents of your disc. It verifies every file against known
@@ -68,11 +75,12 @@ original console left in the way.
 - a download of the game. No game code, art, audio, video or data is in this
   repository or in its releases, and none is fetched from anywhere. Without
   your own disc dump the tools do nothing;
-- a native port — yet. Today the launcher runs the original PlayStation 2
-  program inside the open-source [Play!](https://github.com/jpd002/Play-)
-  emulator core, which is linked into it. That is stated in the window title,
-  in the README the converter writes, and here. The goal of the project is a
-  recompiled, native build; see the [Roadmap](#roadmap);
+- an emulator. The native game (`HotPursuit2Native.exe`) contains no emulator
+  code: the game's program is recompiled to x64 on your PC. Only the
+  *reference* launcher (`HotPursuit2.exe`) runs the original program inside
+  the open-source [Play!](https://github.com/jpd002/Play-) emulator core,
+  which is linked into it; that is stated in its window title, in the README
+  the converter writes, and here;
 - the 2003 Windows release of the game. That is a different port with
   different handling and features, and nothing is taken from it.
 
@@ -178,42 +186,61 @@ What this means for you:
 | Game folder | Done. Portable (next to the converter, relocatable) or installed (a folder you choose); re-running resumes and never overwrites silently; one log per run. |
 | Asset unpacking | Done. The game's 3 GB archive is fully understood (directory format, name hash, LZ compression) and unpacked into 402 files, 362 of them with their original names. |
 | Disc image | Done. `hp2pc-cli image` rebuilds an ISO 9660 image from the validated folder (verified with an independent reader). |
-| Running the game | **Works, with problems.** Boots, plays movies, menus, races, pause, and saves to / loads from a virtual PS2 memory card. Emulator-backed. |
+| Native game | **Plays.** Recompiled game program (no emulator), intro movies with their sound, menus, races, pause; music, sound effects and police radio through an SPU2-style mixer; keyboard and XInput controllers; GPU renderer (Direct3D 11) with 1x–8x internal resolution (supersampled above the screen's), 16:9 by default through the game's own widescreen patch, 60 fps by default; settings and Quit game on F1. |
+| Reference launcher | **Works, with problems.** Boots, plays movies, menus, races, pause, and saves to / loads from a virtual PS2 memory card. Emulator-backed. |
 | GUI and CLI | Done. Same operations in both. |
 | Recompiler, analysis half | Done. Every one of the 431,681 instruction words of the game program decodes; 10,146 functions and 193 switch tables are found without symbols; in a traced session every one of the 29,860 code blocks the embedded core executed starts where the analysis predicted. |
-| Recompiler, translator | **In progress.** 3,692 game functions (99.8 % of what the game executes in a test session) are translated through LLVM to x64; the test session runs on them inside a measurement build, with the embedded core still handling what is not translated yet (the PS2's second vector unit, a few instructions). Identical results to the core on every compared call. In a test race, frames that miss the 60 Hz deadline drop from 138 to 17 and the worst one from 46 to 28 ms; menu hitches drop sharply. Not in the build players use yet. |
-| Automated tests | 14 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
+| Recompiler, translator | **Done for what the game runs** (the native game runs entirely on it). Earlier measurement, against the reference: 3,692 game functions (99.8 % of what the game executes in a test session) are translated through LLVM to x64; the test session runs on them inside a measurement build, with the embedded core still handling what is not translated yet (the PS2's second vector unit, a few instructions). Identical results to the core on every compared call. |
+| Automated tests | 15 CTest tests, including runs against a real dump when one is present (skipped otherwise) and the embedded core's own JIT test suite. |
 
 ## Known problems
 
-Reported by the project owner after playing, then reproduced and measured:
+Native game (development build, tested on one PC):
 
-- **Stutter.** The emulated game's heavy frames take 13–15 ms of one CPU
-  thread in the embedded core — sometimes more than the 16.7 ms available —
-  while the rest of the machine sits idle. About a third of that is the game
-  program, a third the PS2's vector unit (geometry), a fifth passing drawing
-  data on. The core also compiles code the first time it runs (about 0.2 ms
-  per block, almost 30,000 blocks in an 80-second session, in bursts of up to
-  half a second) and shaders the first time they are used.
-  A frame pacer added afterwards removes the constant jitter (the game clock
-  and presentation sit on an exact 60 Hz grid) but cannot remove the hitches.
-  Measurements: [`docs/recomp-analysis.md`](docs/recomp-analysis.md).
-- **Rendering defects.** Tyre smoke and the glow of brake lights are drawn
-  as flat translucent polygons instead of soft sprites. The cause inside the
-  third-party renderer has not been identified yet.
-- **Sound** problems were also reported; not yet characterised.
-- **Races are drawn at 30 frames per second** (menus at 60). Measurements say
-  this is the game's own pacing rather than a performance limit, but it has
-  not been confirmed against a real console.
-- Digital buttons only (no DualShock 2 pressure sensitivity), no rumble, one
-  controller, 4:3 only, no settings UI.
-- Tested on one PC so far. Not tested on a clean Windows
-  installation, on AMD/Intel graphics, or for long sessions.
-- The GitHub Actions workflow has not run yet.
+- **Saving**: the memory card is not implemented yet (the game runs as with no card).
+- **Sound**: no reverb and no real ADSR envelopes yet, so sounds end more abruptly than on a console.
+- **Graphics**: no depth fog, mipmaps, dithering or lines yet; the race's distance fog is skipped.
+- **Input**: digital buttons only (no DualShock 2 pressure), no rumble, no steering wheel.
+- Switching between 16:9 and 4:3 takes effect after a restart (the game lays out its HUD once).
+- Not tested on AMD/Intel graphics, on a clean Windows installation, or for long sessions.
+
+Reference launcher: stutter on heavy frames (embedded core), flat tyre smoke and brake-light glow,
+4:3 only, races at 30 fps; details in [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Using it
 
-There are no releases yet; build from source (next section). Then:
+There are no releases yet; build from source (next section). Every route
+starts from **your own dump**: the extracted contents of your own disc, a
+folder that holds `SYSTEM.CNF`, `SLUS_203.62` and the `NFSHP2` folder. If
+you made an `.iso` of your disc, double-click it in Windows to mount it and
+use the drive it gets, or extract it with a tool such as 7-Zip.
+
+### The native game
+
+```powershell
+pwsh tools/install-native.ps1                       # asks for your dump folder
+pwsh tools/install-native.ps1 -Rom "D:\My dumps\Need for Speed - Hot Pursuit 2 (USA)"
+```
+
+The script checks the folder and that `SLUS_203.62` is the supported version,
+builds the project, recompiles the game's program **from your copy, on your
+PC**, and writes `game-native\` with `HotPursuit2Native.exe`, the recompiled
+code (`hp2code.dll`) and `Play.cmd`. The game reads your dump folder and never
+writes to it. In the game: **F1** (or Select+Start) opens the settings
+(renderer, internal resolution, frame rate, display mode, V-Sync, aspect
+ratio, filters) and *Quit game*; Alt+Enter toggles full screen. Settings are
+kept in `hp2native.ini` next to the executable. An Xbox-style controller
+works as a DualShock 2. Keyboard:
+
+| Key | PS2 button | Key | PS2 button |
+|---|---|---|---|
+| Arrows | D-pad / steering | Enter, Space | Start |
+| Z | ✕ | Backspace, Right Shift | Select |
+| X | ○ | Q / W | L1 / R1 |
+| A | □ | 1 / 2 | L2 / R2 |
+| S | △ | F1 | settings |
+
+### The reference launcher (emulator-backed)
 
 1. Dump your own disc and extract its contents to a folder. It must contain
    `SYSTEM.CNF`, `SLUS_203.62` and the `NFSHP2` folder.
@@ -354,6 +381,12 @@ The modern graphics settings are to live inside the game's own options menus,
 not in a separate launcher window (owner's requirement). Other
 quality-of-life features (save states, remapping) follow, each opt-in where
 it changes original behaviour.
+
+Where it stands (2026-11-27): stages 1–4 are in the native game — the whole
+program and its vector-unit microprograms recompiled, the I/O side served by
+host services, a GPU renderer with 16:9 and 60 fps, a native mixer. Open:
+memory card saves, reverb and envelopes, depth fog and mipmaps, analog
+pressure and rumble, and a friendlier installer than a PowerShell script.
 
 This is a long road and there is no promise of dates.
 

@@ -1,5 +1,6 @@
 # --- user data: NEVER commit (C1/C2) ---------------------------------------
 /ROM/
+/game-native/
 /game/
 game/
 *.iso
