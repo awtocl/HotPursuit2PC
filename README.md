@@ -48,7 +48,7 @@ emulator in the way.
 
 ## Features
 
-| | |
+| Feature | What you get |
 |---|---|
 | **Native code, no emulator** | The game's own program and its vector-unit microprograms are statically recompiled to x64 (through LLVM) on your PC, from your copy. The console's hardware is replaced by host services: disc reads from your files, a GPU renderer, a sound mixer, XInput. |
 | **Modern graphics** | Direct3D 11 renderer with 1x–8x internal resolution (supersampled when above your screen's), sharp-bilinear / bilinear / nearest scaling, optional sharpening and scanlines, borderless full screen. |
@@ -116,9 +116,7 @@ flowchart LR
     R --> C["hp2code.dll<br/>made on your PC"]
     C --> N["HotPursuit2Native.exe"]
     D -- "disc reads" --> N
-    N --> G["GPU renderer<br/>(Direct3D 11)"]
-    N --> S["Sound mixer<br/>(XAudio2)"]
-    N --> I["Keyboard / XInput"]
+    N --> O["Direct3D 11 renderer<br/>XAudio2 mixer<br/>keyboard + XInput"]
 ```
 
 - **Recompiler** (`recomp/`): finds the program's 10,146 functions and 193 switch tables without symbols, translates
