@@ -2074,6 +2074,24 @@ void CALLBACK ThreadFiber(void* param) {
   }
 }
 
+// --check-package (the launcher): does hp2code.dll belong to this runtime and to the executable on the disc? Writes no log.
+// 0 yes; 5 the package or the executable is missing; 6 the package is from another version or another executable.
+int CheckPackage(const fs::path& rom, const fs::path& dll) {
+  if (!fs::exists(dll) || !fs::exists(rom / L"SLUS_203.62")) return 5;
+  HMODULE module = LoadLibraryW(dll.c_str());
+  if (!module) return 6;
+  const auto* table = reinterpret_cast<const Hp2CodeTable*>(GetProcAddress(module, kCodeTableSymbol));
+  bool ok = table && table->magic == kCodeTableMagic && table->version == kCodeTableVersion &&
+            table->layout_fingerprint == code_layout_fingerprint(native_code_layout());
+  if (ok) {
+    Sha256 h;
+    h.update(read_whole_file(rom / L"SLUS_203.62", 64ull << 20));
+    ok = memcmp(h.finish().data(), table->elf_sha256, 32) == 0;
+  }
+  printf("%s\n", ok ? "package ok" : "package out of date");
+  return ok ? 0 : 6;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2086,18 +2104,21 @@ int wmain(int argc, wchar_t** argv) {
     }
     fs::path rom = exe_dir.parent_path() / L"rom", dll = exe_dir / L"hp2code.dll";
     double seconds = 0;
+    bool checkOnly = false;
     for (int i = 1; i < argc; ++i) {
       const std::wstring a = argv[i];
-      if (a == L"--rom" && i + 1 < argc) rom = argv[++i];
+      if (a == L"--check-package") checkOnly = true;
+      else if (a == L"--rom" && i + 1 < argc) rom = argv[++i];
       else if (a == L"--code" && i + 1 < argc) dll = argv[++i];
       else if (a == L"--seconds" && i + 1 < argc) seconds = _wtof(argv[++i]);
       else if (a == L"--until" && i + 1 < argc) g_untilVblank = static_cast<std::uint64_t>(_wtof(argv[++i]) * 60000.0 / 1001.0);
       else if (a == L"--verbose") g_verbose = true;
       else {
-        printf("HotPursuit2Native [--rom <folder>] [--code <hp2code.dll>] [--seconds <real s>] [--until <game s>]\n");
+        printf("HotPursuit2Native [--rom <folder>] [--code <hp2code.dll>] [--seconds <real s>] [--until <game s>] [--check-package]\n");
         return 2;
       }
     }
+    if (checkOnly) return CheckPackage(rom, dll);
     // the log is named after the executable (a test copy does not overwrite the log of a game being played)
     {
       wchar_t self[MAX_PATH] = {};

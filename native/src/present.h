@@ -16,6 +16,8 @@ void Resize();              // after the window's client size changed
 // frame: BGRA (alpha ignored), overlay: premultiplied BGRA of the client size (nullptr when hidden).
 // Development: the next Draw also writes the back buffer (before it is presented) as a BMP file.
 void RequestShot(const char* path);
+// F12: the next Draw saves the window's picture as "Hot Pursuit 2 <date> <time>.png" in `folder` (created when missing).
+void RequestScreenshot(const wchar_t* folder);
 // gpuFrame (an ID3D11ShaderResourceView*, gpuW x gpuH): the GPU renderer's picture, shown instead of `frame` (ADR 0014).
 void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged, const std::uint32_t* overlay, int overlayW,
           int overlayH, bool overlayChanged, const ui::Settings& s, void* gpuFrame = nullptr, int gpuW = 0, int gpuH = 0,

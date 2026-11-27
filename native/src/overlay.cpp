@@ -18,22 +18,17 @@ bool g_quitArmed = false;           // the Quit row asked for its confirmation p
 std::atomic<bool> g_quit{false};    // quit confirmed (TakeQuit)
 std::atomic<bool> g_wideActive{false};  // the game runs with its widescreen patches (chosen at start)
 
-struct Item {
-  const wchar_t* label;
-  int Settings::*field;
-  int count;
-  const wchar_t* names[6];
-};
+using Item = SettingInfo;
 const Item kItems[] = {
-    {L"Renderer", &Settings::renderer, 2, {L"Software", L"GPU"}},
-    {L"Internal resolution", &Settings::resolution, 6, {L"1x (native)", L"2x", L"3x", L"4x", L"6x", L"8x"}},
-    {L"Frame rate", &Settings::frameRate, 2, {L"30 (original)", L"60"}},
-    {L"Display mode", &Settings::fullscreen, 2, {L"Window", L"Full screen"}},
-    {L"V-Sync", &Settings::vsync, 2, {L"Off", L"On"}},
-    {L"Scaling filter", &Settings::filter, 3, {L"Sharp bilinear", L"Bilinear", L"Nearest"}},
-    {L"Aspect ratio", &Settings::aspect, 4, {L"16:9", L"4:3", L"4:3 integer scale", L"Stretch"}},
-    {L"Sharpening", &Settings::sharpen, 4, {L"Off", L"Low", L"Medium", L"High"}},
-    {L"Scanlines", &Settings::scanlines, 3, {L"Off", L"Light", L"Strong"}},
+    {L"renderer", L"Renderer", &Settings::renderer, 2, {L"Software", L"GPU"}},
+    {L"resolution", L"Internal resolution", &Settings::resolution, 6, {L"1x (native)", L"2x", L"3x", L"4x", L"6x", L"8x"}},
+    {L"framerate", L"Frame rate", &Settings::frameRate, 2, {L"30 (original)", L"60"}},
+    {L"fullscreen", L"Display mode", &Settings::fullscreen, 2, {L"Window", L"Full screen"}},
+    {L"vsync", L"V-Sync", &Settings::vsync, 2, {L"Off", L"On"}},
+    {L"filter", L"Scaling filter", &Settings::filter, 3, {L"Sharp bilinear", L"Bilinear", L"Nearest"}},
+    {L"aspect_ratio", L"Aspect ratio", &Settings::aspect, 4, {L"16:9", L"4:3", L"4:3 integer scale", L"Stretch"}},
+    {L"sharpen", L"Sharpening", &Settings::sharpen, 4, {L"Off", L"Low", L"Medium", L"High"}},
+    {L"scanlines", L"Scanlines", &Settings::scanlines, 3, {L"Off", L"Light", L"Strong"}},
 };
 constexpr int kItemCount = static_cast<int>(sizeof kItems / sizeof kItems[0]);
 constexpr int kRows = kItemCount + 1;  // the settings, then Quit game
@@ -46,10 +41,7 @@ std::wstring IniPath() {
   return (slash == std::wstring::npos ? std::wstring() : p.substr(0, slash + 1)) + L"hp2native.ini";
 }
 
-const wchar_t* Key(int i) {
-  static const wchar_t* keys[] = {L"renderer", L"resolution", L"framerate", L"fullscreen", L"vsync", L"filter", L"aspect_ratio", L"sharpen", L"scanlines"};
-  return keys[i];
-}
+const wchar_t* Key(int i) { return kItems[i].key; }
 
 // GDI helpers. Every drawn colour keeps at least one non-zero channel: untouched pixels (0) become the dimmed backdrop.
 COLORREF Rgb(int r, int g, int b) { return RGB(std::max(r, 1), g, b); }
@@ -81,6 +73,9 @@ HFONT Font(int height, int weight, const wchar_t* face) {
 }
 
 }  // namespace
+
+int SettingCount() { return kItemCount; }
+const SettingInfo& Setting(int i) { return kItems[i]; }
 
 Settings Load() {
   Settings s;

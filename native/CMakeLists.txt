@@ -6,7 +6,7 @@
 # Audio: XAudio2 (xaudio2_9.dll / xaudio2_8.dll, loaded at run time).
 add_executable(hp2-native src/main.cpp src/gs.cpp src/gs_gpu.cpp src/d3d11_present.cpp src/overlay.cpp src/audio.cpp src/memcard.cpp)
 set_target_properties(hp2-native PROPERTIES OUTPUT_NAME HotPursuit2Native)
-target_link_libraries(hp2-native PRIVATE hp2recomp hp2vdisc user32 gdi32 d3d11 ole32)  # hp2vdisc: our own ISO 9660 view of the ROM folder
+target_link_libraries(hp2-native PRIVATE hp2recomp hp2vdisc user32 gdi32 d3d11 ole32 windowscodecs)  # hp2vdisc: our own ISO 9660 view of the ROM folder
 # Symbols in every configuration (a separate .pdb; the code is unchanged): the HP2_SAMPLE profiler names functions with them.
 if(MSVC)
   target_compile_options(hp2-native PRIVATE /Zi)

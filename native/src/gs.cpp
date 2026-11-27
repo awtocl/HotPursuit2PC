@@ -18,6 +18,7 @@
 #include <intrin.h>
 #include <memory>
 #include <mutex>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -570,6 +571,16 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       switch (w) {
         case VK_F1: ToggleMenu(); return 0;
         case VK_F11: g_settings.fullscreen ^= 1; SettingsChanged(h); return 0;
+        case VK_F12:  // screenshot: <folder of the executable>\screenshots (the launcher's gallery)
+          if (g_d3dActive) {
+            wchar_t exe[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            static std::wstring folder;  // the presenter keeps the pointer until its next Draw
+            folder = (std::filesystem::path(exe).parent_path() / L"screenshots").wstring();
+            present::RequestScreenshot(folder.c_str());
+            g_redraw = true;
+          }
+          return 0;
         default: break;
       }
       if (ui::Visible()) {

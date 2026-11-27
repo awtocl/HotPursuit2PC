@@ -18,6 +18,17 @@ struct Settings {
   int scanlines = 0;   // 0 off, 1 light, 2 strong
 };
 
+// The settings in menu order, with their ini keys (section [graphics]) and value names; shared with the launcher.
+struct SettingInfo {
+  const wchar_t* key;
+  const wchar_t* label;
+  int Settings::*field;
+  int count;
+  const wchar_t* names[6];
+};
+int SettingCount();
+const SettingInfo& Setting(int i);
+
 Settings Load();
 void Save(const Settings& s);
 

@@ -10,11 +10,17 @@
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi1_5.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace present {
 namespace {
@@ -179,6 +185,73 @@ bool Upload(Tex& t, const std::uint32_t* pixels, int w, int h) {
 
 const char* g_shotPath = nullptr;
 
+std::wstring g_screenshotFolder;  // F12: the next Draw saves the picture as a PNG file in this folder
+
+// PNG through the Windows Imaging Component, on its own thread (a 4K picture takes a moment to compress).
+void WritePng(std::wstring path, std::uint32_t w, std::uint32_t h, std::vector<std::uint8_t> bgr) {
+  const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  IWICImagingFactory* factory = nullptr;
+  IWICStream* stream = nullptr;
+  IWICBitmapEncoder* encoder = nullptr;
+  IWICBitmapFrameEncode* frame = nullptr;
+  WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+  const std::wstring partial = path + L".part";
+  bool ok = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+            SUCCEEDED(factory->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromFilename(partial.c_str(), GENERIC_WRITE)) &&
+            SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+            SUCCEEDED(encoder->Initialize(stream, WICBitmapEncoderNoCache)) && SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) &&
+            SUCCEEDED(frame->Initialize(nullptr)) && SUCCEEDED(frame->SetSize(w, h)) && SUCCEEDED(frame->SetPixelFormat(&format)) &&
+            format == GUID_WICPixelFormat24bppBGR &&
+            SUCCEEDED(frame->WritePixels(h, w * 3, static_cast<UINT>(bgr.size()), bgr.data())) && SUCCEEDED(frame->Commit()) &&
+            SUCCEEDED(encoder->Commit());
+  if (frame) frame->Release();
+  if (encoder) encoder->Release();
+  if (stream) stream->Release();
+  if (factory) factory->Release();
+  if (ok) ok = MoveFileExW(partial.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;  // the launcher never sees half a file
+  if (!ok) DeleteFileW(partial.c_str());  // our own temporary file
+  if (SUCCEEDED(co)) CoUninitialize();
+}
+
+void SaveScreenshot(const std::wstring& folder) {
+  ID3D11Texture2D* back = nullptr;
+  if (FAILED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) return;
+  D3D11_TEXTURE2D_DESC d = {};
+  back->GetDesc(&d);
+  d.Usage = D3D11_USAGE_STAGING;
+  d.BindFlags = 0;
+  d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  d.MiscFlags = 0;
+  ID3D11Texture2D* staging = nullptr;
+  if (SUCCEEDED(g_dev->CreateTexture2D(&d, nullptr, &staging))) {
+    g_ctx->CopyResource(staging, back);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    if (SUCCEEDED(g_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+      std::vector<std::uint8_t> bgr(static_cast<std::size_t>(d.Width) * d.Height * 3);
+      for (std::uint32_t y = 0; y < d.Height; ++y) {
+        const std::uint8_t* src = static_cast<const std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch;
+        std::uint8_t* dst = bgr.data() + static_cast<std::size_t>(y) * d.Width * 3;
+        for (std::uint32_t x = 0; x < d.Width; ++x, src += 4, dst += 3) {
+          dst[0] = src[0];
+          dst[1] = src[1];
+          dst[2] = src[2];
+        }
+      }
+      g_ctx->Unmap(staging, 0);
+      std::error_code ec;
+      std::filesystem::create_directories(folder, ec);
+      const std::time_t now = std::time(nullptr);
+      std::tm t = {};
+      localtime_s(&t, &now);
+      wchar_t name[64];
+      wcsftime(name, 64, L"Hot Pursuit 2 %Y-%m-%d %H-%M-%S.png", &t);
+      std::thread(WritePng, (std::filesystem::path(folder) / name).wstring(), d.Width, d.Height, std::move(bgr)).detach();
+    }
+    staging->Release();
+  }
+  back->Release();
+}
+
 void SaveBackBuffer(const char* path) {
   ID3D11Texture2D* back = nullptr;
   if (FAILED(g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) return;
@@ -258,6 +331,7 @@ bool Device(ID3D11Device** dev, ID3D11DeviceContext** ctx) {
 namespace present {
 
 void RequestShot(const char* path) { g_shotPath = path; }
+void RequestScreenshot(const wchar_t* folder) { g_screenshotFolder = folder; }
 
 bool Init(HWND__* window) {
   g_hwnd = window;
@@ -522,6 +596,10 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
   if (g_shotPath) {
     SaveBackBuffer(g_shotPath);
     g_shotPath = nullptr;
+  }
+  if (!g_screenshotFolder.empty()) {
+    SaveScreenshot(g_screenshotFolder);
+    g_screenshotFolder.clear();
   }
   if (s.vsync) g_swap->Present(1, 0);
   else g_swap->Present(0, g_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
