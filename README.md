@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Download</b></a> ·
   <a href="docs/GETTING-STARTED.md"><b>Getting started</b></a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
@@ -53,7 +54,7 @@ between.
 | | |
 |---|---|
 | **No emulator** | The game's own code is translated into native x64 code (with LLVM), right on your PC, from your copy. The console's hardware is replaced with PC equivalents: your files instead of the disc drive, your GPU, a sound mixer, your controller. |
-| **Sharp graphics** | Direct3D 11 at 1x–8x the original resolution (supersampled when it's above your screen's), crisp scaling, optional sharpening and scanlines, borderless full screen. |
+| **Sharp graphics** | Direct3D 11 at 1x–8x the original resolution (supersampled when it's above your screen's), crisp scaling, anti-aliasing (FXAA), optional sharpening and scanlines, borderless full screen. |
 | **16:9 and 60 fps** | Widescreen out of the box (you see more of the road, the HUD and menus keep their shape) and 60 frames per second, thanks to the community's patches for this game (see [Credits](#license-and-credits)). Both can be switched off. |
 | **All the sound** | EA Trax music, engines and effects, the police radio and the movies' sound. |
 | **A launcher** | It finds your disc, copies and checks it, gets the game ready and remembers everything after that. Plus settings with a recommendation for your screen, memory card backups and a screenshot gallery (F12). Works with mouse, keyboard or controller. |
@@ -66,12 +67,21 @@ between.
 
 ## Quick start
 
+**Download and play**, no build tools needed:
+
+1. Get **`HotPursuit2PC-v0.2.0-win64.zip`** from the **[latest release](https://github.com/awtocl/HotPursuit2PC/releases/latest)** and unzip it anywhere.
+2. Start **`HotPursuit2Launcher.exe`**. The programs aren't signed, so Windows may ask first: *More info* → *Run anyway*.
+3. Put **your own disc** in the drive (or mount your `.iso` of it). The launcher copies and checks it and translates the
+   game **from your copy, on your PC** (about a minute). Then hit **Play**.
+
+What's new in each version: [CHANGELOG.md](CHANGELOG.md).
+
 > [!TIP]
 > **First time doing something like this?** No worries — the **[Getting started](docs/GETTING-STARTED.md)** guide
 > walks you through every step: what you need, installing the tools, building, the best settings and what to do if
 > something goes wrong.
 
-**The short version:** on Windows 10/11 x64 with *Build Tools for Visual Studio 2022* (C++ workload), Git and
+**Or build it yourself:** on Windows 10/11 x64 with *Build Tools for Visual Studio 2022* (C++ workload), Git and
 PowerShell 7 installed, and **your own disc** in the drive (or your `.iso` of it mounted):
 
 ```powershell
@@ -85,8 +95,8 @@ recompiler into `game-native\`. The launcher takes it from there: it copies and 
 game **from your copy, on your PC** (about a minute). After that, just start **`HotPursuit2Launcher.exe`**. Around an
 hour the first time; a few minutes after an update.
 
-There are no prebuilt downloads yet. The translated game is always made from your own copy, on your own PC — it's never
-shipped.
+The download holds only this project's programs. The translated game is always made from your own copy, on your own
+PC — it's never shipped.
 
 ## Controls
 
@@ -118,7 +128,7 @@ in the settings menu to quit.
 
 ## Known problems
 
-It's a development build, and it has only been tested on one PC so far. Here's what you might run into:
+It's an early release, and it has only been tested on one PC so far. Here's what you might run into:
 
 - **Saving is untested.** The game has a memory card (files in `game-native\saves`), but saving and loading a career
   haven't been checked from start to finish yet.
@@ -236,12 +246,14 @@ And, to be fair to you:
 
 ## Building from source
 
-`tools/install-native.ps1` (see [Quick start](#quick-start)) is all you need to play. If you want to hack on it:
+The download (see [Quick start](#quick-start)) or `tools/install-native.ps1` is all you need to play. If you want to hack
+on it:
 
 ```powershell
 pwsh tools/build.ps1 -Preset dev                  # build (optimised, with debug info) + run the tests
 pwsh tools/build.ps1 -Preset release -NoTest      # release build only
 pwsh tools/native-test.ps1 -Until 60 -FastBoot -ShotAt "40"   # scripted run with screenshots (needs a dump in ROM\)
+pwsh tools/package-release.ps1 -Version 0.2.0     # the download: programs, licenses, changelog (no game files)
 ```
 
 The recompiler needs LLVM (`tools/fetch-llvm.ps1` + `tools/build-llvm.ps1`; Apache 2.0 with LLVM Exceptions); without
@@ -289,6 +301,7 @@ only, races at 30 fps.
 | Document | What it is |
 |---|---|
 | [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) | Step by step from your disc to playing, recommended settings, troubleshooting |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
 | [`docs/STATUS.md`](docs/STATUS.md) | Where the project stands, what's next, open questions |
 | [`docs/adr/`](docs/adr/) | Design decisions, each with the options that were turned down |
 | [`docs/recomp-analysis.md`](docs/recomp-analysis.md) | How the game program and its services work, as measured while building the native game |
@@ -309,7 +322,7 @@ in the native game today. What's next, roughly in this order:
 - [ ] Depth fog and mipmaps on the GPU renderer
 - [ ] Pressure-sensitive buttons, rumble, steering wheels
 - [ ] Sharper text and textures
-- [ ] A ready-to-run download, so you don't need the build tools
+- [x] A ready-to-run download, so you don't need the build tools
 - [ ] Motion smoothing above 60 fps
 
 It's a long road, so no dates — it's done when it's done.

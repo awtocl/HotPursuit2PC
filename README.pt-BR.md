@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Baixar</b></a> ·
   <a href="docs/GETTING-STARTED.pt-BR.md"><b>Primeiros passos</b></a> ·
   <a href="#início-rápido">Início rápido</a> ·
   <a href="#o-que-vem">O que vem</a> ·
@@ -53,7 +54,7 @@ nenhum emulador no meio.
 | | |
 |---|---|
 | **Sem emulador** | O código do próprio jogo é traduzido para código x64 nativo (com LLVM), no seu PC e a partir da sua cópia. O hardware do console é trocado por equivalentes de PC: seus arquivos no lugar do leitor de disco, sua placa de vídeo, um mixer de som, seu controle. |
-| **Gráficos nítidos** | Direct3D 11 de 1x a 8x a resolução original (com supersampling quando passa da sua tela), escala nítida, nitidez e scanlines opcionais, tela cheia sem bordas. |
+| **Gráficos nítidos** | Direct3D 11 de 1x a 8x a resolução original (com supersampling quando passa da sua tela), escala nítida, antisserrilhado (FXAA), nitidez e scanlines opcionais, tela cheia sem bordas. |
 | **16:9 e 60 fps** | Widescreen de fábrica (você vê mais da estrada; o HUD e os menus mantêm o formato) e 60 quadros por segundo, graças aos patches da comunidade para este jogo (veja [Créditos](#licença-e-créditos)). Os dois podem ser desligados. |
 | **Todo o som** | As músicas do EA Trax, motores e efeitos, o rádio da polícia e o som dos vídeos. |
 | **Um launcher** | Encontra seu disco, copia e verifica, prepara o jogo e lembra de tudo depois. E ainda: configurações com recomendação para a sua tela, backups do cartão de memória e uma galeria de capturas (F12). Funciona com mouse, teclado ou controle. |
@@ -66,12 +67,22 @@ nenhum emulador no meio.
 
 ## Início rápido
 
+**Baixe e jogue**, sem ferramentas de compilação:
+
+1. Pegue o **`HotPursuit2PC-v0.2.0-win64.zip`** na **[versão mais recente](https://github.com/awtocl/HotPursuit2PC/releases/latest)** e descompacte onde quiser.
+2. Abra o **`HotPursuit2Launcher.exe`**. Os programas não são assinados, então o Windows pode perguntar antes: *Mais
+   informações* → *Executar assim mesmo*.
+3. Coloque **seu próprio disco** no drive (ou monte a sua `.iso`). O launcher copia e verifica o disco e traduz o jogo
+   **a partir da sua cópia, no seu PC** (cerca de um minuto). Depois é só apertar **Jogar**.
+
+O que mudou em cada versão: [CHANGELOG.md](CHANGELOG.md) (em inglês).
+
 > [!TIP]
 > **Primeira vez fazendo algo assim?** Sem problema: o guia **[Primeiros passos](docs/GETTING-STARTED.pt-BR.md)** te
 > leva passo a passo: o que você precisa, instalar as ferramentas, compilar, as melhores configurações e o que fazer se
 > algo der errado.
 
-**A versão curta:** no Windows 10/11 x64 com *Build Tools for Visual Studio 2022* (carga de trabalho C++), Git e
+**Ou compile você mesmo:** no Windows 10/11 x64 com *Build Tools for Visual Studio 2022* (carga de trabalho C++), Git e
 PowerShell 7 instalados, e **seu próprio disco** no drive (ou a sua `.iso` montada):
 
 ```powershell
@@ -85,8 +96,8 @@ o recompilador em `game-native\`. Daí em diante é com o launcher: ele copia e 
 partir da sua cópia, no seu PC** (cerca de um minuto). Depois disso, é só abrir o **`HotPursuit2Launcher.exe`**. Mais ou
 menos uma hora na primeira vez; alguns minutos depois de uma atualização.
 
-Ainda não há downloads prontos. O jogo traduzido é sempre feito a partir da sua própria cópia, no seu próprio PC: ele
-nunca é distribuído.
+O download traz só os programas deste projeto. O jogo traduzido é sempre feito a partir da sua própria cópia, no seu
+próprio PC: ele nunca é distribuído.
 
 ## Controles
 
@@ -118,7 +129,7 @@ jogo* no menu de configurações para sair.
 
 ## Problemas conhecidos
 
-É uma versão em desenvolvimento e até agora só foi testada em um PC. Eis o que você pode encontrar:
+É uma das primeiras versões e até agora só foi testada em um PC. Eis o que você pode encontrar:
 
 - **Salvar não foi testado.** O jogo tem um cartão de memória (arquivos em `game-native\saves`), mas salvar e carregar
   uma carreira ainda não foi verificado do começo ao fim.
@@ -223,7 +234,7 @@ estão em [`docs/adr/`](docs/adr/).
 - [ ] Névoa de profundidade e mipmaps no renderizador por GPU
 - [ ] Vibração e volantes
 - [ ] Textos e texturas mais nítidos
-- [ ] Um download pronto para jogar, sem ferramentas de compilação
+- [x] Um download pronto para jogar, sem ferramentas de compilação
 - [ ] Movimento mais suave acima de 60 fps
 
 É um caminho longo, então sem datas: fica pronto quando ficar.

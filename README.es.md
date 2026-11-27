@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Descargar</b></a> ·
   <a href="docs/GETTING-STARTED.es.md"><b>Primeros pasos</b></a> ·
   <a href="#inicio-rápido">Inicio rápido</a> ·
   <a href="#qué-trae">Qué trae</a> ·
@@ -53,7 +54,7 @@ juego de PS2, convertido en un programa de Windows de verdad: código x64 nativo
 | | |
 |---|---|
 | **Sin emulador** | El código del propio juego se traduce a código x64 nativo (con LLVM), en tu PC y desde tu copia. El hardware de la consola se reemplaza por equivalentes de PC: tus archivos en lugar del lector de discos, tu tarjeta gráfica, un mezclador de sonido, tu mando. |
-| **Gráficos nítidos** | Direct3D 11 de 1x a 8x la resolución original (con supermuestreo cuando supera la de tu pantalla), escalado nítido, nitidez y líneas de barrido opcionales, pantalla completa sin bordes. |
+| **Gráficos nítidos** | Direct3D 11 de 1x a 8x la resolución original (con supermuestreo cuando supera la de tu pantalla), escalado nítido, antialiasing (FXAA), nitidez y líneas de barrido opcionales, pantalla completa sin bordes. |
 | **16:9 y 60 fps** | Panorámico de serie (ves más de la carretera; el HUD y los menús conservan su forma) y 60 fotogramas por segundo, gracias a los parches de la comunidad para este juego (ver [Créditos](#licencia-y-créditos)). Ambos se pueden desactivar. |
 | **Todo el sonido** | La música de EA Trax, motores y efectos, la radio de la policía y el sonido de los videos. |
 | **Un launcher** | Encuentra tu disco, lo copia y lo comprueba, prepara el juego y lo recuerda todo. Además: ajustes con una recomendación para tu pantalla, copias de seguridad de la tarjeta de memoria y una galería de capturas (F12). Funciona con mouse, teclado o mando. |
@@ -66,11 +67,21 @@ juego de PS2, convertido en un programa de Windows de verdad: código x64 nativo
 
 ## Inicio rápido
 
+**Descarga y juega**, sin herramientas de compilación:
+
+1. Baja **`HotPursuit2PC-v0.2.0-win64.zip`** de la **[última versión](https://github.com/awtocl/HotPursuit2PC/releases/latest)** y descomprímelo donde quieras.
+2. Abre **`HotPursuit2Launcher.exe`**. Los programas no están firmados, así que Windows puede preguntar antes: *Más
+   información* → *Ejecutar de todas formas*.
+3. Pon **tu propio disco** en la unidad (o monta tu `.iso`). El launcher lo copia y lo comprueba, y traduce el juego
+   **desde tu copia, en tu PC** (un minuto aprox.). Luego pulsa **Jugar**.
+
+Qué cambió en cada versión: [CHANGELOG.md](CHANGELOG.md) (en inglés).
+
 > [!TIP]
 > **¿Primera vez que haces algo así?** Tranquilidad: la guía **[Primeros pasos](docs/GETTING-STARTED.es.md)** te lleva paso
 > a paso: qué necesitas, cómo instalar las herramientas, compilar, los mejores ajustes y qué hacer si algo falla.
 
-**La versión corta:** en Windows 10/11 x64 con *Build Tools for Visual Studio 2022* (carga de trabajo de C++), Git y
+**O compílalo tú:** en Windows 10/11 x64 con *Build Tools for Visual Studio 2022* (carga de trabajo de C++), Git y
 PowerShell 7 instalados, y **tu propio disco** en la unidad (o tu `.iso` montada):
 
 ```powershell
@@ -84,8 +95,8 @@ el recompilador en `game-native\`. Desde ahí sigue el launcher: copia y comprue
 copia, en tu PC** (un minuto aprox.). Después, basta con abrir **`HotPursuit2Launcher.exe`**. Cerca de una hora la
 primera vez; unos minutos tras una actualización.
 
-Todavía no hay descargas listas para usar. El juego traducido siempre se crea desde tu propia copia y en tu propio PC:
-nunca se distribuye.
+La descarga solo trae los programas de este proyecto. El juego traducido siempre se crea desde tu propia copia y en tu
+propio PC: nunca se distribuye.
 
 ## Controles
 
@@ -117,7 +128,7 @@ del juego* en el menú de ajustes para salir.
 
 ## Problemas conocidos
 
-Es una versión en desarrollo y por ahora solo se ha probado en un PC. Esto es lo que te puedes encontrar:
+Es una de las primeras versiones y por ahora solo se ha probado en un PC. Esto es lo que te puedes encontrar:
 
 - **Guardar partida no está probado.** El juego tiene una tarjeta de memoria (archivos en `game-native\saves`), pero
   todavía no se ha comprobado de principio a fin guardar y cargar una carrera profesional.
@@ -221,7 +232,7 @@ están en [`docs/adr/`](docs/adr/).
 - [ ] Niebla de profundidad y mipmaps en el renderizador por GPU
 - [ ] Vibración y volantes
 - [ ] Texto y texturas más nítidos
-- [ ] Una descarga lista para usar, sin herramientas de compilación
+- [x] Una descarga lista para usar, sin herramientas de compilación
 - [ ] Movimiento más suave por encima de 60 fps
 
 Es un camino largo, así que sin fechas: estará cuando esté.

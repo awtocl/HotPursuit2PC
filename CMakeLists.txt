@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(HotPursuit2PC
-  VERSION 0.1.0
-  DESCRIPTION "Converter that turns a user's own NFS Hot Pursuit 2 (PS2, NTSC-U) dump into a PC build"
+  VERSION 0.2.0
+  DESCRIPTION "A native Windows port of NFS Hot Pursuit 2 (PS2, NTSC-U), built from the user's own disc"
   LANGUAGES C CXX)   # C: only for third-party libraries pulled in by engine/
 
 if(NOT WIN32)

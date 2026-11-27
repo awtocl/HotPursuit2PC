@@ -2233,7 +2233,7 @@ int wmain(int argc, wchar_t** argv) {
       const std::wstring stem = std::filesystem::path(self).stem().wstring();
       g_log = _wfopen((exe_dir / (stem == L"HotPursuit2Native" ? std::wstring(L"native.log") : stem + L".log")).c_str(), L"w");
     }
-    Log("HotPursuit2Native 0.2.0-dev.1 - native runtime, no emulator code. Development build.");
+    Log("HotPursuit2Native 0.2.0 - native runtime, no emulator code.");
 
     // ---- the game's executable, from the user's ROM folder ----
     const Bytes file = read_whole_file(rom / L"SLUS_203.62", 64ull << 20);

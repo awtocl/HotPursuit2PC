@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Télécharger</b></a> ·
   <a href="docs/GETTING-STARTED.fr.md"><b>Bien démarrer</b></a> ·
   <a href="#démarrage-rapide">Démarrage rapide</a> ·
   <a href="#ce-quil-propose">Ce qu'il propose</a> ·
@@ -53,7 +54,7 @@ manette — et aucun émulateur entre les deux.
 | | |
 |---|---|
 | **Pas d'émulateur** | Le code du jeu lui-même est traduit en code x64 natif (avec LLVM), sur votre PC, à partir de votre copie. Le matériel de la console est remplacé par des équivalents PC : vos fichiers à la place du lecteur, votre carte graphique, un mixeur audio, votre manette. |
-| **Graphismes nets** | Direct3D 11 de 1x à 8x la résolution d'origine (suréchantillonné au-delà de celle de votre écran), mise à l'échelle nette, netteté et lignes de balayage en option, plein écran sans bordure. |
+| **Graphismes nets** | Direct3D 11 de 1x à 8x la résolution d'origine (suréchantillonné au-delà de celle de votre écran), mise à l'échelle nette, anticrénelage (FXAA), netteté et lignes de balayage en option, plein écran sans bordure. |
 | **16:9 et 60 fps** | Écran large d'office (vous voyez plus de route ; le HUD et les menus gardent leur forme) et 60 images par seconde, grâce aux patchs de la communauté pour ce jeu (voir [Crédits](#licence-et-crédits)). Les deux peuvent être désactivés. |
 | **Tout le son** | La musique EA Trax, les moteurs et effets, la radio de la police et le son des vidéos. |
 | **Un lanceur** | Il trouve votre disque, le copie et le vérifie, prépare le jeu et se souvient de tout ensuite. En plus : des paramètres avec une recommandation pour votre écran, des sauvegardes de la carte mémoire et une galerie de captures (F12). À la souris, au clavier ou à la manette. |
@@ -66,12 +67,22 @@ manette — et aucun émulateur entre les deux.
 
 ## Démarrage rapide
 
+**Téléchargez et jouez**, sans outils de compilation :
+
+1. Récupérez **`HotPursuit2PC-v0.2.0-win64.zip`** dans la **[dernière version](https://github.com/awtocl/HotPursuit2PC/releases/latest)** et décompressez-le où vous voulez.
+2. Lancez **`HotPursuit2Launcher.exe`**. Les programmes ne sont pas signés, Windows peut donc demander d'abord :
+   *Informations complémentaires* → *Exécuter quand même*.
+3. Mettez **votre propre disque** dans le lecteur (ou montez votre `.iso`). Le lanceur le copie, le vérifie et traduit
+   le jeu **à partir de votre copie, sur votre PC** (environ une minute). Ensuite, appuyez sur **Jouer**.
+
+Les nouveautés de chaque version : [CHANGELOG.md](CHANGELOG.md) (en anglais).
+
 > [!TIP]
 > **C'est la première fois que vous faites ce genre de chose ?** Pas de souci : le guide **[Bien démarrer](docs/GETTING-STARTED.fr.md)**
 > vous accompagne pas à pas : ce qu'il vous faut, installer les outils, compiler, les meilleurs réglages et quoi faire
 > en cas de problème.
 
-**En bref :** sous Windows 10/11 x64 avec *Build Tools for Visual Studio 2022* (charge de travail C++), Git et
+**Ou compilez-le vous-même :** sous Windows 10/11 x64 avec *Build Tools for Visual Studio 2022* (charge de travail C++), Git et
 PowerShell 7 installés, et **votre propre disque** dans le lecteur (ou votre `.iso` montée) :
 
 ```powershell
@@ -85,8 +96,8 @@ recompilateur dans `game-native\`. Le lanceur prend ensuite le relais : il copie
 jeu **à partir de votre copie, sur votre PC** (environ une minute). Ensuite, lancez simplement
 **`HotPursuit2Launcher.exe`**. Environ une heure la première fois ; quelques minutes après une mise à jour.
 
-Il n'y a pas encore de téléchargement prêt à l'emploi. Le jeu traduit est toujours fait à partir de votre propre copie,
-sur votre propre PC : il n'est jamais distribué.
+Le téléchargement ne contient que les programmes de ce projet. Le jeu traduit est toujours fait à partir de votre
+propre copie, sur votre propre PC : il n'est jamais distribué.
 
 ## Commandes
 
@@ -118,7 +129,7 @@ personnalisée reste enregistrée. La disposition de la manette se change aussi 
 
 ## Problèmes connus
 
-C'est une version de développement, testée sur un seul PC pour l'instant. Voici ce que vous pourriez rencontrer :
+C'est l'une des premières versions, testée sur un seul PC pour l'instant. Voici ce que vous pourriez rencontrer :
 
 - **La sauvegarde n'est pas testée.** Le jeu a une carte mémoire (fichiers dans `game-native\saves`), mais sauvegarder
   et recharger une carrière n'a pas encore été vérifié du début à la fin.
@@ -225,7 +236,7 @@ décisions de conception sont dans [`docs/adr/`](docs/adr/).
 - [ ] Brouillard de profondeur et mipmaps dans le rendu GPU
 - [ ] Vibration et volants
 - [ ] Textes et textures plus nets
-- [ ] Un téléchargement prêt à jouer, sans outils de compilation
+- [x] Un téléchargement prêt à jouer, sans outils de compilation
 - [ ] Un mouvement plus fluide au-delà de 60 fps
 
 C'est un long chemin, donc pas de dates : ce sera prêt quand ce sera prêt.

@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Download</b></a> ·
   <a href="docs/GETTING-STARTED.de.md"><b>Erste Schritte</b></a> ·
   <a href="#schnellstart">Schnellstart</a> ·
   <a href="#was-drin-ist">Was drin ist</a> ·
@@ -53,7 +54,7 @@ und kein Emulator dazwischen.
 | | |
 |---|---|
 | **Kein Emulator** | Der Code des Spiels selbst wird in nativen x64-Code übersetzt (mit LLVM), direkt auf deinem PC, aus deiner Kopie. Die Hardware der Konsole wird durch PC-Gegenstücke ersetzt: deine Dateien statt des Laufwerks, deine Grafikkarte, ein Sound-Mixer, dein Controller. |
-| **Scharfe Grafik** | Direct3D 11 mit 1- bis 8-facher Originalauflösung (Supersampling, wenn sie über der deines Bildschirms liegt), scharfe Skalierung, optional Schärfe und Scanlines, randloses Vollbild. |
+| **Scharfe Grafik** | Direct3D 11 mit 1- bis 8-facher Originalauflösung (Supersampling, wenn sie über der deines Bildschirms liegt), scharfe Skalierung, Kantenglättung (FXAA), optional Schärfe und Scanlines, randloses Vollbild. |
 | **16:9 und 60 fps** | Breitbild ab Werk (du siehst mehr von der Straße; HUD und Menüs behalten ihre Form) und 60 Bilder pro Sekunde, dank der Community-Patches für dieses Spiel (siehe [Credits](#lizenz-und-credits)). Beides lässt sich abschalten. |
 | **Der ganze Sound** | Die EA-Trax-Musik, Motoren und Effekte, der Polizeifunk und der Ton der Videos. |
 | **Ein Launcher** | Er findet deine Disc, kopiert und prüft sie, bereitet das Spiel vor und merkt sich danach alles. Dazu: Einstellungen mit einer Empfehlung für deinen Bildschirm, Sicherungen der Memory Card und eine Screenshot-Galerie (F12). Mit Maus, Tastatur oder Controller. |
@@ -66,12 +67,22 @@ und kein Emulator dazwischen.
 
 ## Schnellstart
 
+**Herunterladen und spielen**, ganz ohne Build-Werkzeuge:
+
+1. Hol dir **`HotPursuit2PC-v0.2.0-win64.zip`** aus dem **[neuesten Release](https://github.com/awtocl/HotPursuit2PC/releases/latest)** und entpacke es, wohin du willst.
+2. Starte **`HotPursuit2Launcher.exe`**. Die Programme sind nicht signiert, deshalb fragt Windows vielleicht zuerst:
+   *Weitere Informationen* → *Trotzdem ausführen*.
+3. Leg **deine eigene Disc** ins Laufwerk (oder binde deine `.iso` ein). Der Launcher kopiert und prüft sie und
+   übersetzt das Spiel **aus deiner Kopie, auf deinem PC** (etwa eine Minute). Dann auf **Spielen** drücken.
+
+Was sich in jeder Version geändert hat: [CHANGELOG.md](CHANGELOG.md) (auf Englisch).
+
 > [!TIP]
 > **Zum ersten Mal so etwas?** Kein Problem: Die Anleitung **[Erste Schritte](docs/GETTING-STARTED.de.md)** führt dich
 > Schritt für Schritt durch alles: was du brauchst, die Werkzeuge installieren, bauen, die besten Einstellungen und was
 > zu tun ist, wenn etwas schiefgeht.
 
-**Die Kurzfassung:** unter Windows 10/11 x64 mit installierten *Build Tools for Visual Studio 2022* (C++-Workload), Git
+**Oder selbst bauen:** unter Windows 10/11 x64 mit installierten *Build Tools for Visual Studio 2022* (C++-Workload), Git
 und PowerShell 7, und **deiner eigenen Disc** im Laufwerk (oder deiner eingebundenen `.iso`):
 
 ```powershell
@@ -85,8 +96,8 @@ Recompiler landen in `game-native\`. Danach übernimmt der Launcher: Er kopiert 
 Spiel **aus deiner Kopie, auf deinem PC** (etwa eine Minute). Danach startest du einfach
 **`HotPursuit2Launcher.exe`**. Beim ersten Mal etwa eine Stunde; nach einem Update ein paar Minuten.
 
-Fertige Downloads gibt es noch nicht. Das übersetzte Spiel entsteht immer aus deiner eigenen Kopie, auf deinem eigenen
-PC – es wird nie verteilt.
+Der Download enthält nur die Programme dieses Projekts. Das übersetzte Spiel entsteht immer aus deiner eigenen Kopie,
+auf deinem eigenen PC – es wird nie verteilt.
 
 ## Steuerung
 
@@ -118,7 +129,7 @@ beenden* im Einstellungsmenü zum Beenden.
 
 ## Bekannte Probleme
 
-Es ist eine Entwicklungsversion und bisher nur auf einem PC getestet. Darauf kannst du stoßen:
+Es ist eine der ersten Versionen und bisher nur auf einem PC getestet. Darauf kannst du stoßen:
 
 - **Speichern ist ungetestet.** Das Spiel hat eine Memory Card (Dateien in `game-native\saves`), aber Speichern und Laden
   einer Karriere wurde noch nicht von Anfang bis Ende geprüft.
@@ -229,7 +240,7 @@ Designentscheidungen liegen in [`docs/adr/`](docs/adr/).
 - [ ] Tiefennebel und Mipmaps im GPU-Renderer
 - [ ] Vibration und Lenkräder
 - [ ] Schärfere Texte und Texturen
-- [ ] Ein fertiger Download, ganz ohne Build-Werkzeuge
+- [x] Ein fertiger Download, ganz ohne Build-Werkzeuge
 - [ ] Flüssigere Bewegung über 60 fps
 
 Es ist ein langer Weg, darum keine Termine: Es ist fertig, wenn es fertig ist.

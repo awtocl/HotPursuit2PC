@@ -17,6 +17,21 @@ compilar, então pode pegar um lanche. Depois disso, abrir o jogo é só um cliq
 
 ---
 
+## O jeito rápido: baixar
+
+Desde a versão 0.2.0 existe um download pronto para jogar, então você pode pular a instalação das ferramentas e a
+compilação (passos 1, 3 e 4):
+
+1. Baixe o **`HotPursuit2PC-v0.2.0-win64.zip`** na [versão mais recente](https://github.com/awtocl/HotPursuit2PC/releases/latest).
+2. Clique com o botão direito nele → **Extrair tudo…** e escolha a pasta que quiser (por exemplo
+   `C:\Jogos\HotPursuit2PC`).
+3. Abra a pasta e dê um clique duplo em **`HotPursuit2Launcher.exe`**. O Windows pode dizer que protegeu o seu PC (os
+   programas não são assinados): clique em **Mais informações** e depois em **Executar assim mesmo**.
+4. Depois siga o **passo 2** (seu disco) e o **passo 5** (a preparação no launcher) mais abaixo.
+
+Você vai precisar de uns 4 GB livres, quase tudo para a cópia do seu disco. Prefere compilar você mesmo ou quer as
+mudanças mais recentes? Siga todos os passos abaixo.
+
 ## O que você precisa
 
 | Você precisa | Detalhes |
@@ -165,6 +180,7 @@ valor anterior.
 | Proporção | **16:9** | Visão mais ampla nas corridas; os menus mantêm o formato (trocar entre 16:9 e 4:3 exige reiniciar) |
 | Nitidez | **Desligado** ou **Baixo** | Valores maiores podem fazer as bordas tremerem |
 | Scanlines | **Desligado** | A não ser que você goste do visual de TV de tubo |
+| Antisserrilhado | **FXAA** | Suaviza as bordas serrilhadas; nas qualidades de imagem mais altas a diferença é pequena |
 
 As configurações são salvas sozinhas em `game-native\hp2native.ini`.
 

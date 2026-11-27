@@ -17,6 +17,21 @@ pendant que votre PC compile, alors prévoyez un en-cas. Ensuite, lancer le jeu 
 
 ---
 
+## La méthode rapide : télécharger
+
+Depuis la version 0.2.0, il existe un téléchargement prêt à jouer : vous pouvez sauter l'installation des outils et la
+compilation (étapes 1, 3 et 4) :
+
+1. Téléchargez **`HotPursuit2PC-v0.2.0-win64.zip`** depuis la [dernière version](https://github.com/awtocl/HotPursuit2PC/releases/latest).
+2. Clic droit dessus → **Extraire tout…**, puis choisissez le dossier qui vous plaît (par exemple
+   `C:\Jeux\HotPursuit2PC`).
+3. Ouvrez le dossier et double-cliquez sur **`HotPursuit2Launcher.exe`**. Windows peut dire qu'il a protégé votre PC
+   (les programmes ne sont pas signés) : cliquez sur **Informations complémentaires**, puis sur **Exécuter quand même**.
+4. Suivez ensuite l'**étape 2** (votre disque) et l'**étape 5** (la préparation dans le lanceur) ci-dessous.
+
+Il vous faut environ 4 Go libres, surtout pour la copie de votre disque. Vous préférez compiler vous-même, ou vous
+voulez les toutes dernières modifications ? Suivez toutes les étapes ci-dessous.
+
 ## Ce qu'il vous faut
 
 | Il vous faut | Détails |
@@ -166,6 +181,7 @@ Si le jeu saccade, choisissez la valeur inférieure.
 | Format d'image | **16:9** | Vue plus large en course ; les menus gardent leur forme (passer de 16:9 à 4:3 demande un redémarrage) |
 | Netteté | **Désactivé** ou **Faible** | Des valeurs plus hautes peuvent faire scintiller les contours |
 | Lignes de balayage | **Désactivé** | Sauf si vous aimez le look des vieux téléviseurs |
+| Anticrénelage | **FXAA** | Adoucit les bords en escalier ; aux qualités d'image les plus hautes, la différence est faible |
 
 Les réglages sont enregistrés automatiquement dans `game-native\hp2native.ini`.
 

@@ -67,6 +67,8 @@ The native game reads a few environment variables that help while debugging (non
 | Variable | What it does |
 |---|---|
 | `HP2_ASPECT=0..3`, `HP2_FPS=30\|60` | Override the aspect ratio and frame rate without touching `hp2native.ini` |
+| `HP2_RES=0..5`, `HP2_VSYNC=0\|1`, `HP2_AA=0\|1\|2` | Same for the internal resolution (1x-8x), V-Sync and anti-aliasing (`2`: only the right half, to compare) |
+| `HP2_DEPTH_READ_WAIT=1` | Depth read-backs (the sun test) wait for this frame's result again instead of using a finished earlier one |
 | `HP2_GDI=1` | Present with GDI instead of Direct3D 11 |
 | `HP2_TRACE_ENTRIES=1` | Log every entry into translated code |
 | `HP2_PRESS="start@12-13"` | Press pad buttons at given times (scripted runs) |

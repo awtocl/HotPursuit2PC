@@ -39,7 +39,7 @@ using i18n::T;
 
 namespace {
 
-constexpr const wchar_t* kVersion = L"0.2.0-dev.1";
+constexpr const wchar_t* kVersion = L"0.2.0";
 constexpr const wchar_t* kRepoUrl = L"https://github.com/awtocl/HotPursuit2PC";
 constexpr const wchar_t* kGuideUrl = L"https://github.com/awtocl/HotPursuit2PC/blob/main/docs/GETTING-STARTED.md";
 constexpr const wchar_t* kIssuesUrl = L"https://github.com/awtocl/HotPursuit2PC/issues";

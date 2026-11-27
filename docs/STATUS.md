@@ -3,11 +3,13 @@
 Single source of truth for project state. A fresh session resumes from this
 file alone. Updated in every phase commit. Spec: `docs/brief.md` (brief v3).
 
-**PAUSED 2026-11-16 by the owner, mid-step. Continue from [docs/HANDOVER.md](HANDOVER.md)** (what was in
-progress, the one-line fix waiting to be applied, the owner's latest requests that are not done: README rationale,
-GitHub dev build `v0.2.0-dev.1`). In progress: the **native runtime** (`native/`, `HotPursuit2Native.exe`, no
-reference-core code): the game's start-up runs natively and stops at its heap assert. Tests not re-run after the
-translator changes of this step.
+**2026-11-27 — v0.2.0 released**, the first download (launcher, native game and recompiler; no game files): see
+[CHANGELOG.md](../CHANGELOG.md). The native runtime (`native/`, no emulator code) plays the game from the user's own
+disc: movies, menus, races, music and effects, 16:9 and 60 fps, the GPU renderer up to 8x with FXAA. Last fixes before
+the release: GPU depth read-backs (the sun test) no longer wait for the GPU, so races hold 60 fps at high internal
+resolutions; streams pause with the pause menu. Next (README roadmap): memory card saves verified end to end, reverb
+and envelopes in the mixer, depth fog and mipmaps on the GPU renderer. The sections below are the history up to the
+native runtime and are no longer current in their "next" lines.
 
 Previous: 2026-11-16 — **R2a (system libraries measured), ADR 0011 proposed.** The game's Sony libraries and
 its 12 IOP servers are located without symbols (`hp2recomp refs`); they are 1.95 % of executed instructions, so R2's

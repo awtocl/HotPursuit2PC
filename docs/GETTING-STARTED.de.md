@@ -17,6 +17,21 @@ während dein PC baut, also hol dir ruhig einen Snack. Danach startest du das Sp
 
 ---
 
+## Der schnelle Weg: herunterladen
+
+Seit Version 0.2.0 gibt es einen fertigen Download, du kannst also die Installation der Werkzeuge und das Bauen
+überspringen (Schritte 1, 3 und 4):
+
+1. Lade **`HotPursuit2PC-v0.2.0-win64.zip`** aus dem [neuesten Release](https://github.com/awtocl/HotPursuit2PC/releases/latest) herunter.
+2. Rechtsklick darauf → **Alle extrahieren…** und such dir einen Ordner aus (zum Beispiel `C:\Spiele\HotPursuit2PC`).
+3. Öffne den Ordner und doppelklicke auf **`HotPursuit2Launcher.exe`**. Windows meldet vielleicht, dass es deinen PC
+   geschützt hat (die Programme sind nicht signiert): Klick auf **Weitere Informationen** und dann auf **Trotzdem
+   ausführen**.
+4. Mach dann mit **Schritt 2** (deine Disc) und **Schritt 5** (die Einrichtung im Launcher) weiter unten weiter.
+
+Du brauchst etwa 4 GB freien Platz, das meiste für die Kopie deiner Disc. Lieber selbst bauen oder die allerneuesten
+Änderungen? Dann folge allen Schritten unten.
+
 ## Was du brauchst
 
 | Du brauchst | Details |
@@ -165,6 +180,7 @@ Spiel, nimm den nächstniedrigeren Wert.
 | Seitenverhältnis | **16:9** | Mehr Sicht im Rennen; die Menüs behalten ihre Form (Wechsel zwischen 16:9 und 4:3 braucht einen Neustart) |
 | Schärfe | **Aus** oder **Niedrig** | Höhere Werte können Kanten flimmern lassen |
 | Scanlines | **Aus** | Außer du magst den Röhrenfernseher-Look |
+| Kantenglättung | **FXAA** | Glättet treppenartige Kanten; bei den höchsten Bildqualitäten ist der Unterschied gering |
 
 Die Einstellungen werden automatisch in `game-native\hp2native.ini` gespeichert.
 

@@ -17,6 +17,20 @@ things, so feel free to grab a snack. After that, starting the game is just a do
 
 ---
 
+## The quick way: download
+
+Since version 0.2.0 there's a ready-to-run download, so you can skip installing the tools and building (steps 1, 3
+and 4):
+
+1. Download **`HotPursuit2PC-v0.2.0-win64.zip`** from the [latest release](https://github.com/awtocl/HotPursuit2PC/releases/latest).
+2. Right-click it → **Extract All…** and pick a folder you like (for example `C:\Games\HotPursuit2PC`).
+3. Open the folder and double-click **`HotPursuit2Launcher.exe`**. Windows may say it protected your PC (the programs
+   aren't signed): click **More info**, then **Run anyway**.
+4. Then follow **step 2** (your disc) and **step 5** (the launcher's setup) below.
+
+You'll need about 4 GB of free space, most of it for the copy of your disc. Prefer to build it yourself, or want the
+very latest changes? Follow all the steps below.
+
 ## What you need
 
 | You need | Details |
@@ -164,6 +178,7 @@ stutters, choose the next lower value.
 | Aspect ratio | **16:9** | Wider view in races; the menus keep their shape (changing between 16:9 and 4:3 needs a restart) |
 | Sharpening | **Off** or **Low** | Higher values can make edges shimmer |
 | Scanlines | **Off** | Unless you like the CRT look |
+| Anti-aliasing | **FXAA** | Smooths jagged edges; at the highest picture qualities the difference is small |
 
 Settings are saved automatically in `game-native\hp2native.ini`.
 
