@@ -16,9 +16,9 @@ game is a double-click.
 
 ## What you need
 
-| | |
+| You need | Details |
 |---|---|
-| **The disc** | *Need for Speed: Hot Pursuit 2*, PlayStation 2, **North American release**. The code **SLUS-20362** is printed on the disc and on the back of the case. Other regions (European `SLES-…`, Japanese `SLPM-…`) and "Greatest Hits" reprints with a different program are not supported — the installer checks this for you. |
+| **The disc** | *Need for Speed: Hot Pursuit 2*, PlayStation 2, **North American release**. The code **SLUS-20362** is printed on the disc and on the back of the case. Other regions (for example the European `SLES-50731`) and any edition with a different program are not supported — the installer checks this for you. |
 | **A way to read it** | A DVD drive in (or plugged into) your PC. If you already made an `.iso` image of your own disc, that works too. |
 | **The PC** | Windows 10 or 11, 64-bit. A graphics card with Direct3D 11 (any card from the last ten years). |
 | **Free disk space** | About **15 GB**: 3 GB for the copy of your disc, 6 GB for the C++ build tools (step 1) and 6 GB for the project with its code generator (step 4). |
