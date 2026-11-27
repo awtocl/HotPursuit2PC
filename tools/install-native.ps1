@@ -1,33 +1,35 @@
 <#
 .SYNOPSIS
-  Builds the native game (HotPursuit2Native.exe, no emulator) from YOUR OWN dump of Need for Speed: Hot Pursuit 2
-  (PS2, NTSC-U, SLUS-20362) and puts it in a folder ready to play.
+  Builds the native game (no emulator) and its launcher, and puts them in a game folder ready to play from YOUR OWN
+  disc of Need for Speed: Hot Pursuit 2 (PS2, NTSC-U, SLUS-20362).
 .DESCRIPTION
-  No game files are in this repository or downloaded by this script. You point it at the extracted contents of your own
-  disc (the folder holding SYSTEM.CNF, SLUS_203.62 and NFSHP2; a mounted .iso drive works too). The script:
-    1. checks the folder and that SLUS_203.62 is the supported version (SHA-256 from converter/data);
+  No game files are in this repository or downloaded by this script. The script:
+    1. checks the disc folder given with -Rom (skipped without it: the launcher asks for your disc);
     2. the first time only, downloads and builds LLVM (the recompiler's code generator; 15-40 minutes);
     3. builds the project (release) unless -NoBuild;
-    4. recompiles the game's program from YOUR SLUS_203.62 into hp2code.dll (on this PC; it stays on this PC);
-    5. copies HotPursuit2Native.exe and hp2code.dll into -Destination and writes Play.cmd that starts the game from your
-       disc folder (read-only: nothing is written to it).
-  Without -Rom a folder picker asks for the disc folder. Run it again after updating the project (git pull).
+    4. with -Rom: recompiles the game's program from YOUR SLUS_203.62 into hp2code.dll (on this PC; it stays here);
+    5. copies the launcher (HotPursuit2Launcher.exe), the game (HotPursuit2Native.exe) and the recompiler (hp2recomp.exe)
+       into -Destination, then starts the launcher (unless -NoLaunch).
+  The launcher's first-run setup finds your disc (DVD drive or mounted .iso), copies and checks it, and prepares the
+  game. Your disc folder is only read. Run the script again after updating the project (git pull).
   Requirements and a step-by-step guide: docs/GETTING-STARTED.md.
 .EXAMPLE
-  pwsh tools/install-native.ps1 -Rom "D:\My dumps\Need for Speed - Hot Pursuit 2 (USA)"
+  pwsh tools/install-native.ps1                 # build, then the launcher asks for your disc
 .EXAMPLE
-  pwsh tools/install-native.ps1        # asks for the folder
+  pwsh tools/install-native.ps1 -Rom "D:\My dumps\Need for Speed - Hot Pursuit 2 (USA)" -NoLaunch
 #>
 [CmdletBinding()]
 param(
   [string]$Rom = '',
   [string]$Destination = '',  # default: <repo>\game-native
-  [switch]$NoBuild
+  [switch]$NoBuild,
+  [switch]$NoLaunch
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not $Destination) { $Destination = Join-Path $repo 'game-native' }
 $watch = [Diagnostics.Stopwatch]::StartNew()
+
 function Step([string]$text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 
 # ---- 0. the C++ build tools (needed by every build step) ----
@@ -37,29 +39,25 @@ if (-not $NoBuild -and -not $vs) {
   throw "The C++ build tools were not found. Install 'Build Tools for Visual Studio 2022' with the 'Desktop development with C++' workload (see docs/GETTING-STARTED.md, step 1), then run this script again."
 }
 
-# ---- 1. your disc ----
+# ---- 1. your disc (optional here: the launcher asks for it) ----
 Step '1/5  Your disc'
-if (-not $Rom) {
-  Write-Host 'Choose the folder with the contents of your disc in the window that opens (it may open behind this one).'
-  Add-Type -AssemblyName System.Windows.Forms
-  $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-  $dialog.Description = 'Folder with the contents of YOUR Need for Speed: Hot Pursuit 2 disc (SYSTEM.CNF, SLUS_203.62, NFSHP2)'
-  if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw 'No folder chosen.' }
-  $Rom = $dialog.SelectedPath
-}
-$Rom = (Resolve-Path -LiteralPath $Rom).Path
-foreach ($need in 'SYSTEM.CNF', 'SLUS_203.62', 'NFSHP2') {
-  if (-not (Test-Path -LiteralPath (Join-Path $Rom $need))) {
-    throw "'$Rom' does not look like the contents of the disc: $need is missing. Copy everything on your disc into a folder (or mount your .iso) and choose the folder that holds SYSTEM.CNF, SLUS_203.62 and NFSHP2."
+if ($Rom) {
+  $Rom = (Resolve-Path -LiteralPath $Rom).Path
+  foreach ($need in 'SYSTEM.CNF', 'SLUS_203.62', 'NFSHP2') {
+    if (-not (Test-Path -LiteralPath (Join-Path $Rom $need))) {
+      throw "'$Rom' does not look like the contents of the disc: $need is missing. Choose the folder that holds SYSTEM.CNF, SLUS_203.62 and NFSHP2."
+    }
   }
+  $manifest = Get-Content (Join-Path $repo 'converter\data\slus20362_rom_manifest.tsv') | Where-Object { $_ -like 'SLUS_203.62*' }
+  $expected = ($manifest -split "`t")[2]
+  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Rom 'SLUS_203.62')).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) {
+    throw "SLUS_203.62 is not the supported version (SHA-256 $actual). Only the North American release SLUS-20362 v1.00 is supported."
+  }
+  Write-Host "OK: $Rom (SLUS_203.62 is the supported version)"
+} else {
+  Write-Host 'Later: the launcher asks for your disc when it starts.'
 }
-$manifest = Get-Content (Join-Path $repo 'converter\data\slus20362_rom_manifest.tsv') | Where-Object { $_ -like 'SLUS_203.62*' }
-$expected = ($manifest -split "`t")[2]
-$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Rom 'SLUS_203.62')).Hash.ToLowerInvariant()
-if ($actual -ne $expected) {
-  throw "SLUS_203.62 is not the supported version (SHA-256 $actual). Only the North American release SLUS-20362 v1.00 is supported."
-}
-Write-Host "OK: $Rom (SLUS_203.62 is the supported version)"
 
 if (-not $NoBuild) {
   # ---- 2. LLVM, the recompiler's code generator (once) ----
@@ -83,30 +81,41 @@ if (-not $NoBuild) {
   if ($LASTEXITCODE -ne 0) { $build | Select-String -Pattern 'error|FAILED' | Select-Object -First 15; throw 'The build failed (errors above).' }
   Write-Host 'OK'
 }
-$recomp = Join-Path $repo '.cache\build\release\recomp\hp2recomp.exe'
-$exe = Join-Path $repo '.cache\build\release\native\HotPursuit2Native.exe'
+$bin = Join-Path $repo '.cache\build\release'
+$recomp = Join-Path $bin 'recomp\hp2recomp.exe'
+$exe = Join-Path $bin 'native\HotPursuit2Native.exe'
+$launcher = Join-Path $bin 'launcher\HotPursuit2Launcher.exe'
 if (-not (Test-Path $recomp)) { throw "The recompiler was not built ($recomp): LLVM is missing. Run this script again without -NoBuild." }
-if (-not (Test-Path $exe)) { throw "The native game was not built ($exe)." }
-
-# ---- 4. the game's program, recompiled from your copy ----
-Step '4/5  Recompiling the game from your SLUS_203.62 (a few minutes)'
+foreach ($built in $exe, $launcher) { if (-not (Test-Path $built)) { throw "Not built: $built. Run this script again without -NoBuild." } }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-& $recomp package (Join-Path $Rom 'SLUS_203.62') (Join-Path $Destination 'hp2code.dll') | Select-Object -Last 1 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Recompiling failed.' }
-Write-Host 'OK'
+
+# ---- 4. the game's program, recompiled from your copy (or later, in the launcher) ----
+Step '4/5  Preparing the game from your SLUS_203.62'
+if ($Rom) {
+  & $recomp package (Join-Path $Rom 'SLUS_203.62') (Join-Path $Destination 'hp2code.dll') | Select-Object -Last 1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Recompiling failed.' }
+  Write-Host 'OK'
+} else {
+  Write-Host 'Later: the launcher does it after checking your disc (about a minute).'
+}
 
 # ---- 5. the game folder ----
 Step '5/5  Game folder'
-Copy-Item $exe $Destination -Force
-$play = Join-Path $Destination 'Play.cmd'
-Set-Content -LiteralPath $play -Encoding oem -Value @(  # (the console's code page: paths with accents work)
-  '@echo off',
-  "start `"`" `"%~dp0HotPursuit2Native.exe`" --rom `"$Rom`""
-)
+foreach ($file in $launcher, $exe, $recomp) { Copy-Item $file $Destination -Force }
 $Destination = (Resolve-Path -LiteralPath $Destination).Path
+if ($Rom) {  # tell the launcher where the disc is (UTF-16: folder names with accents work)
+  $ini = Join-Path $Destination 'launcher.ini'
+  $text = if (Test-Path -LiteralPath $ini) { Get-Content -LiteralPath $ini -Raw } else { '' }
+  if ($text -match '(?m)^folder=') { $text = $text -replace '(?m)^folder=[^\r\n]*', ('folder=' + $Rom.Replace('$', '$$')) }
+  else { $text = "[disc]`r`nfolder=$Rom`r`n" + $text }
+  Set-Content -LiteralPath $ini -Value $text -Encoding Unicode -NoNewline
+}
 Write-Host "OK: $Destination"
 Write-Host ''
 $minutes = [math]::Max(1, [math]::Round($watch.Elapsed.TotalMinutes))
 Write-Host ("Done in {0} minute{1}. To play, double-click:" -f $minutes, $(if ($minutes -eq 1) { '' } else { 's' })) -ForegroundColor Green
-Write-Host "  $Destination\Play.cmd" -ForegroundColor Green
-Write-Host 'In the game, F1 opens the settings (and Quit game). Keep your disc folder where it is: the game reads it.'
+Write-Host "  $Destination\HotPursuit2Launcher.exe" -ForegroundColor Green
+if (-not $NoLaunch) {
+  Write-Host 'Starting the launcher...'
+  Start-Process -FilePath (Join-Path $Destination 'HotPursuit2Launcher.exe') -WorkingDirectory $Destination
+}
