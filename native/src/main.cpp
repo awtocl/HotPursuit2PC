@@ -822,6 +822,8 @@ void DeliverInterrupts() {
       g_turbo = 1.0;
       g_turboMax = false;
       Log("Turbo: real time from game second %.0f", static_cast<double>(g_vblanks) * 1001.0 / 60000.0);
+      // sound from here on (tests: HP2_AUDIO_SILENT plays it at volume 0, HP2_AUDIO_DUMP records it)
+      if (!std::getenv("HP2_MUTE") && !audio::Available()) Log("Audio: %s", audio::Init() ? "XAudio2 ready" : audio::LastError());
     }
     std::uint64_t scriptTime = 0;
     {  // HP2_BENCH_AT=<script s>: from then on refreshes come 4x faster than real time, so the perf lines' refreshes/s is
@@ -1175,98 +1177,190 @@ int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
 }
 
 // EA's streamer (IOP server 00012345, function 0): a batch of 16-bit commands [count][id, nargs, args...]... in,
-// a status block out. Modelled from the reference core's traffic (docs/recomp-analysis.md section 18): word 1 counts the
-// batches, word 2 is -1, word 4 holds the result of the last command 0x0E ((a0 << 16) | a1) and, once command 0x34 has
-// been seen, words 66-70 describe two buffers.
-// Streams: word 0 = N playing streams, then 6 words each (parsed by the game at 0026B8C0): e1 = volume << 16 | voice << 10 |
-// stream << 4 | buffer half << 2 | error, e2 = SPU play address, e3 bit 31 = playing, e4 = link byte, e5 = SPU buffer base,
-// e6 = buffer wraps << 16; the words above follow at 6N + 1. A stream missing from a reply counts as finished, so the music
-// player skipped to the next track every frame. Modelled (reference rpc.bin): commands 01/2C start stream 0 on voices
-// 2E/2F (PS-ADPCM, pitch 0x0AC7 = 32332 Hz, 0x10000-byte ring per voice at 0x5010/0x15010), command 05 stops it.
-// Command 1E: [stream, LSN hi, lo, file size hi, lo, 1, offset hi, lo]; 29: [stream, offset hi, lo, length hi, lo];
-// 01: [stream, voice, volume (0x3FFF = full), interleave / 0x4000, pitch (0x1000 = 48 kHz), ...]. The music is PS-ADPCM
-// stereo (interleave 0x8000, measured) that audio.cpp plays from the disc; when it ends the stream leaves the reply and
-// the game moves to the next track. Without an audio device the position advances in game time and the track ends after
-// its length.
-struct StreamerMusic {
+// a status block out. Modelled from the reference core's traffic (docs/recomp-analysis.md section 18) and the game's own
+// commands (HP2_STREAMER_LOG=1 logs every one): word 1 counts the batches, word 2 is -1, word 4 holds the result of the last
+// command 0x0E ((a0 << 16) | a1) and, once command 0x34 has been seen, words 66-70 describe two buffers.
+// Reply: word 0 = N entries, then 6 words each (parsed by the game at 0026B8C0): e1 = volume << 16 | voice << 10 |
+// slot << 4 | buffer half << 2 | error, e2 = SPU play address, e3 bit 31 = playing, e4 = link byte, e5 = SPU buffer base,
+// e6 = buffer wraps << 16; the words above follow at 6N + 1. The slot indexes the game's table of 48 voice states
+// (0x322C20): a slot missing from a reply is free again. Slots 0-1 are the music's channels, 2 the speech channel, and a
+// sound effect's slot is its SPU voice: effects missing from the reply were keyed off and restarted every 4 refreshes,
+// the radio phrases restarted every 4 refreshes and the music player skipped to the next track every frame.
+// Commands (stream = the word after nargs):
+//   1E [stream, LSN hi, lo, file size hi, lo, 1, offset hi, lo]  opens a disc file on a stream
+//   34 [stream, SPU address hi, lo, bytes hi, lo]                 copies the stream file's next bytes into sound memory
+//                                                                 (the sound banks: 14 + 44 samples in the menus, ~90 in races)
+//   1C [sample, SPU address hi, lo]                               a sample's start in sound memory
+//   00 [sample, voice, left, right, pitch, ...]                   sets a voice up (volumes 0..0x3FFF, pitch 0x1000 = 48 kHz)
+//   18, 19 [voice]                                                key on (18: effects the game keeps up, 19: one-shots)
+//   04 [voice] key off; 03 [voice, pitch]; CB [voice, left, right, 6] volumes
+//   29 [stream, offset hi, lo, length hi, lo]                     the part of the file to play
+//   01 [stream, voice, volume, ?, pitch, ...]                     plays it: stream 0 = music (PS-ADPCM stereo, left and right
+//                                                                 alternate in 0x8000-byte blocks), streams 2-5 = speech
+//                                                                 (mono VAG clips, 24 kHz) on channel 2
+//   2C [0x100 | stream, voice, ...]                               the music's second voice
+//   1B [channel, count, (stream, length hi, lo, offset hi, lo) x count]  clips that follow on the channel (radio phrases)
+//   05 [stream]                                                   stops a channel
+// audio.cpp plays all of it. Without an audio device music and speech advance in game time and effects are not reported.
+struct StreamerChannel {
   bool active = false, audioStarted = false;
   std::uint64_t start = 0, durationVblanks = 0;
-  std::uint16_t voice[2] = {0x2E, 0x2F};
-  std::uint32_t lsn = 0, offset = 0, length = 0, rate = 32332;
-} g_music;
+  std::uint16_t voice[2] = {0x2E, 0x2F}, volume = 0x3FFF;
+  std::uint32_t rate = 32332, bytes = 0;
+} g_music, g_speech;
+struct StreamerFile { std::uint32_t lsn = 0, size = 0, pos = 0, offset = 0, length = 0; } g_streamFile[8];
+std::uint32_t g_sampleAddress[512];
+std::uint64_t VblanksFor(std::uint32_t bytes, std::uint32_t rate) {  // PS-ADPCM bytes of one channel at `rate` Hz
+  return static_cast<std::uint64_t>(bytes) / 16 * 28 * 60000 / 1001 / std::max<std::uint32_t>(rate, 1);
+}
 void StreamerService(std::uint32_t send, std::uint32_t recv) {
   static std::uint32_t batch = 0, result = 0, buf = 0;
   static bool have34 = false;
+  const auto voiceStream = [](std::uint32_t v) {  // voices of the music and speech channels while they play
+    return (g_music.active && (v == g_music.voice[0] || v == g_music.voice[1])) || (g_speech.active && v == g_speech.voice[0]);
+  };
   const std::uint16_t* c = reinterpret_cast<const std::uint16_t*>(g_ram + Phys(send));
   std::uint32_t i = 1;
-  for (std::uint32_t n = c[0]; n > 0 && i + 1 < 2048; --n) {
+  for (std::uint32_t n = c[0]; n > 0 && i + 1 < 4096; --n) {
     const std::uint16_t id = c[i], na = c[i + 1];
-    if (id == 0x0E && na >= 2) result = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
-    if (id == 0x34 && na >= 2 && !have34) {
-      have34 = true;
-      buf = (static_cast<std::uint32_t>(c[i + 2]) << 16) | c[i + 3];
-    }
+    if (i + 2u + na > 4096) break;
+    const std::uint16_t s = na > 0 ? c[i + 2] : 0;
     const auto word = [&](std::uint32_t k) { return (static_cast<std::uint32_t>(c[i + k]) << 16) | c[i + k + 1]; };
-    if (id == 0x1E && na >= 8 && c[i + 2] == 0) {  // stream 0: the file and where the track starts in it
-      g_music.lsn = word(3);
-      g_music.offset = word(8);
-      g_music.length = word(5) > g_music.offset ? word(5) - g_music.offset : 0;
+    switch (id) {
+      case 0x0E:
+        if (na >= 2) result = word(2);
+        break;
+      case 0x34:
+        if (na >= 5 && s < 8) {
+          if (!have34) {
+            have34 = true;
+            buf = word(2);
+          }
+          StreamerFile& f = g_streamFile[s];
+          const std::uint32_t bytes = std::min<std::uint32_t>(word(5), 0x200000), at = word(3);
+          if (f.lsn && bytes) {
+            std::vector<std::uint8_t> data(bytes);
+            if (DiscRead(f.lsn * 2048ull + f.pos, data.data(), bytes)) audio::SpuWrite(at, data.data(), bytes);
+          }
+          f.pos += bytes;
+        }
+        break;
+      case 0x1E:
+        if (na >= 8 && s < 8) g_streamFile[s] = {word(3), word(5), word(8), word(8), word(5) > word(8) ? word(5) - word(8) : 0};
+        break;
+      case 0x29:
+        if (na >= 5 && s < 8) {
+          g_streamFile[s].offset = word(3);
+          g_streamFile[s].length = word(5);
+        }
+        break;
+      case 0x1C:
+        if (na >= 3 && s < 512) g_sampleAddress[s] = word(3);
+        break;
+      case 0x00:
+        if (na >= 6 && s < 512 && c[i + 3] < 48) audio::VoiceSetup(c[i + 3], g_sampleAddress[s], c[i + 6], c[i + 4], c[i + 5]);
+        break;
+      case 0x18: case 0x19:
+        if (na >= 1 && s < 48 && !voiceStream(s)) audio::VoiceKeyOn(s);
+        break;
+      case 0x04:
+        if (na >= 1 && s < 48 && !voiceStream(s)) audio::VoiceKeyOff(s);
+        break;
+      case 0x03:
+        if (na >= 2 && s < 48 && !voiceStream(s)) audio::VoicePitch(s, c[i + 3]);
+        break;
+      case 0xCB:
+        if (na >= 3 && s < 48 && !voiceStream(s)) audio::VoiceVolume(s, c[i + 3], c[i + 4]);
+        break;
+      case 0x01:
+        if (na >= 5 && s < 8) {
+          const StreamerFile& f = g_streamFile[s];
+          StreamerChannel& ch = s == 0 ? g_music : g_speech;
+          ch.active = true;
+          ch.start = g_vblanks;
+          ch.voice[0] = c[i + 3] & 0x3F;
+          ch.volume = c[i + 4];
+                    if (s == 0 && ch.voice[0] == 0x2E) g_menuMusic = true;
+          ch.rate = std::max<std::uint32_t>(static_cast<std::uint32_t>(c[i + 6]) * 48000u / 4096u, 4000);
+          ch.bytes = f.length;
+          ch.durationVblanks = f.length ? VblanksFor(s == 0 ? f.length / 2 : f.length, ch.rate) : ~0ull;
+          ch.audioStarted = audio::Available() && f.lsn && f.length;
+          if (ch.audioStarted)
+            audio::StreamStart(s == 0 ? 0 : 2, &DiscRead, f.lsn * 2048ull + f.offset, f.length, s == 0 ? 2 : 1, 0x8000u, c[i + 6],
+                               c[i + 4], s == 0 ? c[i + 4] : c[i + 5]);
+        }
+        break;
+      case 0x2C:
+        if (na >= 2 && (s & 0xFF) == 0) g_music.voice[1] = c[i + 3] & 0x3F;
+        break;
+      case 0x1B:
+        if (na >= 2 && s == 2 && g_speech.active)
+          for (std::uint32_t k = 0, m = c[i + 3]; k < m && 4 + k * 5 + 4 < na + 2u; ++k) {
+            const std::uint32_t at = 4 + k * 5, st = c[i + at] & 7, len = word(at + 1), off = word(at + 3);
+            if (g_speech.audioStarted && g_streamFile[st].lsn) audio::StreamQueue(2, g_streamFile[st].lsn * 2048ull + off, len);
+            g_speech.durationVblanks += VblanksFor(len, g_speech.rate);
+          }
+        break;
+      case 0x05:
+        if (na >= 1 && (s == 0 || s == 2)) {
+          StreamerChannel& ch = s == 0 ? g_music : g_speech;
+          ch.active = false;
+          audio::StreamStop(s);
+        }
+        break;
+      default:
+        break;
     }
-    if (id == 0x29 && na >= 5 && c[i + 2] == 0) {  // stream 0: track offset and length
-      g_music.offset = word(3);
-      g_music.length = word(5);
-    }
-    if (id == 0x01 && na >= 5 && c[i + 2] == 0) {  // stream 0 (music) starts on its first voice
-      g_music.active = true;
-      g_music.start = g_vblanks;
-      g_music.voice[0] = c[i + 3];
-      if (c[i + 3] == 0x2E) g_menuMusic = true;
-      const std::uint32_t interleave = std::max<std::uint32_t>(c[i + 5], 1) * 0x4000u;
-      g_music.rate = std::max<std::uint32_t>(static_cast<std::uint32_t>(c[i + 6]) * 48000u / 4096u, 4000);
-      g_music.durationVblanks = g_music.length ? static_cast<std::uint64_t>(g_music.length) / 2 / 16 * 28 * 60000 / 1001 / g_music.rate : ~0ull;
-      g_music.audioStarted = audio::Available() && g_music.lsn && g_music.length;
-      if (g_music.audioStarted)
-        audio::MusicStart(&DiscRead, g_music.lsn * 2048ull + g_music.offset, g_music.length, interleave, g_music.rate,
-                          static_cast<float>(c[i + 4]) / 16383.0f);
-    }
-    if (id == 0x2C && na >= 2 && (c[i + 2] & 0xFF) == 0) g_music.voice[1] = c[i + 3];  // second voice of stream 0
-    if (id == 0x05 && na >= 1 && c[i + 2] == 0) {
-      g_music.active = false;
-      audio::MusicStop();
-    }
-    if (id != 0x0E && id != 0x34 && id != 0x09 && id != 0x1C) {
+    static const bool allCommands = std::getenv("HP2_STREAMER_LOG") != nullptr;  // development: every command, not only stream set-up
+    if (allCommands ? (id != 0x0E && id != 0x09) : (id == 0x01 || id == 0x05 || id == 0x1E || id == 0x29 || id == 0x2C || id == 0x1B)) {
       static int logged = 0;
-      if (logged++ < 400) Log("streamer: vblank %llu cmd %02X stream %u args %04X %04X %04X %04X", static_cast<unsigned long long>(g_vblanks), id,
-                              na > 0 ? c[i + 2] : 0xFFFFu, na > 1 ? c[i + 3] : 0, na > 2 ? c[i + 4] : 0, na > 6 ? c[i + 8] : 0,
-                              na > 7 ? c[i + 9] : 0);
+      if (logged++ < (allCommands ? 200000 : 400)) {
+        char args[128] = {};
+        for (std::uint32_t k = 1, p = 0; k < na && k < 16 && p + 6 < sizeof args; ++k) p += static_cast<std::uint32_t>(snprintf(args + p, sizeof args - p, " %04X", c[i + 2 + k]));
+        Log("streamer: vblank %llu cmd %02X stream %u args%s", static_cast<unsigned long long>(g_vblanks), id, s, args);
+      }
     }
     i += 2u + na;
   }
   std::uint32_t* w = reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv));
-  std::uint32_t t = 1;  // first word after the stream entries
-  if (g_music.active && (g_music.audioStarted ? audio::MusicFinished() : g_vblanks - g_music.start >= g_music.durationVblanks)) {
-    g_music.active = false;  // the track ended: the stream leaves the reply
-    static int logged = 0;
-    if (logged++ < 40) Log("streamer: vblank %llu stream 0 ended", static_cast<unsigned long long>(g_vblanks));
-  }
-  if (g_music.active) {
-    const std::uint64_t bytes = g_music.audioStarted ? audio::MusicFramesPlayed() * 16 / 28  // per voice, PS-ADPCM bytes
-                                                   : (g_vblanks - g_music.start) * g_music.rate * 16 / 28 * 1001 / 60000;
-    const std::uint32_t pos = static_cast<std::uint32_t>(bytes & 0xFFFF), wraps = static_cast<std::uint32_t>(bytes >> 16);
-    w[0] = 2;
-    for (std::uint32_t ch = 0; ch < 2; ++ch) {
-      std::uint32_t* e = w + 1 + ch * 6;
-      e[0] = 0x7FFF0000u | (static_cast<std::uint32_t>(g_music.voice[ch] & 0x3F) << 10) | (ch << 4) | (pos >= 0x8000 ? 4u : 0u);
-      e[1] = 0x5010u + ch * 0x10000u + pos;
-      e[2] = ch == 0 ? 0x80000000u : 0;
-      e[3] = 0;
-      e[4] = 0x5010u + ch * 0x10000u;
-      e[5] = ch == 0 ? wraps << 16 : 0;
+  std::uint32_t entries = 0;
+  const auto entry = [&](std::uint32_t slot, std::uint32_t voice, std::uint32_t pos, std::uint32_t wraps, std::uint32_t base,
+                         std::uint32_t at, bool first) {
+    std::uint32_t* e = w + 1 + entries * 6;
+    e[0] = 0x7FFF0000u | ((voice & 0x3F) << 10) | ((slot & 0x3F) << 4) | (pos >= 0x8000 ? 4u : 0u);
+    e[1] = at;
+    e[2] = first ? 0x80000000u : 0;
+    e[3] = 0;
+    e[4] = base;
+    e[5] = first ? wraps << 16 : 0;
+    ++entries;
+  };
+  for (int k = 0; k < 2; ++k) {  // music (slots 0 and 1) and speech (slot 2)
+    StreamerChannel& ch = k == 0 ? g_music : g_speech;
+    if (ch.active && (ch.audioStarted ? !audio::StreamPlaying(k == 0 ? 0 : 2) : g_vblanks - ch.start >= ch.durationVblanks)) {
+      ch.active = false;  // it ended: the slot leaves the reply
+      static int logged = 0;
+      if (logged++ < 40) Log("streamer: vblank %llu %s ended", static_cast<unsigned long long>(g_vblanks), k == 0 ? "music" : "speech");
     }
-    t = 13;
-  } else {
-    w[0] = 0;
+    if (!ch.active) continue;
+    const std::uint64_t bytes = ch.audioStarted ? audio::StreamFramesPlayed(k == 0 ? 0 : 2) * 16 / 28  // per voice, PS-ADPCM bytes
+                                                : (g_vblanks - ch.start) * ch.rate * 16 / 28 * 1001 / 60000;
+    const std::uint32_t pos = static_cast<std::uint32_t>(bytes & 0xFFFF), wraps = static_cast<std::uint32_t>(bytes >> 16);
+    if (k == 0) {
+      for (std::uint32_t c2 = 0; c2 < 2; ++c2) {
+        const std::uint32_t base = 0x5010u + c2 * 0x10000u;
+        entry(c2, ch.voice[c2], pos, wraps, base, base + pos, c2 == 0);
+      }
+    } else {
+      entry(2, ch.voice[0], pos, wraps, 0x25010u, 0x25010u + pos, true);
+    }
   }
+  for (std::uint32_t v = 0; v < 48 && entries < 60; ++v) {  // sound effects: slot = voice
+    std::uint32_t at = 0, start = 0;
+    if (!voiceStream(v) && audio::VoicePlaying(static_cast<int>(v), &at, &start)) entry(v, v, 0, 0, start, at, true);
+  }
+  w[0] = entries;
+  const std::uint32_t t = 1 + entries * 6;  // first word after the entries
   w[t] = ++batch;
   w[t + 1] = 0xFFFFFFFFu;
   w[t + 3] = result;
@@ -1891,7 +1985,7 @@ int wmain(int argc, wchar_t** argv) {
           g_turboUntil = std::string(u) == "menu" ? ~0ull : static_cast<std::uint64_t>(atof(u) * 60000.0 / 1001.0);
         Log("Turbo: refreshes x%.0f%s (no audio)", g_turbo, g_turboMax ? " and as soon as the game waits" : "");
       }
-      if (!std::getenv("HP2_MUTE") && g_turbo == 1.0) Log("Audio: %s", audio::Init() ? "XAudio2 ready (music stream)" : audio::LastError());
+      if (!std::getenv("HP2_MUTE") && g_turbo == 1.0) Log("Audio: %s", audio::Init() ? "XAudio2 ready" : audio::LastError());
     }
 
     // ---- the translated code ----

@@ -57,6 +57,7 @@ New-Item -ItemType Directory -Force -Path $run | Out-Null
 $vars = @{ HP2_PRESS = $Press; HP2_DUMP_AT = $DumpAt; HP2_SHOT_AT = $ShotAt; HP2_FAST_BOOT = $(if ($FastBoot) { '1' } else { '' }) }
 if ($FastBoot -and -not $TurboUntil) { $TurboUntil = 'menu' }
 if ($Turbo -ne '1') { $vars.HP2_TURBO = $Turbo; if ($TurboUntil -and $TurboUntil -ne 'none') { $vars.HP2_TURBO_UNTIL = $TurboUntil } }
+if (-not $env:HP2_AUDIO_SILENT) { $vars.HP2_AUDIO_SILENT = '1' }  # sound runs once turbo ends, at volume 0
 foreach ($k in $Env.Keys) { $vars[$k] = [string]$Env[$k] }
 $saved = @{}
 foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $(if ($vars[$k]) { $vars[$k] } else { $null })) }

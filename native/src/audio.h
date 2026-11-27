@@ -1,6 +1,7 @@
 // Audio output of the native runtime: XAudio2 (xaudio2_9.dll / xaudio2_8.dll, Windows system DLLs, loaded at run time).
-// Music: the EA streamer's stream 0 is PS-ADPCM stereo read straight from the disc (left and right interleaved in blocks
-// of `interleave` bytes), decoded on an audio thread and played at the stream's pitch.
+// A mixer modelled on the PS2's SPU2 at 48 kHz: 2 MiB of sound memory, 48 voices playing PS-ADPCM from it (pitch 0x1000 =
+// 48 kHz, loops from the blocks' flags), and disc streams (the EA streamer's music and speech) decoded from the disc.
+// All functions are thread-safe; without an audio device (Init failed or not called) voices and streams do not play.
 #pragma once
 #include <cstdint>
 
@@ -13,10 +14,23 @@ void Shutdown();
 bool Available();
 const char* LastError();  // why Init failed
 
-// Starts a stereo PS-ADPCM stream at disc byte `start`, `bytes` long; replaces the current one.
-void MusicStart(Reader read, std::uint64_t start, std::uint32_t bytes, std::uint32_t interleave, std::uint32_t rate, float volume);
-void MusicStop();
-bool MusicFinished();             // the data ended (end flag or length) and everything queued has been played
-std::uint64_t MusicFramesPlayed();  // sample frames played since MusicStart
+// sound memory (filled whether or not a device is open)
+void SpuWrite(std::uint32_t address, const void* data, std::uint32_t bytes);
+
+// voices 0-47; volumes 0..0x3FFF (full), pitch 0x1000 = 48 kHz
+void VoiceSetup(int voice, std::uint32_t address, std::uint16_t pitch, std::uint16_t left, std::uint16_t right);
+void VoiceKeyOn(int voice);
+void VoiceKeyOff(int voice);  // short release, then the voice is free
+void VoicePitch(int voice, std::uint16_t pitch);
+void VoiceVolume(int voice, std::uint16_t left, std::uint16_t right);
+bool VoicePlaying(int voice, std::uint32_t* address = nullptr, std::uint32_t* start = nullptr);
+
+// disc streams 0-7: PS-ADPCM, stereo streams alternate left and right in blocks of `interleave` bytes
+void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t bytes, int channels, std::uint32_t interleave,
+                 std::uint16_t pitch, std::uint16_t left, std::uint16_t right);
+void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes);  // plays after what is playing or queued
+void StreamStop(int stream);
+bool StreamPlaying(int stream);
+std::uint64_t StreamFramesPlayed(int stream);  // sample frames played since StreamStart
 
 }  // namespace audio
