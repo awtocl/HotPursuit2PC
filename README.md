@@ -25,6 +25,11 @@
   <a href="#a-word-on-ai">A word on AI</a>
 </p>
 
+<p align="center">
+  🌐 <b>English</b> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (Brasil)</a> ·
+  <a href="README.fr.md">Français</a> · <a href="README.de.md">Deutsch</a> · <a href="README.it.md">Italiano</a>
+</p>
+
 > [!IMPORTANT]
 > **No game files are included, and none are downloaded.** You'll need **your own disc** of *Need for Speed: Hot
 > Pursuit 2* for PlayStation 2 (North America, `SLUS-20362`).
@@ -52,6 +57,8 @@ between.
 | **16:9 and 60 fps** | Widescreen out of the box (you see more of the road, the HUD and menus keep their shape) and 60 frames per second, thanks to the community's patches for this game (see [Credits](#license-and-credits)). Both can be switched off. |
 | **All the sound** | EA Trax music, engines and effects, the police radio and the movies' sound. |
 | **A launcher** | It finds your disc, copies and checks it, gets the game ready and remembers everything after that. Plus settings with a recommendation for your screen, memory card backups and a screenshot gallery (F12). Works with mouse, keyboard or controller. |
+| **Your controls, your way** | A Classic (PS2) and a Modern (triggers) controller layout, and every key and button can be remapped. Restore the defaults with one click. |
+| **Six languages** | The launcher and the in-game menu speak English, Spanish, Portuguese, French, German and Italian (picked from Windows the first time). |
 | **In-game settings** | Press **F1** (or Select+Start) for a settings menu in the game's own style, including *Quit game*. |
 | **Your files stay yours** | Your disc is only ever read. Everything made from it stays on your PC. |
 
@@ -83,19 +90,31 @@ shipped.
 
 ## Controls
 
-An Xbox-style controller works just like a DualShock 2. On the keyboard:
+Pick a layout, or make your own:
 
-| Key | PS2 button | Key | PS2 button |
+| Action | Keyboard | Controller: Classic (PS2) | Controller: Modern |
 |---|---|---|---|
-| Arrows | D-pad / steering | Enter, Space | Start |
-| Z | ✕ | Backspace, Right Shift | Select |
-| X | ○ | Q / W | L1 / R1 |
-| A | □ | 1 / 2 | L2 / R2 |
-| S | △ | F1 | settings menu |
-| | | F12 | screenshot |
+| Accelerate | Z | A | RT (or A) |
+| Brake / Reverse | A | X | LT |
+| Steer | ← → | Left stick / D-pad | Left stick / D-pad |
+| Handbrake | W | RB | B |
+| Horn / Siren | X | B | Left stick click |
+| Change view | S | Y | Y |
+| Look back | Q | LB | Right stick click |
+| Speed boost | E | Right stick click | X |
+| Shift up / Zone Zoom | 2 | RT | RB |
+| Shift down / Zone Freeze | 1 | LT | LB |
+| Pause | Enter, Space | Start | Start |
+| Cycle HUD | Backspace, Right Shift | Back | Back |
 
-Alt+Enter or F11 toggles full screen; Alt+F4 or *Quit game* in the settings menu quits. Settings live in
-`hp2native.ini` next to the game, and you can change them in the launcher too.
+*Classic* is the PS2 controller button for button; *Modern* puts throttle and brake on the triggers like today's
+racing games. To change anything, open the launcher's **Controls** page, pick a box and press the key or button you
+want (two of each per action). **Restore Default Keyboard** and **Restore Default Controller** bring the presets back
+any time, and your custom layout stays saved for later. The controller layout can also be switched in the game with
+**F1**.
+
+Also handy: **F1** settings menu, **F12** screenshot, **Alt+Enter** or **F11** full screen, **Alt+F4** or *Quit game*
+in the settings menu to quit.
 
 ## Known problems
 
@@ -105,7 +124,10 @@ It's a development build, and it has only been tested on one PC so far. Here's w
   haven't been checked from start to finish yet.
 - **Sound:** no reverb and no proper volume envelopes yet, so some sounds stop a bit abruptly.
 - **Graphics:** no depth fog, mipmaps, dithering or lines yet; the distance fog in races is skipped for now.
-- **Input:** digital buttons only (no pressure-sensitive buttons), no rumble, no steering wheel.
+- **Input:** no rumble and no steering wheel yet. The game reads throttle and brake as on/off buttons, so the triggers
+  work like buttons too.
+- **Language:** the game's own text stays in English (that's how this North American disc ships); the launcher and the
+  settings menu follow your language.
 - Switching between 16:9 and 4:3 only kicks in after a restart (the game lays out its HUD once).
 - Not tried yet on AMD or Intel graphics, on a fresh Windows install, or in really long sessions.
 

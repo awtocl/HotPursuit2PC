@@ -54,6 +54,12 @@ C++20, MSVC `/W4 /permissive-`, warnings are errors in CI. All file parsing
 goes through bounds-checked readers; never trust an offset or size read from
 a file. Errors carry the file and stage that failed and why (brief §3.3).
 
+Text shown to players (the launcher and the in-game menu) is written in English and drawn through `hp2_style`, which
+looks it up in `native/src/i18n.cpp`: add a row with the Spanish, Portuguese (Brazil), French, German and Italian
+versions for every new string (a missing row simply shows English). Text built from pieces uses `i18n::F` with `{0}`
+placeholders. Player docs exist in the same languages (`README.<lang>.md`, `docs/GETTING-STARTED.<lang>.md`); the
+English files are the reference.
+
 ## Development switches
 
 The native game reads a few environment variables that help while debugging (none of them is needed to play):

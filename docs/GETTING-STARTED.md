@@ -1,5 +1,7 @@
 # Getting started — play *Hot Pursuit 2* natively on your PC
 
+🌐 **English** · [Español](GETTING-STARTED.es.md) · [Português (Brasil)](GETTING-STARTED.pt-BR.md) · [Français](GETTING-STARTED.fr.md) · [Deutsch](GETTING-STARTED.de.md) · [Italiano](GETTING-STARTED.it.md)
+
 Welcome! This guide takes you from your PS2 disc to racing on your PC, one step at a time. You'll type a handful of
 commands and the rest is done for you. Plan on about **an hour the first time** — mostly waiting while your PC builds
 things, so feel free to grab a snack. After that, starting the game is just a double-click.
@@ -128,6 +130,7 @@ B back, LB/RB pages, Start plays). Its pages:
 |---|---|
 | **Play** | Start the game; whether the disc and the game are in order; your play time |
 | **Settings** | The picture and display settings, each explained, with the recommendation for your screen |
+| **Controls** | Classic or Modern controller layout, remap any key or button, restore the defaults |
 | **Memory card** | What the game has saved; back it up and restore a backup |
 | **Screenshots** | The pictures you took with **F12** in the game |
 | **Disc & setup** | Check all disc files, prepare the game again, use another disc copy, make a desktop shortcut |
@@ -166,22 +169,41 @@ Settings are saved automatically in `game-native\hp2native.ini`.
 
 ### Controls
 
-**An Xbox controller** works exactly like a PS2 DualShock 2 (A = ✕, B = ○, X = □, Y = △, Start, Back = Select, the
-bumpers and triggers = L1/R1/L2/R2). PlayStation controllers are not seen by Windows as game controllers on their own;
-they work through a tool that presents them as an Xbox controller, such as Steam's controller support.
+Pick a layout on the launcher's **Controls** page (or in the game with **F1** → *Controller layout*):
 
-**On the keyboard:**
-
-| Key | PS2 button | Key | PS2 button |
+| Action | Keyboard | Controller: Classic (PS2) | Controller: Modern |
 |---|---|---|---|
-| Arrows | D-pad / steering | Enter, Space | Start |
-| Z | ✕ (accelerate) | Backspace, Right Shift | Select |
-| X | ○ | Q / W | L1 / R1 |
-| A | □ | 1 / 2 | L2 / R2 |
-| S | △ | F1 | Settings |
-| | | F12 | Screenshot |
+| Accelerate | Z | A | RT (or A) |
+| Brake / Reverse | A | X | LT |
+| Steer | ← → | Left stick / D-pad | Left stick / D-pad |
+| Handbrake | W | RB | B |
+| Horn / Siren | X | B | Left stick click |
+| Change view | S | Y | Y |
+| Look back | Q | LB | Right stick click |
+| Speed boost | E | Right stick click | X |
+| Shift up / Zone Zoom | 2 | RT | RB |
+| Shift down / Zone Freeze | 1 | LT | LB |
+| Pause | Enter, Space | Start | Start |
+| Cycle HUD | Backspace, Right Shift | Back | Back |
+| Settings menu | F1 | Select + Start | Select + Start |
+| Screenshot | F12 | – | – |
 
-The analog sticks work as the DualShock 2's sticks. Steering with the left stick or the arrows, ✕ accelerates.
+- **Classic** is the PS2 controller, button for button. **Modern** puts throttle and brake on the triggers, like
+  today's racing games.
+- **Make your own:** on the **Controls** page, select a box and press the key or button you want. Every action takes
+  two keys and two controller buttons. Esc cancels, Delete clears a key. Your first change starts a *Custom* layout
+  from the one you were using.
+- **Changed your mind?** **Restore Default Keyboard** and **Restore Default Controller** go straight back to the
+  presets. Your custom layout stays saved; pick *Custom* to use it again.
+- The analog sticks work as the DualShock 2's sticks. PlayStation controllers are not seen by Windows as game
+  controllers on their own; they work through a tool that presents them as an Xbox controller, such as Steam's
+  controller support.
+
+### Language
+
+The launcher and the in-game settings menu come in English, Spanish, Portuguese (Brazil), French, German and Italian.
+The first time, they follow your Windows display language; change it in the launcher under **Settings → Language** or
+in the game with **F1**. The game's own text stays in English: that's how the North American disc ships.
 
 ### Quitting
 
@@ -218,6 +240,7 @@ again for the new version (about a minute) and starts.
 | The game window is black, or the picture is wrong | Launcher → **Settings** → Renderer → **Software**. If that helps, please report it with your graphics card model. |
 | No sound | The game uses Windows' default playback device: check it in the Windows sound settings, then restart the game. |
 | The controller does nothing | Only Xbox-compatible (XInput) controllers are seen; see [Controls](#controls). The keyboard always works. |
+| A button does the wrong thing | Launcher → **Controls** → **Restore Default Controller** (or **Restore Default Keyboard**). |
 | It stutters | Lower the **Picture quality** (launcher → Settings) and make sure V-Sync is On. |
 | Everything looks wrong after changing settings | Launcher → **Settings** → **Reset to defaults**. |
 
@@ -230,8 +253,7 @@ contains no personal data apart from folder paths, which you can remove.
 Nothing is installed into Windows by this project itself. To remove it, delete the `Documents\HotPursuit2PC` folder
 (the build tools live inside it, in `.cache`, and the copy of your disc in `game-native\disc`). Back up
 `game-native\saves` first if you want to keep your saves. A desktop shortcut made by the launcher can be deleted like
-any other. The tools from
-step 1 can be removed in *Settings → Apps* like any other program.
+any other. The tools from step 1 can be removed in *Settings → Apps* like any other program.
 
 ---
 
