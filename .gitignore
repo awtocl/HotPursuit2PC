@@ -38,3 +38,8 @@ __pycache__/
 *.user
 Thumbs.db
 desktop.ini
+
+# Local working notes of the development sessions (not part of the project)
+/CLAUDE.md
+/ACTIVE_CONTEXT.md
+/HANDOFF.md
