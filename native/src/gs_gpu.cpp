@@ -238,9 +238,20 @@ cbuffer P : register(b0) { uint4 rect; uint4 scale; };  // x, y, w, h (GS pixels
 }
 )";
 ID3D11ComputeShader* g_readCs = nullptr;
-ID3D11Buffer *g_readCb = nullptr, *g_readBuf = nullptr, *g_readStaging = nullptr;
+ID3D11Buffer *g_readCb = nullptr, *g_readBuf = nullptr;
 ID3D11UnorderedAccessView* g_readUav = nullptr;
-UINT g_readSize = 0;  // elements in g_readBuf
+UINT g_readSize = 0;  // elements in g_readBuf and each slot's staging buffer
+// Depth read-backs without waiting for the GPU: each request is copied into the next staging buffer of a ring, and the
+// answer is the newest earlier copy of the same rectangle the GPU has finished (one to a few frames old: the game only dims
+// the sun's glare by it). Waiting for this frame's copy stalled the GS thread for the GPU's whole frame, every frame.
+struct ReadSlot {
+  ID3D11Buffer* staging = nullptr;
+  bool queued = false;
+  std::uint64_t serial = 0, key = 0;
+};
+ReadSlot g_readSlots[4];
+std::uint64_t g_readSerial = 0, g_lastKey = 0;
+std::vector<std::uint32_t> g_lastDepth;  // the newest answer that came back, for g_lastKey
 ID3D11Device* g_dev = nullptr;
 ID3D11DeviceContext* g_ctx = nullptr;
 ID3D11VertexShader* g_vs = nullptr;
@@ -922,7 +933,10 @@ bool ReadDepth(std::uint32_t bp, int x, int y, int w, int h, std::vector<std::ui
   if (count > g_readSize) {  // buffers for the largest rectangle so far
     Release(g_readUav);
     Release(g_readBuf);
-    Release(g_readStaging);
+    for (ReadSlot& s : g_readSlots) {
+      Release(s.staging);
+      s.queued = false;
+    }
     g_readSize = 0;
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = count * 4;
@@ -936,7 +950,8 @@ bool ReadDepth(std::uint32_t bp, int x, int y, int w, int h, std::vector<std::ui
     bd.BindFlags = 0;
     bd.Usage = D3D11_USAGE_STAGING;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_readStaging))) return false;
+    for (ReadSlot& s : g_readSlots)
+      if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &s.staging))) return false;
     g_readSize = count;
   }
   D3D11_MAPPED_SUBRESOURCE m = {};
@@ -955,10 +970,36 @@ bool ReadDepth(std::uint32_t bp, int x, int y, int w, int h, std::vector<std::ui
   g_ctx->CSSetShaderResources(0, 1, &noSrv);
   g_ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
   D3D11_BOX box = {0, 0, 0, count * 4, 1, 1};
-  g_ctx->CopySubresourceRegion(g_readStaging, 0, 0, 0, 0, g_readBuf, 0, &box);
-  if (FAILED(g_ctx->Map(g_readStaging, 0, D3D11_MAP_READ, 0, &m))) return false;
-  z.assign(static_cast<const std::uint32_t*>(m.pData), static_cast<const std::uint32_t*>(m.pData) + count);
-  g_ctx->Unmap(g_readStaging, 0);
+  // (the rectangle follows the sun across the screen: an earlier answer of the same buffer and size is the one to give)
+  const std::uint64_t key = (static_cast<std::uint64_t>(bp) << 32) | (static_cast<std::uint64_t>(w) << 16) | static_cast<std::uint64_t>(h);
+  ReadSlot* oldest = &g_readSlots[0];
+  for (ReadSlot& s : g_readSlots)
+    if (!s.queued || (oldest->queued && s.serial < oldest->serial)) oldest = &s;
+  ReadSlot& slot = *oldest;  // (a free slot, or the oldest copy nobody took)
+  g_ctx->CopySubresourceRegion(slot.staging, 0, 0, 0, 0, g_readBuf, 0, &box);
+  slot.queued = true;
+  slot.serial = ++g_readSerial;
+  slot.key = key;
+  static const bool wait = std::getenv("HP2_DEPTH_READ_WAIT") != nullptr;  // development: this frame's depth (stalls)
+  ReadSlot* order[4] = {};  // queued copies of this rectangle, newest first
+  int n = 0;
+  for (ReadSlot& s : g_readSlots)
+    if (s.queued && s.key == key) order[n++] = &s;
+  std::sort(order, order + n, [](const ReadSlot* a, const ReadSlot* b) { return a->serial > b->serial; });
+  ReadSlot* done = nullptr;  // the newest copy the GPU has finished (DO_NOT_WAIT fails for the others)
+  for (int i = 0; i < n && !done && !wait; ++i)
+    if (g_ctx->Map(order[i]->staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) == S_OK) done = order[i];
+  if (!done && (wait || g_lastKey != key) && g_ctx->Map(slot.staging, 0, D3D11_MAP_READ, 0, &m) == S_OK)
+    done = &slot;  // nothing earlier to answer with: this copy, waited for
+  if (done) {
+    g_lastDepth.assign(static_cast<const std::uint32_t*>(m.pData), static_cast<const std::uint32_t*>(m.pData) + count);
+    g_ctx->Unmap(done->staging, 0);
+    g_lastKey = key;
+    for (ReadSlot& s : g_readSlots)  // it and older copies of the rectangle are spent
+      if (s.queued && s.key == key && s.serial <= done->serial) s.queued = false;
+  }
+  if (g_lastKey != key || g_lastDepth.size() != count) return false;
+  z = g_lastDepth;
   ++g_count.readbacks;
   return true;
 }
