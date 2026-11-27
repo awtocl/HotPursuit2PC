@@ -3,8 +3,11 @@
 // with d3dcompiler_47.dll (a Windows system DLL), loaded at run time.
 #include "present.h"
 
+#include "gfx_device.h"
+
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi1_5.h>
 
@@ -179,6 +182,45 @@ void SaveBackBuffer(const char* path) {
 }
 
 }  // namespace
+}  // namespace present
+
+namespace gfx {
+std::recursive_mutex& Lock() {
+  static std::recursive_mutex m;
+  return m;
+}
+bool Device(ID3D11Device** dev, ID3D11DeviceContext** ctx) {
+  static std::mutex creating;
+  static ID3D11Device* s_dev = nullptr;
+  static ID3D11DeviceContext* s_ctx = nullptr;
+  static bool tried = false;
+  std::lock_guard<std::mutex> lock(creating);
+  if (!tried) {
+    tried = true;
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION,
+                                 &s_dev, nullptr, &s_ctx)) &&
+        FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels + 1, 1,
+                                 D3D11_SDK_VERSION, &s_dev, nullptr, &s_ctx))) {
+      s_dev = nullptr;
+      s_ctx = nullptr;
+    }
+    ID3D11Multithread* mt = nullptr;  // (each call locked inside too: resource creation from both threads)
+    if (s_ctx && SUCCEEDED(s_ctx->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt)))) {
+      mt->SetMultithreadProtected(TRUE);
+      mt->Release();
+    }
+  }
+  if (!s_dev) return false;
+  s_dev->AddRef();
+  s_ctx->AddRef();
+  *dev = s_dev;
+  *ctx = s_ctx;
+  return true;
+}
+}  // namespace gfx
+
+namespace present {
 
 void RequestShot(const char* path) { g_shotPath = path; }
 
@@ -188,13 +230,8 @@ bool Init(HWND__* window) {
   const auto compile = compiler ? reinterpret_cast<CompileFn>(reinterpret_cast<void*>(GetProcAddress(compiler, "D3DCompile"))) : nullptr;
   if (!compile) return false;
 
-  const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION,
-                               &g_dev, nullptr, &g_ctx))) {
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels + 1, 1,
-                                 D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx)))
-      return false;
-  }
+  if (!gfx::Device(&g_dev, &g_ctx)) return false;  // (shared with the GPU renderer of the GS)
+  std::lock_guard<std::recursive_mutex> gfxLock(gfx::Lock());
   IDXGIDevice* dxgiDev = nullptr;
   IDXGIAdapter* adapter = nullptr;
   IDXGIFactory2* factory = nullptr;
@@ -265,6 +302,7 @@ bool Init(HWND__* window) {
 }
 
 void Shutdown() {
+  std::lock_guard<std::recursive_mutex> gfxLock(gfx::Lock());
   Release(g_frame.srv);
   Release(g_frame.tex);
   Release(g_overlay.srv);
@@ -286,6 +324,7 @@ void Shutdown() {
 
 void Resize() {
   if (!g_swap) return;
+  std::lock_guard<std::recursive_mutex> gfxLock(gfx::Lock());
   g_ctx->OMSetRenderTargets(0, nullptr, nullptr);
   Release(g_rtv);
   g_swap->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
@@ -293,8 +332,9 @@ void Resize() {
 }
 
 void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged, const std::uint32_t* overlay, int overlayW, int overlayH,
-          bool overlayChanged, const ui::Settings& s) {
+          bool overlayChanged, const ui::Settings& s, void* gpuFrame, int gpuW, int gpuH) {
   if (!g_swap || !g_rtv) return;
+  std::lock_guard<std::recursive_mutex> gfxLock(gfx::Lock());  // (the GS thread's renderer uses the same context)
   RECT rc = {};
   GetClientRect(g_hwnd, &rc);
   const int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
@@ -313,30 +353,33 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
   g_ctx->PSSetSamplers(0, 2, samplers);
   g_ctx->PSSetConstantBuffers(0, 1, &g_cb);
 
-  if (g_frame.srv) {
+  // the picture: the GPU renderer's copy of the shown target, or the software GS's frame uploaded above
+  ID3D11ShaderResourceView* const picture = gpuFrame ? static_cast<ID3D11ShaderResourceView*>(gpuFrame) : g_frame.srv;
+  const int pw = gpuFrame ? gpuW : g_frame.w, ph = gpuFrame ? gpuH : g_frame.h;
+  if (picture && pw > 0 && ph > 0) {
     // destination rectangle: the PS2 picture is 4:3 whatever its pixel size
     float vw = static_cast<float>(cw), vh = static_cast<float>(ch);
     if (s.aspect == 0) {
       if (vw / vh > 4.0f / 3.0f) vw = vh * 4.0f / 3.0f; else vh = vw * 3.0f / 4.0f;
     } else if (s.aspect == 2) {
-      const int k = std::max(1, std::min(cw / g_frame.w, ch / g_frame.h));
-      vw = static_cast<float>(g_frame.w * k);
-      vh = static_cast<float>(g_frame.h * k);
+      const int k = std::max(1, std::min(cw / pw, ch / ph));
+      vw = static_cast<float>(pw * k);
+      vh = static_cast<float>(ph * k);
     }
     D3D11_VIEWPORT vp = {std::floor((static_cast<float>(cw) - vw) / 2), std::floor((static_cast<float>(ch) - vh) / 2), vw, vh, 0, 1};
     g_ctx->RSSetViewports(1, &vp);
     D3D11_MAPPED_SUBRESOURCE m = {};
     if (SUCCEEDED(g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
       static const float kSharpen[4] = {0.0f, 0.35f, 0.7f, 1.1f}, kScan[3] = {0.0f, 0.35f, 0.7f};
-      const float p[12] = {static_cast<float>(g_frame.w), static_cast<float>(g_frame.h), 1.0f / static_cast<float>(g_frame.w),
-                           1.0f / static_cast<float>(g_frame.h), vw, vh, 0, 0, static_cast<float>(s.filter), kSharpen[s.sharpen & 3],
+      const float p[12] = {static_cast<float>(pw), static_cast<float>(ph), 1.0f / static_cast<float>(pw),
+                           1.0f / static_cast<float>(ph), vw, vh, 0, 0, static_cast<float>(s.filter), kSharpen[s.sharpen & 3],
                            kScan[std::min(s.scanlines, 2)], 0};
       std::memcpy(m.pData, p, sizeof p);
       g_ctx->Unmap(g_cb, 0);
     }
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
     g_ctx->PSSetShader(g_psFrame, nullptr, 0);
-    g_ctx->PSSetShaderResources(0, 1, &g_frame.srv);
+    g_ctx->PSSetShaderResources(0, 1, &picture);
     g_ctx->Draw(3, 0);
   }
   if (overlay && g_overlay.srv && g_overlay.w == cw && g_overlay.h == ch) {

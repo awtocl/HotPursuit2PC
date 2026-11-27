@@ -2,6 +2,7 @@
 
 #include "overlay.h"
 #include "present.h"
+#include "gs_gpu.h"
 
 #include <windows.h>
 
@@ -491,6 +492,7 @@ std::atomic<bool> g_closed{false};
 std::atomic<int> g_scalePercent{100};
 HWND g_hwnd = nullptr;
 std::thread g_windowThread;
+bool g_gpuPicture = false;  // the window shows the GPU renderer's picture (under g_frameMutex)
 std::uint64_t g_frameSeq = 0;                                       // bumped by Present (under g_frameMutex)
 std::string g_windowShot;                                           // development: next window picture to a file (under g_frameMutex)
 HANDLE g_frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // wakes the window thread for a new frame
@@ -641,6 +643,7 @@ void WindowThread() {
   std::vector<u32> frame;
   int fw = 0, fh = 0;
   std::uint64_t seen = 0;
+  bool gpuPicture = false;  // the GPU renderer's picture instead of `frame`
   for (;;) {
     // one present per new game frame (at most the game's 60; more only with real in-between frames, ADR 0013 §4)
     MsgWaitForMultipleObjects(1, &g_frameEvent, FALSE, 50, QS_ALLINPUT);
@@ -663,10 +666,13 @@ void WindowThread() {
         present::RequestShot(pending.c_str());
         g_redraw = true;
       }
-      if (g_frameSeq != seen && !g_frame.empty()) {
-        frame = g_frame;
-        fw = g_frameW;
-        fh = g_frameH;
+      if (g_frameSeq != seen && (g_gpuPicture || !g_frame.empty())) {
+        gpuPicture = g_gpuPicture;
+        if (!gpuPicture) {
+          frame = g_frame;
+          fw = g_frameW;
+          fh = g_frameH;
+        }
         seen = g_frameSeq;
         changed = true;
       }
@@ -685,8 +691,12 @@ void WindowThread() {
     }
     if (changed || menuChanged || g_redraw) {
       if (shotAt && ++drawn == shotAt) present::RequestShot(".cache/native/present.bmp");
-      present::Draw(frame.empty() ? nullptr : frame.data(), fw, fh, changed, menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr,
-                    g_overlayW, g_overlayH, menuChanged, g_settings);
+      int gw = 0, gh = 0;
+      void* gpuFrame = gpuPicture ? gpu::AcquireFrame(&gw, &gh) : nullptr;
+      present::Draw(gpuFrame || frame.empty() ? nullptr : frame.data(), fw, fh, changed && !gpuFrame,
+                    menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr, g_overlayW, g_overlayH, menuChanged, g_settings, gpuFrame,
+                    gw, gh);
+      gpu::ReleaseFrame(gpuFrame);
       g_redraw = false;
     }
   }
@@ -1547,9 +1557,38 @@ void Submit(Job& j, const char* kind) {
   Bands().Publish();
 }
 
+// ---- GPU renderer hand-over (ADR 0014): with HP2_GPU=1 primitives go to gs_gpu.cpp instead of the band workers -----------
+gpu::State GpuState() {
+  const Ctx& c = g_ctx[(g_prim >> 9) & 1];
+  return {g_prim, c.frame, c.zbuf, c.test, c.alpha, c.tex0, c.tex1, c.clamp, c.scissor, g_texa, g_fba[(g_prim >> 9) & 1], g_pabe};
+}
+gpu::Texture GpuTexture() {  // a GPU target when TEX0 names one, else the decoded texture of the CPU cache
+  gpu::Texture t;
+  if (!((g_prim >> 4) & 1)) return t;
+  const Ctx& c = g_ctx[(g_prim >> 9) & 1];
+  if (gpu::IsTarget(c.tex0)) {
+    t.target = true;
+    return t;
+  }
+  const TexCache& tc = GetTexture(c);
+  t.pix = tc.pix;
+  t.w = tc.w;
+  t.h = tc.h;
+  return t;
+}
+gpu::Vertex GpuVertex(const Vertex& v, const Vertex& colour) {  // (flat shading: the colour of the primitive's last vertex)
+  return {static_cast<float>(v.x) / 16.0f, static_cast<float>(v.y) / 16.0f, v.z, colour.r, colour.g, colour.b, colour.a, v.s, v.t, v.q,
+          v.u / 16.0f, v.v / 16.0f};
+}
+
 void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool flat) {
   static const bool skip = getenv("HP2_NOGS") != nullptr;  // development: measure the rest of the runtime without rasterising
   if (skip) return;
+  if (gpu::Enabled()) {
+    const gpu::Vertex v[3] = {GpuVertex(v0, flat ? v2_ : v0), GpuVertex(v1_, flat ? v2_ : v1_), GpuVertex(v2_, v2_)};
+    gpu::Triangle(GpuState(), GpuTexture(), v);
+    return;
+  }
   Job& j = NewJob();
   j.sprite = false;
   j.p = MakePipe(flat);
@@ -1606,6 +1645,10 @@ void DrawSprite(const Vertex& a, const Vertex& b) {
     if (!keepFog && ((g_prim >> 4) & 1) && (tpsm == Z32 || tpsm == Z24 || tpsm == Z16 || tpsm == Z16S) && (c.test & 1) &&
         ((c.test >> 1) & 7) == 0 && ((c.test >> 12) & 3) == 1)
       return;
+  }
+  if (gpu::Enabled()) {
+    gpu::Sprite(GpuState(), GpuTexture(), GpuVertex(a, b), GpuVertex(b, b));
+    return;
   }
   // A copy of a buffer still being drawn (the game copies each finished frame between its buffers): normally a wait for
   // the whole frame and a decode of the full texture. When texel row v maps to screen row v exactly, the worker drawing a
@@ -1727,6 +1770,14 @@ void BumpTransferPages() {  // page versions of the transfer rectangle (texture 
   g_xfer.written = false;
   BumpRect(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
            static_cast<int>(g_xfer.y0 + g_xfer.h) - 1);
+  // GPU renderer: a finished upload into a frame buffer the GPU holds goes into its target too (CT32/CT24)
+  if (!g_xfer.active && (g_xfer.psm == CT32 || g_xfer.psm == CT24) && gpu::Enabled() && gpu::HoldsBuffer(g_xfer.bp, g_xfer.bw)) {
+    std::vector<u32> rgba(static_cast<std::size_t>(g_xfer.w) * g_xfer.h);
+    for (u32 y = 0; y < g_xfer.h; ++y)
+      for (u32 x = 0; x < g_xfer.w; ++x) rgba[static_cast<std::size_t>(y) * g_xfer.w + x] = SurfReadRaw(g_xferSurf, g_xfer.x0 + x, g_xfer.y0 + y);
+    gpu::Uploaded(g_xfer.bp, g_xfer.bw, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.y0), static_cast<int>(g_xfer.w),
+                  static_cast<int>(g_xfer.h), rgba);
+  }
 }
 
 void BeginTransfer() {
@@ -2029,6 +2080,19 @@ void DoPresent() {
   const u32 magh = static_cast<u32>((dp >> 23) & 15), magv = static_cast<u32>((dp >> 27) & 3);
   const u32 dw = static_cast<u32>((dp >> 32) & 0xFFF) + 1, dh = static_cast<u32>((dp >> 44) & 0x7FF) + 1;
   const u32 w = std::clamp<u32>(dw / (magh + 1), 1, 1024), h = std::clamp<u32>(dh / (magv + 1), 1, 1024);
+  if (gpu::Enabled()) {  // the GPU renderer's target, copied on the GPU (no read-back)
+    const bool shown = gpu::Present(fb, static_cast<int>(dbx), static_cast<int>(dby), static_cast<int>(w), static_cast<int>(h));
+    {
+      std::lock_guard<std::mutex> lock(g_frameMutex);
+      g_gpuPicture = shown;
+      if (shown) ++g_frameSeq;
+    }
+    if (shown) {
+      ++g_stats.frames;
+      if (g_d3dActive) SetEvent(g_frameEvent);
+      return;
+    }  // (else a buffer the GPU did not draw: shown from GS memory as below)
+  }
   static std::vector<u32> img;  // (after the swap below it holds the previous picture: same size, no new allocation)
   img.resize(static_cast<std::size_t>(w) * h);
   const Surf src = MakeSurf(psm, fbp, fbw);
@@ -2058,6 +2122,14 @@ void DoPresent() {
 bool DumpFrame(const char* path) {
   FlushGs();  // the last queued picture read out
   std::lock_guard<std::mutex> lock(g_frameMutex);
+  if (g_gpuPicture) {  // GPU renderer: its last picture, read back
+    std::vector<u32> pixels;
+    int pw = 0, ph = 0;
+    if (!gpu::ReadFrame(pixels, &pw, &ph)) return false;
+    g_frame.swap(pixels);
+    g_frameW = pw;
+    g_frameH = ph;
+  }
   if (g_frame.empty()) return false;
   FILE* f = nullptr;
   if (fopen_s(&f, path, "wb") != 0 || !f) return false;

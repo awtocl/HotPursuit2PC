@@ -33,6 +33,7 @@
 #include "virtual_disc.h"
 #include "audio.h"
 #include "gs.h"
+#include "gs_gpu.h"
 #include "memcard.h"
 #include <set>
 #include <string>
@@ -1524,6 +1525,7 @@ void PadPoll() {
     Log("perf:   targets%s", gs::TargetsText().c_str());
     {  // GIF vertices vs vertices that draw (XYZ2/XYZF2), XGKICKs, VU1 runs per refresh
       static std::uint64_t pv = 0, pk = 0, px = 0, pr = 0;
+      if (std::getenv("HP2_GPU")) Log("perf:   gpu: %s", gpu::StatsText().c_str());
       Log("perf:   per refresh: %llu GIF vertices, %llu drawing kicks, %llu XGKICKs, %llu VU1 runs", static_cast<unsigned long long>((g_gsVertices - pv) / 600),
           static_cast<unsigned long long>((g_gsKicks - pk) / 600), static_cast<unsigned long long>((g_xgkicks - px) / 600),
           static_cast<unsigned long long>((g_vuRuns - pr) / 600));
