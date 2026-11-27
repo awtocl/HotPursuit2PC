@@ -6,6 +6,14 @@ there are no promises about compatibility between them yet.
 Downloads are on the [Releases page](https://github.com/awtocl/HotPursuit2PC/releases). No game files are ever included:
 you need your own disc of the North American PS2 release (SLUS-20362).
 
+## [Unreleased]
+
+### Fixed
+
+- **Smoke and dust no longer show square outlines.** The game's smoke sheets surround each puff with a faint haze
+  (3% opacity) that ends in a hard square at the particle's edge. One particle hides it, but dozens of overlapping ones
+  stacked it into visible boxes. That haze is now left out, and blending rounds down like the PS2 does.
+
 ## [0.2.0] — 2026-11-27 — The native port
 
 The first version you can download and play. The game runs as native Windows code (no emulator), translated on your

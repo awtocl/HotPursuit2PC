@@ -1777,7 +1777,8 @@ void PadPoll() {
     }();
     if (primLogAt && ScriptTime(now)) {
       if (now == primLogAt) gs::SetPrimLog(true);
-      if (now == primLogAt + 2) {
+      static const std::uint64_t primLogFor = [] { const char* e = getenv("HP2_PRIMLOG_FRAMES"); return e ? std::max<std::uint64_t>(1, static_cast<std::uint64_t>(atoi(e))) : 2ull; }();
+      if (now == primLogAt + primLogFor) {
         gs::SetPrimLog(false);
         gs::DumpPage(0, 8, 512, 448, 0, ".cache/native/at_page0.bmp");  // the race's two frame buffers as they are now
         gs::DumpPage(128, 8, 512, 448, 0, ".cache/native/at_page128.bmp");

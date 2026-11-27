@@ -37,11 +37,11 @@ void Release(T*& p) {
 
 const char kHlsl[] = R"(
 cbuffer C : register(b0) {
-  float4 target;  // target width, height (internal pixels), internal scale
+  float4 target;  // target width, height (internal pixels), internal scale, blending rounds down (0 no, 1 yes, 2 right half)
   uint4 texi;     // tme, fst, tfx, tcc
   uint4 wrap;     // wms, wmt, bilinear, source conversion (1 CT16 target, 2 CT24 view of a CT32 target)
   uint4 region;   // minu, maxu, minv, maxv
-  float4 texs;    // texture width, height, scale of the source (targets: internal scale)
+  float4 texs;    // texture width, height, scale of the source (targets: internal scale), haze cut (0 no, 1 yes, 2 right half)
   uint4 atest;    // ate, atst, aref, passed (0 every pixel, 1 passing only, 2 failing only)
   int4 blend;     // blending on, coefficient of C in the source part, constant of the source part, C (0 As, 1 Ad, 2 FIX)
   float4 blendf;  // FIX / 128, TA0, TA1, AEM
@@ -116,6 +116,10 @@ POut PS(VOut i) {
     } else {
       t = Texel(int2(floor(st)));
     }
+    // Smoke and dust sheets put each puff in a haze of texture alpha 4/128 that ends in a hard square at the quad's edge.
+    // One layer is invisible; dozens of overlapping particles stack it into visible boxes (on the PS2's soft 480i picture
+    // it did not show). Texture alpha up to 4 counts as transparent when blending (texs.w: 1 yes, 0 no, 2 right half).
+    if (blend.x != 0 && texi.w != 0 && t.a <= 4 && (texs.w == 1 || (texs.w == 2 && i.pos.x > target.x * 0.5))) t.a = 0;
     float4 r;
     if (texi.z == 0) {
       r.rgb = min(floor(t.rgb * c.rgb / 128), 255);
@@ -150,6 +154,12 @@ POut PS(VOut i) {
   float k = blend.w == 0 ? c.a / 128 : (blend.w == 2 ? blendf.x : 1.0);
   float sc = misc.z != 0 ? k : float(blend.y) * k + float(blend.z);
   float3 rgb = blend.x != 0 ? c.rgb * sc : c.rgb;
+  // The GS blends in integers and rounds down: ((A - B) * C >> 7) + D. The GPU rounds the blended value to the nearest
+  // step, so a faint layer (a smoke sheet's alpha-4 background) added a step where the GS adds nothing, and dozens of
+  // overlapping particles showed their square outlines. 0.49 of a step taken off the source part (added where it is
+  // subtracted) turns that rounding into the GS's floor. Not with Ad factors (the source part is scaled by the table).
+  if (blend.x != 0 && blend.w != 1 && (target.w == 1 || (target.w == 2 && i.pos.x > target.x * 0.5)))
+    rgb += misc.z != 0 ? 0.49 : -0.49;
   if (misc.y != 0 && blend.x == 0) rgb = floor(rgb / 8) * 8;
   float a = c.a;
   if (misc.x != 0 && a < 128) a += 128;
@@ -573,6 +583,17 @@ bool MakeKey(const State& st, const Texture& tex, Key& k) {
   c.target[0] = static_cast<float>(k.rt->w * g_scale);
   c.target[1] = static_cast<float>(k.rt->h * g_scale);
   c.target[2] = static_cast<float>(g_scale);
+  // blending rounds down like the GS (PS's blend.x): HP2_BLEND_FLOOR=0 rounds to nearest (the old way), 2 only the right half
+  static const float floorMode = [] { const char* e = std::getenv("HP2_BLEND_FLOOR"); return e ? static_cast<float>(std::atoi(e)) : 1.0f; }();
+  c.target[3] = floorMode;
+  // texture alpha up to 4 is transparent when blending (no stacked haze boxes around smoke); development: HP2_SMOKE_HAZE=1
+  // keeps the haze, =2 cuts it on the right half only (to compare)
+  static const float hazeMode = [] {
+    const char* e = std::getenv("HP2_SMOKE_HAZE");
+    const int v = e ? std::atoi(e) : 0;
+    return v == 1 ? 0.0f : v == 2 ? 2.0f : 1.0f;
+  }();
+  c.texs[3] = hazeMode;
   const bool tme = ((st.prim >> 4) & 1) != 0;
   k.srv = nullptr;
   k.srvIsRt = false;

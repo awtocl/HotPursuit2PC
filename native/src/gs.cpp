@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gs {
@@ -1677,6 +1678,70 @@ gpu::Texture GpuTexture() {  // a GPU target when TEX0 names one, else the decod
   t.h = tc.h;
   return t;
 }
+// Development: HP2_DRAW_LOG=1 writes each distinct blended, textured state the GPU renderer draws (texture format and
+// size, alpha registers, the texture's alpha range, the primitive's screen size and colour) to .cache/native/draw_log.txt.
+u64 g_smokeCount = 0, g_sceneCount = 0;
+double g_smokeAlpha = 0, g_smokeArea = 0;
+void LogGpuDraw(const char* kind, const gpu::State& st, const gpu::Texture& tex, float w, float h, const Vertex& c) {
+  static const int on = getenv("HP2_DRAW_LOG") ? atoi(getenv("HP2_DRAW_LOG")) : 0;  // 2: every draw into frame pages >= 384
+  if (on == 4) {  // per refresh while HP2_PRIMLOG_AT runs: flat blended 8-bit quads (smoke, dust) summed, written by DoPresent
+    if (g_primLog && (st.frame & 0x1FF) < 384) ++g_sceneCount;
+    if (g_primLog && (st.prim & 0x5F) == 0x54 && ((st.tex0 >> 20) & 0x3F) == T8 && ((st.frame >> 16) & 0x3F) == 8) {  // (main view)
+      ++g_smokeCount;
+      g_smokeAlpha += c.a;
+      g_smokeArea += static_cast<double>(w) * h;
+    }
+    return;
+  }
+  const u32 fbp = static_cast<u32>(st.frame & 0x1FF);
+  // 3: every blended draw while HP2_PRIMLOG_AT's two refreshes run (no de-duplication)
+  if (on == 3 ? (!g_primLog || !((st.prim >> 6) & 1) || !((st.prim >> 4) & 1) || ((st.tex0 >> 20) & 0x3F) != T8) : on == 2 ? fbp < 384 : (!on || !((st.prim >> 4) & 1) || !((st.prim >> 6) & 1))) return;
+  static std::unordered_set<u64> seen;
+  static int lines = 0;
+  const u64 key = (st.tex0 & 0x3FFFFFFFFFFFC000ull) * 0x9E3779B97F4A7C15ull ^ st.alpha * 31 ^ st.test * 131 ^ (st.prim & 0x7FF) * 7919 ^
+                  st.texa * 524287 ^ (st.tex1 & 0xFFFFFFFFull) ^ (static_cast<u64>(w > 24) << 60) ^ st.frame * 6151 ^ st.fba;  // (not the texture's address or K)
+  if (lines >= (on == 3 ? 20000 : 3000) || (on != 3 && !seen.insert(key).second)) return;
+  ++lines;
+  u32 amin = 255, amax = 0;
+  const std::size_t n = static_cast<std::size_t>(tex.w) * tex.h;
+  for (std::size_t i = 0; tex.pix && i < n; i += 7) {
+    const u32 a = tex.pix[i] >> 24;
+    amin = std::min(amin, a);
+    amax = std::max(amax, a);
+  }
+  static std::unordered_set<u64> dumped;  // mode 3: each texture once as draw_tex_<TEX0>.bmp (colour left, alpha x2 right)
+  if (on == 3 && tex.pix && tex.w <= 512 && tex.h <= 512 && dumped.insert(st.tex0).second) {
+    char path[96];
+    snprintf(path, sizeof path, ".cache/native/draw_tex_%016llX.bmp", static_cast<unsigned long long>(st.tex0));
+    if (FILE* b = fopen(path, "wb")) {
+      const u32 W = tex.w * 2, H = tex.h, row = (W * 3 + 3) & ~3u, size = 54 + row * H;
+      u8 hdr[54] = {'B', 'M'};
+      const auto put = [&](int at, u32 v) { for (int k = 0; k < 4; ++k) hdr[at + k] = static_cast<u8>(v >> (8 * k)); };
+      put(2, size); put(10, 54); put(14, 40); put(18, W); put(22, H); hdr[26] = 1; hdr[28] = 24; put(34, row * H);
+      fwrite(hdr, 1, 54, b);
+      std::vector<u8> line(row);
+      for (u32 y = H; y-- > 0;) {
+        for (u32 x = 0; x < W; ++x) {
+          const u32 p = tex.pix[static_cast<std::size_t>(y) * tex.w + (x % tex.w)];
+          const u8 a = static_cast<u8>(std::min<u32>((p >> 24) * 2, 255));
+          line[x * 3 + 0] = x < tex.w ? static_cast<u8>(p >> 16) : a;  // (RGBA in memory: B, G, R in the file)
+          line[x * 3 + 1] = x < tex.w ? static_cast<u8>(p >> 8) : a;
+          line[x * 3 + 2] = x < tex.w ? static_cast<u8>(p) : a;
+        }
+        fwrite(line.data(), 1, row, b);
+      }
+      fclose(b);
+    }
+  }
+  if (FILE* f = fopen(".cache/native/draw_log.txt", lines == 1 ? "w" : "a")) {
+    fprintf(f, "%s prim %03llX tex %llu/%02llX tbw %llu %ux%u tcc %llu tfx %llu cpsm %02llX csm %llu target %d | alpha %llX test %llX texa %llX "
+               "tex1 %llX clamp %llX | tex alpha %u..%u | size %.0fx%.0f rgba %.0f %.0f %.0f %.0f | tex0 %016llX frame %llX zbuf %llX fba %llu\n",
+            kind, st.prim & 0x7FF, st.tex0 & 0x3FFF, (st.tex0 >> 20) & 0x3F, (st.tex0 >> 14) & 0x3F, tex.w, tex.h, (st.tex0 >> 34) & 1,
+            (st.tex0 >> 35) & 3, (st.tex0 >> 51) & 0xF, (st.tex0 >> 55) & 1, tex.target ? 1 : 0, st.alpha, st.test, st.texa, st.tex1, st.clamp,
+            amin, amax, w, h, c.r, c.g, c.b, c.a, static_cast<unsigned long long>(st.tex0), st.frame, st.zbuf, st.fba);
+    fclose(f);
+  }
+}
 gpu::Vertex GpuVertex(const Vertex& v, const Vertex& colour) {  // (flat shading: the colour of the primitive's last vertex)
   return {static_cast<float>(v.x) / 16.0f, static_cast<float>(v.y) / 16.0f, v.z, colour.r, colour.g, colour.b, colour.a, v.s, v.t, v.q,
           v.u / 16.0f, v.v / 16.0f};
@@ -1687,7 +1752,11 @@ void DrawTriangle(const Vertex& v0, const Vertex& v1_, const Vertex& v2_, bool f
   if (skip) return;
   if (gpu::Enabled()) {
     const gpu::Vertex v[3] = {GpuVertex(v0, flat ? v2_ : v0), GpuVertex(v1_, flat ? v2_ : v1_), GpuVertex(v2_, v2_)};
-    gpu::Triangle(GpuState(), GpuTexture(), v);
+    const gpu::State st = GpuState();
+    const gpu::Texture tex = GpuTexture();
+    LogGpuDraw("tri", st, tex, static_cast<float>(std::max({v0.x, v1_.x, v2_.x}) - std::min({v0.x, v1_.x, v2_.x})) / 16.0f,
+               static_cast<float>(std::max({v0.y, v1_.y, v2_.y}) - std::min({v0.y, v1_.y, v2_.y})) / 16.0f, v2_);
+    gpu::Triangle(st, tex, v);
     return;
   }
   Job& j = NewJob();
@@ -1748,7 +1817,10 @@ void DrawSprite(const Vertex& a, const Vertex& b) {
       return;
   }
   if (gpu::Enabled()) {
-    gpu::Sprite(GpuState(), GpuTexture(), GpuVertex(a, b), GpuVertex(b, b));
+    const gpu::State st = GpuState();
+    const gpu::Texture tex = GpuTexture();
+    LogGpuDraw("sprite", st, tex, static_cast<float>(b.x - a.x) / 16.0f, static_cast<float>(b.y - a.y) / 16.0f, b);
+    gpu::Sprite(st, tex, GpuVertex(a, b), GpuVertex(b, b));
     return;
   }
   // A copy of a buffer still being drawn (the game copies each finished frame between its buffers): normally a wait for
@@ -2187,6 +2259,15 @@ void SetInterruptCallback(void (*callback)()) { g_irqCallback = callback; }
 
 void DoPresent() {
   if (g_mem.empty()) return;
+  if (g_primLog && getenv("HP2_DRAW_LOG"))  // (development: frame boundaries in draw_log.txt)
+    if (FILE* f = fopen(".cache/native/draw_log.txt", "a")) {
+      fprintf(f, "present smoke %llu scene %llu dispfb %llX alpha %.1f area %.0f\n", static_cast<unsigned long long>(g_smokeCount),
+              static_cast<unsigned long long>(g_sceneCount), static_cast<unsigned long long>(g_dispfb[1] & 0x1FF),
+              g_smokeCount ? g_smokeAlpha / static_cast<double>(g_smokeCount) : 0.0, g_smokeCount ? g_smokeArea / static_cast<double>(g_smokeCount) : 0.0);
+      fclose(f);
+      g_smokeCount = g_sceneCount = 0;
+      g_smokeAlpha = g_smokeArea = 0;
+    }
   if (!g_windowThread.joinable()) g_windowThread = std::thread(WindowThread);
   // circuit 2 over circuit 1 when both are enabled (the game normally enables one); pick the first enabled
   const int c = (g_pmode & 1) ? 0 : (g_pmode & 2) ? 1 : -1;
