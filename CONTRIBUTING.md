@@ -53,3 +53,21 @@ Tests come in two kinds:
 C++20, MSVC `/W4 /permissive-`, warnings are errors in CI. All file parsing
 goes through bounds-checked readers; never trust an offset or size read from
 a file. Errors carry the file and stage that failed and why (brief §3.3).
+
+## Development switches
+
+The native game reads a few environment variables that help while debugging (none of them is needed to play):
+
+| Variable | What it does |
+|---|---|
+| `HP2_ASPECT=0..3`, `HP2_FPS=30\|60` | Override the aspect ratio and frame rate without touching `hp2native.ini` |
+| `HP2_GDI=1` | Present with GDI instead of Direct3D 11 |
+| `HP2_TRACE_ENTRIES=1` | Log every entry into translated code |
+| `HP2_PRESS="start@12-13"` | Press pad buttons at given times (scripted runs) |
+| `HP2_DUMP_EVERY=10`, `HP2_DUMP_AT`, `HP2_SHOT_AT` | Save game frames or window pictures |
+| `HP2_NOGS=1` | Skip the graphics side |
+| `HP2_READBACK_LOG=1`, `HP2_MOVIE_BOX_LOG=1` | Log GS-to-memory reads and the movie picture's bounds |
+| `HP2_STREAMER_LOG=1\|2`, `HP2_SIF_LOG=1`, `HP2_AUDIO_DUMP=1` | Log the sound streamer and SIF calls; record the mixed audio |
+
+The game writes `native.log` next to its executable. `hp2recomp disasm <SLUS_203.62> <address> <count>` disassembles
+the game program. The launcher has `--selftest`, `--screenshot <folder>` and `--setup-from <folder>` (see ADR 0016).

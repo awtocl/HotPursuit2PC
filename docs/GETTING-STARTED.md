@@ -1,8 +1,8 @@
 # Getting started — play *Hot Pursuit 2* natively on your PC
 
-This guide takes you from your PS2 disc to playing, step by step. You type a handful of commands, and one script does
-the rest. Expect about **an hour the first time**, mostly waiting while your PC builds things; after that, starting the
-game is a double-click.
+Welcome! This guide takes you from your PS2 disc to racing on your PC, one step at a time. You'll type a handful of
+commands and the rest is done for you. Plan on about **an hour the first time** — mostly waiting while your PC builds
+things, so feel free to grab a snack. After that, starting the game is just a double-click.
 
 > [!IMPORTANT]
 > You need **your own original disc** of *Need for Speed: Hot Pursuit 2* for PlayStation 2. No game files come with
@@ -235,5 +235,5 @@ step 1 can be removed in *Settings → Apps* like any other program.
 
 ---
 
-Something unclear or missing in this guide? [Open an issue](https://github.com/awtocl/HotPursuit2PC/issues) — this
-guide should work for everyone.
+Stuck, or something in here unclear? [Open an issue](https://github.com/awtocl/HotPursuit2PC/issues) and let us
+know — this guide should work for everyone. Have fun out there, and watch out for the cops!

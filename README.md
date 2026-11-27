@@ -8,11 +8,11 @@
   <img alt="Language: C++20" src="https://img.shields.io/badge/C%2B%2B-20-1d3a5f">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-ff921c"></a>
   <img alt="Status: development build" src="https://img.shields.io/badge/status-development%20build-ff921c">
-  <img alt="AI-assisted" src="https://img.shields.io/badge/AI--assisted-Claude%20Code-6a5acd">
+  <a href="#a-word-on-ai"><img alt="AI-assisted" src="https://img.shields.io/badge/AI--assisted-Claude%20Code-6a5acd"></a>
 </p>
 
 <p align="center">
-  <b>The PlayStation 2 version of <i>Need for Speed: Hot Pursuit 2</i>, recompiled to run natively on Windows — built from your own disc.</b>
+  <b>The PlayStation 2 version of <i>Need for Speed: Hot Pursuit 2</i>, running natively on Windows — built from your own disc.</b>
 </p>
 
 <p align="center">
@@ -22,54 +22,50 @@
   <a href="#controls">Controls</a> ·
   <a href="#known-problems">Known problems</a> ·
   <a href="#legal-position-and-provenance">Legal</a> ·
-  <a href="#ai-assistance">AI assistance</a> ·
-  <a href="docs/STATUS.md">Status</a>
+  <a href="#a-word-on-ai">A word on AI</a>
 </p>
 
 > [!IMPORTANT]
-> **No game files are included, and none are downloaded.** Everything here works only from a dump you made of
-> **your own disc** of *Need for Speed: Hot Pursuit 2* for PlayStation 2 (North America, `SLUS-20362`).
+> **No game files are included, and none are downloaded.** You'll need **your own disc** of *Need for Speed: Hot
+> Pursuit 2* for PlayStation 2 (North America, `SLUS-20362`).
 
 > [!NOTE]
-> **An AI-assisted project.** I started HotPursuit2PC to get hands-on experience with using AI for software
-> development, on a project big enough to be a real test. Almost all of the code, tests and documentation were
-> written by an AI coding agent (Anthropic's Claude, in Claude Code) under my direction: I set the goals and the
-> rules, made the decisions, tested the builds and played the results. More in [AI assistance](#ai-assistance).
+> Built with a lot of help from AI (Claude Code). Curious, or skeptical? Here's [my take on it](#a-word-on-ai).
 
 ---
 
-## Why
+## Why?
 
-> The best version of this game is the PlayStation 2 one — so that is the version this project brings to the PC.
+> The PS2 version is the best version of this game, so that's the one this project brings to the PC.
 
-*Hot Pursuit 2* shipped on several systems, and the PS2 release is the one worth keeping: its handling, its cars, its
-tracks and its feel. This is not a remake and not the separate 2003 Windows release. It is that exact PS2 game, made a
-first-class Windows program: native x64 code, your monitor's resolution, your controller, your hardware — with no
-emulator in the way.
+*Hot Pursuit 2* came out on several systems, and the PS2 one is the one people remember: the handling, the cars, the
+tracks, the feel. This isn't a remake, and it isn't the (quite different) 2003 PC release. It's that exact PS2 game,
+turned into a proper Windows program: native x64 code, your monitor's resolution, your controller — and no emulator in
+between.
 
 ## Features
 
-| Feature | What you get |
+| | |
 |---|---|
-| **Native code, no emulator** | The game's own program and its vector-unit microprograms are statically recompiled to x64 (through LLVM) on your PC, from your copy. The console's hardware is replaced by host services: disc reads from your files, a GPU renderer, a sound mixer, XInput. |
-| **Modern graphics** | Direct3D 11 renderer with 1x–8x internal resolution (supersampled when above your screen's), sharp-bilinear / bilinear / nearest scaling, optional sharpening and scanlines, borderless full screen. |
-| **16:9 and 60 fps** | Widescreen by default (the camera sees more, the HUD keeps its shape, menus keep theirs) and 60 frames per second, through the game's own community patches (see [Credits](#license-and-credits)). Both can be turned off. |
-| **Full sound** | EA Trax music, sound effects, police radio and the intro movies' sound, mixed natively. |
-| **Movies** | The intro movies fill the screen at their own shape. |
-| **A launcher** | First-run setup that finds your disc (DVD or mounted `.iso`), copies and checks it file by file and prepares the game; then Play, settings with a recommendation for your screen, memory card backups, a screenshot gallery (F12) — with mouse, keyboard or controller ([ADR 0016](docs/adr/0016-launcher.md)). |
-| **In-game settings** | **F1** (or Select+Start) opens a settings menu styled after the game's own, with *Quit game*. |
-| **Your files stay yours** | Your dump is only read, never modified. What the tools derive from it stays on your PC. |
+| **No emulator** | The game's own code is translated into native x64 code (with LLVM), right on your PC, from your copy. The console's hardware is replaced with PC equivalents: your files instead of the disc drive, your GPU, a sound mixer, your controller. |
+| **Sharp graphics** | Direct3D 11 at 1x–8x the original resolution (supersampled when it's above your screen's), crisp scaling, optional sharpening and scanlines, borderless full screen. |
+| **16:9 and 60 fps** | Widescreen out of the box (you see more of the road, the HUD and menus keep their shape) and 60 frames per second, thanks to the community's patches for this game (see [Credits](#license-and-credits)). Both can be switched off. |
+| **All the sound** | EA Trax music, engines and effects, the police radio and the movies' sound. |
+| **A launcher** | It finds your disc, copies and checks it, gets the game ready and remembers everything after that. Plus settings with a recommendation for your screen, memory card backups and a screenshot gallery (F12). Works with mouse, keyboard or controller. |
+| **In-game settings** | Press **F1** (or Select+Start) for a settings menu in the game's own style, including *Quit game*. |
+| **Your files stay yours** | Your disc is only ever read. Everything made from it stays on your PC. |
 
 <p align="center"><img src="docs/assets/launcher-home.png" width="760" alt="The HotPursuit2PC launcher: the Play page with the disc and game status, a large PLAY button and the in-game keys"></p>
 
 ## Quick start
 
 > [!TIP]
-> **New to this?** Follow the step-by-step guide, **[Getting started](docs/GETTING-STARTED.md)**: what you need,
-> installing the tools, copying your disc, building, the best settings, controls and troubleshooting.
+> **First time doing something like this?** No worries — the **[Getting started](docs/GETTING-STARTED.md)** guide
+> walks you through every step: what you need, installing the tools, building, the best settings and what to do if
+> something goes wrong.
 
-**In short:** with Windows 10/11 x64, *Build Tools for Visual Studio 2022* (C++ workload), Git and PowerShell 7
-installed, and **your own disc** in the drive (or your `.iso` of it mounted):
+**The short version:** on Windows 10/11 x64 with *Build Tools for Visual Studio 2022* (C++ workload), Git and
+PowerShell 7 installed, and **your own disc** in the drive (or your `.iso` of it mounted):
 
 ```powershell
 git clone https://github.com/awtocl/HotPursuit2PC.git
@@ -77,17 +73,17 @@ cd HotPursuit2PC
 pwsh tools/install-native.ps1       # builds everything, then opens the launcher
 ```
 
-The script downloads and builds LLVM the first time (15–40 minutes), builds the project and puts the launcher, the
-game and the recompiler into `game-native\`. The launcher then copies and checks your disc and recompiles the game's
-program **from your copy, on your PC** (about a minute). From then on, start **`HotPursuit2Launcher.exe`** there. About
-an hour the first time; a few minutes after an update.
+The first run builds LLVM (grab a coffee: 15–40 minutes), then the project, and puts the launcher, the game and the
+recompiler into `game-native\`. The launcher takes it from there: it copies and checks your disc and translates the
+game **from your copy, on your PC** (about a minute). After that, just start **`HotPursuit2Launcher.exe`**. Around an
+hour the first time; a few minutes after an update.
 
-There are no prebuilt downloads yet. The recompiled code is always made from your copy of the game, on your PC: it is
-never shipped.
+There are no prebuilt downloads yet. The translated game is always made from your own copy, on your own PC — it's never
+shipped.
 
 ## Controls
 
-An Xbox-style controller works as a DualShock 2. On the keyboard:
+An Xbox-style controller works just like a DualShock 2. On the keyboard:
 
 | Key | PS2 button | Key | PS2 button |
 |---|---|---|---|
@@ -98,22 +94,23 @@ An Xbox-style controller works as a DualShock 2. On the keyboard:
 | S | △ | F1 | settings menu |
 | | | F12 | screenshot |
 
-Alt+Enter or F11 toggles full screen; Alt+F4 or *Quit game* in the settings menu quits. Settings are kept in
-`hp2native.ini` next to the executable and can also be changed in the launcher.
+Alt+Enter or F11 toggles full screen; Alt+F4 or *Quit game* in the settings menu quits. Settings live in
+`hp2native.ini` next to the game, and you can change them in the launcher too.
 
 ## Known problems
 
-This is a development build, tested on one PC so far.
+It's a development build, and it has only been tested on one PC so far. Here's what you might run into:
 
-- **Saving is untested** — the game has a memory card (files in `game-native\saves`), but saving and loading a career
-  have not been checked end to end.
-- **Sound:** no reverb and no real ADSR envelopes yet, so sounds end more abruptly than on a console.
-- **Graphics:** no depth fog, mipmaps, dithering or lines yet; the race's distance fog is skipped.
-- **Input:** digital buttons only (no DualShock 2 pressure), no rumble, no steering wheel.
-- Switching between 16:9 and 4:3 takes effect after a restart (the game lays its HUD out once).
-- Not tested on AMD or Intel graphics, on a clean Windows installation, or in long sessions.
+- **Saving is untested.** The game has a memory card (files in `game-native\saves`), but saving and loading a career
+  haven't been checked from start to finish yet.
+- **Sound:** no reverb and no proper volume envelopes yet, so some sounds stop a bit abruptly.
+- **Graphics:** no depth fog, mipmaps, dithering or lines yet; the distance fog in races is skipped for now.
+- **Input:** digital buttons only (no pressure-sensitive buttons), no rumble, no steering wheel.
+- Switching between 16:9 and 4:3 only kicks in after a restart (the game lays out its HUD once).
+- Not tried yet on AMD or Intel graphics, on a fresh Windows install, or in really long sessions.
 
-Progress and open questions: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/HANDOVER.md`](docs/HANDOVER.md).
+Found something else? [Open an issue](https://github.com/awtocl/HotPursuit2PC/issues) — it helps a lot. Progress and
+open questions live in [`docs/STATUS.md`](docs/STATUS.md).
 
 ## How it works
 
@@ -126,17 +123,18 @@ flowchart LR
     N --> O["Direct3D 11 renderer<br/>XAudio2 mixer<br/>keyboard + XInput"]
 ```
 
-- **Recompiler** (`recomp/`): finds the program's 10,146 functions and 193 switch tables without symbols, translates
-  the MIPS R5900 code and the vector unit's microprograms through LLVM, and packages them as `hp2code.dll`.
-- **Runtime** (`native/`): a minimal kernel (threads, semaphores, timers, interrupts, DMA), the game's I/O-processor
-  services answered directly (disc, files, controller, EA's sound streamer), VIF/GIF and a GS implementation — in
-  software, and on the GPU.
-- **Game patches** (ADR [0015](docs/adr/0015-widescreen.md)): 16:9 and 60 fps are applied by the runtime as patch
-  points the recompiler leaves switchable, so they are settings rather than separate builds.
-- **Launcher** (`launcher/`, ADR [0016](docs/adr/0016-launcher.md)): copies and checks your disc against the known file
-  hashes, runs the recompiler with a progress bar, keeps the game in step with updates (`--check-package`) and starts it.
+- **The recompiler** (`recomp/`) finds the game program's 10,146 functions and 193 switch tables (no symbols needed),
+  translates the PS2's MIPS code and its vector-unit microprograms through LLVM, and packs them into `hp2code.dll`.
+- **The runtime** (`native/`) stands in for the console: a small kernel (threads, semaphores, timers, interrupts, DMA),
+  the I/O processor's services (disc, files, controller, EA's sound streamer), and the graphics chip — in software and
+  on the GPU.
+- **Game patches** ([ADR 0015](docs/adr/0015-widescreen.md)): 16:9 and 60 fps are switchable patch points, so they're
+  settings rather than separate builds.
+- **The launcher** (`launcher/`, [ADR 0016](docs/adr/0016-launcher.md)) checks your disc against the known file
+  hashes, runs the recompiler, keeps the game in step with updates and starts it.
 
-Design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/), each with the options that were rejected.
+Every design decision is written down as an ADR in [`docs/adr/`](docs/adr/), together with the options that didn't make
+the cut.
 
 ## Legal position and provenance
 
@@ -183,38 +181,40 @@ of Sony Interactive Entertainment Inc. They are used here only to say what the t
 
 If you are a rights holder and believe something here should not be, please open an issue.
 
-## AI assistance
+## A word on AI
 
-I started this project to learn how to build software together with AI, and to find out how far that can go on
-something genuinely hard. Here is exactly how the work was divided:
+> I know a lot of people hate AI, and sooner or later anything that's even slightly touched by an AI model gets called
+> "AI slop". Here's where I stand: AI isn't going away. It's a new tool that lets us do things we didn't think were
+> possible before, and I'm not going to let an ideology stop me from making it part of my workflow. Love it or hate it,
+> AI can write some pretty damn good code. You might as well use it to make your life a little easier, learn what it's
+> good for along the way — and, in my case, dive into projects that bring the games of my childhood to the PC.
 
-- **The code, tests, build scripts and documentation were written by an AI coding agent** — Anthropic's Claude,
-  running in Claude Code — working at my direction. Commits carry a `Co-Authored-By: Claude` trailer.
-- **I set the goals and the hard constraints** (kept in [`docs/brief.md`](docs/brief.md)), supplied the dump of my own
-  disc, approved every step that reached outside the project (such as fetching third-party source code), tested the
-  builds, played them, and decided the direction — for example, moving from the emulator-backed build to static
-  recompilation after playing it.
-- **Reverse-engineering findings come from my own dump**, by inspection and experiment, with the evidence for each
-  claim recorded in [`docs/dump-analysis.md`](docs/dump-analysis.md). The game's source code was not available and was
-  not used. Third-party sources that were consulted are listed with their license status in
-  [`docs/prior-art.md`](docs/prior-art.md); the only third-party findings used are the community game patches
-  credited below.
+I started HotPursuit2PC to get hands-on with building software together with AI, on something hard enough to be a real
+test. Here's how the work was split:
 
-What this means for you:
+- **An AI coding agent wrote the code, tests, build scripts and docs** — Anthropic's Claude, in Claude Code — working
+  under my direction. Commits carry a `Co-Authored-By: Claude` line.
+- **I set the goals and the ground rules** (they're in [`docs/brief.md`](docs/brief.md)), dumped my own disc, approved
+  every step that reached outside the project (like fetching third-party source code), tested and played every build,
+  and called the shots — for example, dropping the emulator-based build for static recompilation after playing it.
+- **What we know about the game comes from my own dump**, by inspection and experiment, with the evidence written down
+  in [`docs/dump-analysis.md`](docs/dump-analysis.md). The game's source code was never available or used. Third-party
+  sources we looked at are listed with their licenses in [`docs/prior-art.md`](docs/prior-art.md); the only outside
+  findings used are the community game patches credited below.
 
-- AI-written code can be wrong in ways that look confident. The project's defence is process rather than trust: every
-  claim about the disc is backed by a byte-level check or a test, anything not proven is marked **UNVERIFIED** in the
-  docs, decisions are written down as ADRs with the alternatives considered, and each phase ends with a report listing
-  what was *not* verified.
-- That process has caught real mistakes, and they are left visible on purpose — for example a hash collision that
-  briefly gave a file the wrong name, and a performance claim based on per-second averages that hid stutter seen in
-  play.
-- No human has audited the whole code base line by line. Review it before you rely on it, and treat the numbers in the
-  docs as measurements on one PC, not guarantees.
+And, to be fair to you:
+
+- AI-written code can be confidently wrong. So the project leans on process, not trust: every claim about the disc is
+  backed by a byte-level check or a test, anything unproven is marked **UNVERIFIED**, decisions are written down with
+  the alternatives, and each phase ends with a list of what was *not* verified.
+- That process has caught real mistakes, and they're left visible on purpose — like a hash collision that briefly gave
+  a file the wrong name, or a performance number based on averages that hid stutter you could see while playing.
+- Nobody has audited every line by hand. Have a look before you rely on it, and treat the numbers in the docs as
+  measurements on one PC, not promises.
 
 ## Building from source
 
-`tools/install-native.ps1` (see [Quick start](#quick-start)) is all a player needs. For development:
+`tools/install-native.ps1` (see [Quick start](#quick-start)) is all you need to play. If you want to hack on it:
 
 ```powershell
 pwsh tools/build.ps1 -Preset dev                  # build (optimised, with debug info) + run the tests
@@ -223,18 +223,17 @@ pwsh tools/native-test.ps1 -Until 60 -FastBoot -ShotAt "40"   # scripted run wit
 ```
 
 The recompiler needs LLVM (`tools/fetch-llvm.ps1` + `tools/build-llvm.ps1`; Apache 2.0 with LLVM Exceptions); without
-it everything else builds and the translator and its tests are left out. The reference launcher needs the Play! source
-(`tools/fetch-play.ps1`, BSD 2-Clause). Tests that need a real dump look for it in
+it everything else still builds and the translator and its tests are skipped. The reference launcher needs the Play!
+source (`tools/fetch-play.ps1`, BSD 2-Clause). Tests that need a real dump look for it in
 `ROM\Need for Speed - Hot Pursuit 2 (USA)\` or in the `HP2_ROM_DIR` environment variable, and are skipped otherwise.
-Development switches for the native game (`HP2_*` environment variables) are listed in [`CLAUDE.md`](CLAUDE.md) and
-the ADRs.
+Debugging switches for the native game are listed in [`CONTRIBUTING.md`](CONTRIBUTING.md#development-switches).
 
 <details>
-<summary><b>The reference launcher (emulator-backed)</b> — the project's first milestone, kept for comparison</summary>
+<summary><b>The reference launcher (emulator-based)</b> — where the project started, kept for comparison</summary>
 
-Before the native game, the project's first build ran the original PS2 program inside the open-source
-[Play!](https://github.com/jpd002/Play-) emulator core, linked into a launcher. It is kept as the *reference* the native
-game is checked against; it is not the goal, and its window title says it is emulator-backed.
+Before the native game existed, the project's first build ran the original PS2 program inside the open-source
+[Play!](https://github.com/jpd002/Play-) emulator core. It's kept as the *reference* the native game is checked
+against — not the goal — and its window title says it's emulator-based.
 
 1. Build it: `pwsh tools/fetch-play.ps1`, then `pwsh tools/build.ps1 -Preset release`.
 2. Run `HotPursuit2PC.exe` (or `hp2pc-cli.exe`) from `.cache\build\release\converter\` in an empty folder, select your
@@ -249,13 +248,13 @@ only, races at 30 fps.
 
 </details>
 
-## Repository layout
+## What's where
 
 | Path | Contents |
 |---|---|
-| [`native/`](native/) | The native game: runtime, kernel and I/O services, GS (software and Direct3D 11), sound mixer, settings menu |
-| [`launcher/`](launcher/) | The player's launcher: first-run setup from your disc, Play, settings, memory card backups, screenshots |
-| [`recomp/`](recomp/) | Static recompiler: executable reader, R5900 decoder, function discovery, LLVM translator for the CPU and VU1, packaging |
+| [`native/`](native/) | The native game: runtime, kernel and I/O services, graphics (software and Direct3D 11), sound mixer, settings menu |
+| [`launcher/`](launcher/) | The launcher: first-run setup from your disc, Play, settings, memory card backups, screenshots |
+| [`recomp/`](recomp/) | The static recompiler: program reader, R5900 decoder, function discovery, LLVM translator for the CPU and VU1, packaging |
 | [`engine/`](engine/) | The reference launcher and the virtual disc |
 | [`converter/`](converter/) | Converter core, CLI and GUI; disc-image builder |
 | [`assets-pipeline/`](assets-pipeline/) | Library and tool for the disc's containers (directory, hash, LZC, unpack, inventory) |
@@ -267,35 +266,37 @@ only, races at 30 fps.
 
 | Document | What it is |
 |---|---|
-| [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) | Step-by-step: from your disc to playing, recommended settings, troubleshooting |
-| [`docs/STATUS.md`](docs/STATUS.md) | Where the project stands, what is next, open questions |
-| [`docs/adr/`](docs/adr/) | Architecture decision records, each with the options that were rejected |
+| [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) | Step by step from your disc to playing, recommended settings, troubleshooting |
+| [`docs/STATUS.md`](docs/STATUS.md) | Where the project stands, what's next, open questions |
+| [`docs/adr/`](docs/adr/) | Design decisions, each with the options that were turned down |
 | [`docs/recomp-analysis.md`](docs/recomp-analysis.md) | How the game program and its services work, as measured while building the native game |
 | [`docs/dump-analysis.md`](docs/dump-analysis.md) | Byte-level findings about the disc and the full file inventory |
-| [`docs/prior-art.md`](docs/prior-art.md) | Every third-party source consulted or used, with its license and what was taken |
-| [`docs/gate-reports/`](docs/gate-reports/) | End-of-phase reports: verified, not verified, what the owner must decide |
-| [`docs/brief.md`](docs/brief.md) | The original project brief and constraints |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Rules, workflow, tests, code style |
+| [`docs/prior-art.md`](docs/prior-art.md) | Every third-party source looked at or used, with its license and what was taken |
+| [`docs/gate-reports/`](docs/gate-reports/) | End-of-phase reports: verified, not verified, what had to be decided |
+| [`docs/brief.md`](docs/brief.md) | The original project brief and its ground rules |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Rules, workflow, tests, code style, debugging switches |
 
 ## Roadmap
 
-Decided in [ADR 0006](docs/adr/0006-recompilation-main-line.md): static recompilation of the game program and its
-vector-unit microprograms, host services instead of emulated hardware, a modern renderer, native audio. All four
-stages are in the native game today. Next, roughly in order:
+The big plan ([ADR 0006](docs/adr/0006-recompilation-main-line.md)) was static recompilation of the game and its
+vector-unit microprograms, PC services instead of emulated hardware, a modern renderer and native audio. All four are
+in the native game today. What's next, roughly in this order:
 
-- [ ] Memory card saves (as PC save files)
-- [ ] Reverb and real envelopes in the sound mixer
+- [ ] Memory card saves you can count on (as PC save files)
+- [ ] Reverb and proper envelopes in the sound mixer
 - [ ] Depth fog and mipmaps on the GPU renderer
-- [ ] DualShock 2 pressure, rumble, steering wheels
-- [ ] A friendlier installer than a PowerShell script
+- [ ] Pressure-sensitive buttons, rumble, steering wheels
+- [ ] Sharper text and textures
+- [ ] A ready-to-run download, so you don't need the build tools
 - [ ] Motion smoothing above 60 fps
 
-This is a long road and there is no promise of dates.
+It's a long road, so no dates — it's done when it's done.
 
 ## Contributing
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/STATUS.md`](docs/STATUS.md) first. Two rules are absolute: never
-commit game data (CI rejects it), and never state something about the disc or the game without the evidence for it.
+Help is very welcome! Have a look at [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/STATUS.md`](docs/STATUS.md)
+first. Two rules are non-negotiable: never commit game data (CI will reject it), and never claim something about the
+disc or the game without the evidence to back it up.
 
 ## License and credits
 
@@ -304,7 +305,7 @@ The code and documentation in this repository are released under the [MIT Licens
 - **Game patches** — the 16:9 and 60 fps values come from the community patch file for this disc in
   [PCSX2/pcsx2_patches](https://github.com/PCSX2/pcsx2_patches) (`SLUS-20362_1D2818AF.pnach`): *Widescreen 16:9* by
   **nemesis2000**, *HUD fixed for widescreen* by **Aero_**, *60 FPS* by **asasega**. Only the addresses and values
-  were used, re-implemented as switchable patch points; thank you.
+  were used, re-implemented as switchable patch points. Thank you!
 - **LLVM** (Apache 2.0 with LLVM Exceptions) — the recompiler's code generator, built from source by the tools scripts.
 - **Play!** by Jean-Philip Desjardins (BSD 2-Clause) — the reference launcher's emulator core, statically linked with
   the libraries it bundles: Play! Framework and CodeGen (BSD 2-Clause), libchdr (BSD 3-Clause), LZMA SDK (public
