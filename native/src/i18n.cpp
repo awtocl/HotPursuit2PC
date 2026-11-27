@@ -196,6 +196,18 @@ const Row kRows[] = {
      L"Ajoute du contraste aux contours. Désactivé ou Faible convient à la plupart des écrans ; plus haut peut faire scintiller les bords.",
      L"Verstärkt den Kontrast an Kanten. Aus oder Niedrig passt zu den meisten Bildschirmen; höhere Werte können Kanten flimmern lassen.",
      L"Aggiunge contrasto ai bordi. Disattivo o Basso va bene per quasi tutti gli schermi; valori più alti possono far tremolare i bordi."},
+    {L"Smooths jagged edges (FXAA). Works at every internal resolution; at the highest ones the picture is already "
+     L"smooth, so the difference is small.",
+     L"Suaviza los bordes dentados (FXAA). Funciona con cualquier resolución interna; en las más altas la imagen ya se ve "
+     L"suave, así que la diferencia es pequeña.",
+     L"Suaviza as bordas serrilhadas (FXAA). Funciona em qualquer resolução interna; nas mais altas a imagem já fica "
+     L"suave, então a diferença é pequena.",
+     L"Adoucit les bords en escalier (FXAA). Fonctionne à toutes les résolutions internes ; aux plus hautes, l'image est "
+     L"déjà lisse et la différence est faible.",
+     L"Glättet treppenartige Kanten (FXAA). Wirkt bei jeder internen Auflösung; bei den höchsten ist das Bild schon "
+     L"glatt, der Unterschied ist also gering.",
+     L"Ammorbidisce i bordi seghettati (FXAA). Funziona con ogni risoluzione interna; con le più alte l'immagine è già "
+     L"liscia, quindi la differenza è minima."},
     {L"Darkens alternate lines like a CRT television.", L"Oscurece líneas alternas como un televisor de tubo.",
      L"Escurece linhas alternadas como uma TV de tubo.", L"Assombrit une ligne sur deux comme un téléviseur cathodique.",
      L"Dunkelt jede zweite Zeile ab wie ein Röhrenfernseher.", L"Scurisce le righe alterne come un televisore a tubo catodico."},
@@ -231,6 +243,7 @@ const Row kRows[] = {
     {L"V-Sync", L"Sincronización vertical", L"V-Sync", L"Synchro verticale", L"V-Sync", L"V-Sync"},
     {L"Scaling filter", L"Filtro de escalado", L"Filtro de escala", L"Filtre de mise à l'échelle", L"Skalierungsfilter", L"Filtro di scala"},
     {L"Aspect ratio", L"Relación de aspecto", L"Proporção", L"Format d'image", L"Seitenverhältnis", L"Formato"},
+    {L"Anti-aliasing", L"Antialiasing", L"Antisserrilhado", L"Anticrénelage", L"Kantenglättung", L"Antialiasing"},
     {L"Sharpening", L"Nitidez", L"Nitidez", L"Netteté", L"Schärfe", L"Nitidezza"},
     {L"Scanlines", L"Líneas de barrido", L"Scanlines", L"Lignes de balayage", L"Scanlines", L"Scanline"},
     {L"Controller layout", L"Esquema del mando", L"Layout do controle", L"Disposition manette", L"Controller-Belegung", L"Configurazione controller"},

@@ -572,9 +572,11 @@ const SettingRow kRows[] = {
     {5, L"How the picture is scaled to your screen. Sharp bilinear keeps it crisp without jagged edges."},
     {7, L"Adds contrast to edges. Off or Low suits most screens; higher values can make edges shimmer."},
     {8, L"Darkens alternate lines like a CRT television."},
+    {9, L"Smooths jagged edges (FXAA). Works at every internal resolution; at the highest ones the picture is already "
+        L"smooth, so the difference is small."},
     {0, L"GPU draws the game with your graphics card (fast, with every picture option). Software is a slower reference "
         L"kept for comparison."},
-    {10, L"The language of the launcher and of the in-game settings menu. The game's own text stays as it is on your disc."},
+    {11, L"The language of the launcher and of the in-game settings menu. The game's own text stays as it is on your disc."},
     {-1, L"What happens when you quit the game: come back to this launcher, or close it too."},
 };
 constexpr int kRowCount = static_cast<int>(sizeof kRows / sizeof kRows[0]);
@@ -596,13 +598,13 @@ std::wstring RowLabel(int r) {
 }
 
 void PaintSettings(Graphics& gr) {
-  const float x = kIn0, w = 590, rh = 34;
+  const float x = kIn0, w = 590, rh = 32;
   float y = 154;
   int focusedRow = -1;
   for (int r = 0; r < kRowCount; ++r) {
     if (r == 0 || r == kRowCount - 2) {
       Section(gr, r == 0 ? L"Picture" : L"General", x, y, 300);
-      y += 26;
+      y += 24;
     }
     const RectF row(x, y, w, rh - 3);
     const bool f = Add(kSetRow + r, row, r, 0, true);

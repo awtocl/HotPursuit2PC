@@ -31,6 +31,7 @@ const Item kItems[] = {
     {L"aspect_ratio", L"Aspect ratio", &Settings::aspect, 4, {L"16:9", L"4:3", L"4:3 integer scale", L"Stretch"}},
     {L"sharpen", L"Sharpening", &Settings::sharpen, 4, {L"Off", L"Low", L"Medium", L"High"}},
     {L"scanlines", L"Scanlines", &Settings::scanlines, 3, {L"Off", L"Light", L"Strong"}},
+    {L"antialiasing", L"Anti-aliasing", &Settings::antialias, 2, {L"Off", L"FXAA"}},
     {L"controller_layout", L"Controller layout", &Settings::padLayout, 3, {L"Classic (PS2)", L"Modern (triggers)", L"Custom"}},
     {L"language", L"Language", &Settings::language, 6, {L"English", L"Español", L"Português (Brasil)", L"Français", L"Deutsch", L"Italiano"}},
 };
@@ -63,6 +64,9 @@ Settings Load() {
   i18n::Set(s.language);
   if (const char* e = std::getenv("HP2_ASPECT")) s.aspect = std::clamp(std::atoi(e), 0, 3);  // tests: without touching the file
   if (const char* e = std::getenv("HP2_FPS")) s.frameRate = std::atoi(e) >= 60 ? 1 : 0;
+  if (const char* e = std::getenv("HP2_AA")) s.antialias = std::clamp(std::atoi(e), 0, 2);  // 2: right half only
+  if (const char* e = std::getenv("HP2_RES")) s.resolution = std::clamp(std::atoi(e), 0, 5);  // 0 1x ... 5 8x
+  if (const char* e = std::getenv("HP2_VSYNC")) s.vsync = std::atoi(e) ? 1 : 0;
   return s;
 }
 

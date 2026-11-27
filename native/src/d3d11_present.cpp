@@ -39,6 +39,7 @@ ID3D11RenderTargetView* g_rtv = nullptr;
 ID3D11VertexShader* g_vs = nullptr;
 ID3D11PixelShader* g_psFrame = nullptr;
 ID3D11PixelShader* g_psOverlay = nullptr;
+ID3D11PixelShader* g_psFxaa = nullptr;  // optional: without it the anti-aliasing setting does nothing
 ID3D11SamplerState* g_point = nullptr;
 ID3D11SamplerState* g_linear = nullptr;
 ID3D11BlendState* g_premul = nullptr;
@@ -60,6 +61,12 @@ struct Tex {
   ID3D11ShaderResourceView* srv = nullptr;
   int w = 0, h = 0;
 } g_frame, g_overlay;
+struct Target {  // the anti-aliased picture (PSFxaa's output, the size of the game's picture)
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+  int w = 0, h = 0;
+} g_aa;
 
 const char kHlsl[] = R"(
 Texture2D src : register(t0);
@@ -68,7 +75,7 @@ SamplerState linearS : register(s1);
 cbuffer Params : register(b0) {
   float4 srcSize;  // w, h, 1/w, 1/h
   float4 dstSize;  // viewport w, h
-  float4 prm;      // filter (0 sharp bilinear, 1 bilinear, 2 nearest), sharpen amount, scanline strength
+  float4 prm;      // filter (0 sharp bilinear, 1 bilinear, 2 nearest), sharpen amount, scanline strength, AA split (tests)
 };
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 V VS(uint id : SV_VertexID) {
@@ -116,6 +123,52 @@ float4 PSFrame(V i) : SV_Target {
   return float4(saturate(c), 1);
 }
 float4 PSOverlay(V i) : SV_Target { return src.SampleLevel(pointS, i.uv, 0); }
+// Anti-aliasing (FXAA-style, on the game's picture at its own size): where the brightness changes sharply, find the edge's
+// direction and how far it runs each way, then sample across it by the pixel's place along the edge (stairs become ramps);
+// single-pixel specks get a small blend with their neighbours.
+float Luma(float2 uv) { return dot(src.SampleLevel(linearS, uv, 0).rgb, float3(0.299, 0.587, 0.114)); }
+float4 PSFxaa(V i) : SV_Target {
+  const float2 px = srcSize.zw, uv = i.uv;
+  const float3 rgbM = src.SampleLevel(pointS, uv, 0).rgb;
+  const float lM = dot(rgbM, float3(0.299, 0.587, 0.114));
+  const float lN = Luma(uv + float2(0, -px.y)), lS = Luma(uv + float2(0, px.y));
+  const float lW = Luma(uv + float2(-px.x, 0)), lE = Luma(uv + float2(px.x, 0));
+  const float lMax = max(lM, max(max(lN, lS), max(lW, lE))), lMin = min(lM, min(min(lN, lS), min(lW, lE)));
+  const float range = lMax - lMin;
+  if (range < max(0.0312, lMax * 0.125) || (prm.w > 0.5 && uv.x < 0.5)) return float4(rgbM, 1);  // flat: nothing to smooth
+  const float lNW = Luma(uv - px), lSE = Luma(uv + px);
+  const float lNE = Luma(uv + float2(px.x, -px.y)), lSW = Luma(uv + float2(-px.x, px.y));
+  float sub = saturate(abs((2 * (lN + lS + lW + lE) + lNW + lNE + lSW + lSE) / 12 - lM) / range);
+  sub = smoothstep(0, 1, sub);
+  sub = sub * sub * 0.75;
+  const float edgeH = abs(lNW + lNE - 2 * lN) + 2 * abs(lW + lE - 2 * lM) + abs(lSW + lSE - 2 * lS);
+  const float edgeV = abs(lNW + lSW - 2 * lW) + 2 * abs(lN + lS - 2 * lM) + abs(lNE + lSE - 2 * lE);
+  const bool horz = edgeH >= edgeV;  // the edge runs left-right (it separates this pixel from the one above or below)
+  const float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+  const float g1 = abs(l1 - lM), g2 = abs(l2 - lM);
+  float across = horz ? px.y : px.x, lEdge, gScaled;
+  if (g1 >= g2) { across = -across; lEdge = 0.5 * (l1 + lM); gScaled = 0.25 * g1; }
+  else { lEdge = 0.5 * (l2 + lM); gScaled = 0.25 * g2; }
+  float2 edge = uv;  // on the edge between the two pixels
+  if (horz) edge.y += across * 0.5; else edge.x += across * 0.5;
+  const float2 along = horz ? float2(px.x, 0) : float2(0, px.y);
+  float2 p1 = edge - along, p2 = edge + along;
+  float e1 = Luma(p1) - lEdge, e2 = Luma(p2) - lEdge;
+  bool end1 = abs(e1) >= gScaled, end2 = abs(e2) >= gScaled;
+  static const float kStep[11] = {1, 1, 1, 1, 1.5, 2, 2, 2, 2, 4, 8};
+  [unroll] for (int k = 0; k < 11; ++k) {
+    if (!end1) { p1 -= along * kStep[k]; e1 = Luma(p1) - lEdge; end1 = abs(e1) >= gScaled; }
+    if (!end2) { p2 += along * kStep[k]; e2 = Luma(p2) - lEdge; end2 = abs(e2) >= gScaled; }
+  }
+  const float d1 = horz ? uv.x - p1.x : uv.y - p1.y, d2 = horz ? p2.x - uv.x : p2.y - uv.y;
+  const bool nearer1 = d1 < d2;
+  const float offset = 0.5 - min(d1, d2) / (d1 + d2);
+  const bool bends = ((nearer1 ? e1 : e2) < 0) != (lM < lEdge);  // the edge's nearer end bends this pixel's way
+  const float amount = max(bends ? offset : 0, sub);
+  float2 at = uv;
+  if (horz) at.y += amount * across; else at.x += amount * across;
+  return float4(src.SampleLevel(linearS, at, 0).rgb, 1);
+}
 // Full-screen movies: the bounds of the picture's non-black part (every 4th pixel), as min x, min y, ~max x, ~max y (all
 // minimums: a buffer clear writes one value to every element).
 RWBuffer<uint> bounds : register(u0);
@@ -180,6 +233,33 @@ bool Upload(Tex& t, const std::uint32_t* pixels, int w, int h) {
     std::memcpy(static_cast<std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch, pixels + static_cast<std::size_t>(y) * w,
                 static_cast<std::size_t>(w) * 4);
   g_ctx->Unmap(t.tex, 0);
+  return true;
+}
+
+bool MakeAaTarget(int w, int h) {
+  if (g_aa.tex && g_aa.w == w && g_aa.h == h) return true;
+  Release(g_aa.rtv);
+  Release(g_aa.srv);
+  Release(g_aa.tex);
+  g_aa.w = g_aa.h = 0;
+  D3D11_TEXTURE2D_DESC d = {};
+  d.Width = static_cast<UINT>(w);
+  d.Height = static_cast<UINT>(h);
+  d.MipLevels = 1;
+  d.ArraySize = 1;
+  d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  d.SampleDesc.Count = 1;
+  d.Usage = D3D11_USAGE_DEFAULT;
+  d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+  if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_aa.tex)) || FAILED(g_dev->CreateShaderResourceView(g_aa.tex, nullptr, &g_aa.srv)) ||
+      FAILED(g_dev->CreateRenderTargetView(g_aa.tex, nullptr, &g_aa.rtv))) {
+    Release(g_aa.rtv);
+    Release(g_aa.srv);
+    Release(g_aa.tex);
+    return false;
+  }
+  g_aa.w = w;
+  g_aa.h = h;
   return true;
 }
 
@@ -392,6 +472,11 @@ bool Init(HWND__* window) {
     }
     Release(cs);
   }
+  {  // anti-aliasing (optional)
+    ID3DBlob* ps = nullptr;
+    if (Compile(compile, "PSFxaa", "ps_5_0", &ps)) g_dev->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &g_psFxaa);
+    Release(ps);
+  }
   ID3DBlob *vs = nullptr, *psF = nullptr, *psO = nullptr;
   ok = Compile(compile, "VS", "vs_5_0", &vs) && Compile(compile, "PSFrame", "ps_5_0", &psF) && Compile(compile, "PSOverlay", "ps_5_0", &psO) &&
        SUCCEEDED(g_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_vs)) &&
@@ -436,6 +521,11 @@ void Shutdown() {
   Release(g_frame.tex);
   Release(g_overlay.srv);
   Release(g_overlay.tex);
+  Release(g_aa.rtv);
+  Release(g_aa.srv);
+  Release(g_aa.tex);
+  g_aa.w = g_aa.h = 0;
+  Release(g_psFxaa);
   Release(g_cb);
   for (ID3D11Buffer*& b : g_boundsStaging) Release(b);
   Release(g_boundsUav);
@@ -576,14 +666,29 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
       static const float kSharpen[4] = {0.0f, 0.35f, 0.7f, 1.1f}, kScan[3] = {0.0f, 0.35f, 0.7f};
       const float p[12] = {static_cast<float>(pw), static_cast<float>(ph), 1.0f / static_cast<float>(pw),
                            1.0f / static_cast<float>(ph), vw, vh, 0, 0, static_cast<float>(s.filter), kSharpen[s.sharpen & 3],
-                           kScan[std::min(s.scanlines, 2)], 0};
+                           kScan[std::min(s.scanlines, 2)], s.antialias == 2 ? 1.0f : 0.0f};  // (HP2_AA=2: right half only)
       std::memcpy(m.pData, p, sizeof p);
       g_ctx->Unmap(g_cb, 0);
     }
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    ID3D11ShaderResourceView* shown = picture;
+    ID3D11ShaderResourceView* none = nullptr;
+    if (s.antialias && g_psFxaa && MakeAaTarget(pw, ph)) {  // edges smoothed at the picture's own size, then scaled as usual
+      const D3D11_VIEWPORT whole = {0, 0, static_cast<float>(pw), static_cast<float>(ph), 0, 1};
+      g_ctx->OMSetRenderTargets(1, &g_aa.rtv, nullptr);
+      g_ctx->RSSetViewports(1, &whole);
+      g_ctx->PSSetShader(g_psFxaa, nullptr, 0);
+      g_ctx->PSSetShaderResources(0, 1, &picture);
+      g_ctx->Draw(3, 0);
+      g_ctx->PSSetShaderResources(0, 1, &none);
+      g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+      g_ctx->RSSetViewports(1, &vp);
+      shown = g_aa.srv;
+    }
     g_ctx->PSSetShader(g_psFrame, nullptr, 0);
-    g_ctx->PSSetShaderResources(0, 1, &picture);
+    g_ctx->PSSetShaderResources(0, 1, &shown);
     g_ctx->Draw(3, 0);
+    g_ctx->PSSetShaderResources(0, 1, &none);  // (g_aa is a render target again next frame)
   }
   if (overlay && g_overlay.srv && g_overlay.w == cw && g_overlay.h == ch) {
     D3D11_VIEWPORT vp = {0, 0, static_cast<float>(cw), static_cast<float>(ch), 0, 1};

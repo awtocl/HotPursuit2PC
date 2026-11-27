@@ -1,6 +1,6 @@
 // Direct3D 11 presenter of the native runtime (ADR 0013, stage 1). Owned by the window thread: the PS2 frame is uploaded as a
-// texture and drawn with a post-processing shader (scaling filter, aspect, sharpening, scanlines); the settings overlay is
-// blended on top. No D3D types leave d3d11_present.cpp.
+// texture, optionally anti-aliased (FXAA), and drawn with a post-processing shader (scaling filter, aspect, sharpening,
+// scanlines); the settings overlay is blended on top. No D3D types leave d3d11_present.cpp.
 #pragma once
 #include <cstdint>
 
