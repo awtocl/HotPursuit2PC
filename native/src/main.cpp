@@ -46,6 +46,7 @@
 #include "hp2/io.h"
 #include "hp2/native_state.h"
 #include "hp2/r5900.h"
+#include "controls.h"
 
 using namespace hp2;
 
@@ -1104,6 +1105,21 @@ void Syscall(NativeState& s) {
       Log("kernel: game system call %d installed at %08X", num, A(s, 1));
       return;
     }
+    case 0x4A: case 0x4B: {  // SetOsdConfigParam(in) / GetOsdConfigParam(out): the console's settings word
+      // bits: 0 SPDIF, 1-2 screen type, 3 video output, 4 "Japanese language" flag (1 = not Japanese), 5-12 PS1 driver,
+      // 13-15 version, 16-20 language (0 ja, 1 en, 2 fr, 3 es, 4 de, 5 it, 6 nl, 7 pt), 21-31 time zone.
+      // Kept like a console's kernel keeps it: the game's library (0028B2D0) writes version 1 and reads it back to tell
+      // an old console (whose kernel then needs a patch at 0x80074000) from a newer one. English. (This North American
+      // game does not take its text language from here: its loader 0021E0D0 picks LANGUAGES\FE_*.BIN from the table at
+      // 0031C168 - 0 en, 1 fr, 2 de, 3 it, 4 es, 5 sv - by an index it keeps itself; what sets it is not found yet.)
+      static std::uint32_t config = (1u << 16) | (1u << 13) | (1u << 4);
+      if (InRam(A(s, 0), 4)) {
+        if (n == 0x4A) config = Rd<std::uint32_t>(A(s, 0));
+        else Wr<std::uint32_t>(A(s, 0), config);
+      }
+      Ret(s, 0);
+      return;
+    }
     case 0x7C: Ret(s, -1); return;  // Deci2Call: no debugger attached
     case 0x64: case 0x68: Ret(s, 0); return;  // FlushCache: nothing to flush in translated code
     case 0x70: Ret(s, static_cast<std::int32_t>(g_hw[0x12001010])); return;  // GsGetIMR
@@ -1523,6 +1539,7 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
 struct PadPort { std::uint32_t address = 0; int type = 0; } g_pad[2];  // type 0: 0x40-byte structs, 1: 0x80-byte structs, 2: extended layout
 std::uint16_t g_padButtons = 0xFFFF;                                   // 0 = pressed
 std::uint8_t g_padAxes[4] = {0x7F, 0x7F, 0x7F, 0x7F};                  // right x, right y, left x, left y
+std::uint8_t g_padPressure[16] = {};                                    // per bit of g_padButtons: 0..255 while pressed
 std::uint64_t g_padOpens = 0;
 
 void PadWrite(const PadPort& p, int index) {  // fill struct `index` of the pad area
@@ -1538,7 +1555,11 @@ void PadWrite(const PadPort& p, int index) {  // fill struct `index` of the pad 
   for (int i = 0; i < 4; ++i) b[data + 4 + i] = g_padAxes[i];
   {  // pressure bytes (DualShock): right, left, up, down, triangle, circle, cross, square, L1, R1, L2, R2: 0xFF while pressed
     static const std::uint16_t order[12] = {0x20, 0x80, 0x10, 0x40, 0x1000, 0x2000, 0x4000, 0x8000, 0x400, 0x800, 0x100, 0x200};
-    for (int i = 0; i < 12; ++i) b[data + 8 + i] = (g_padButtons & order[i]) ? 0x00 : 0xFF;
+    for (int i = 0; i < 12; ++i) {
+      int bit = 0;
+      while ((1u << bit) != order[i]) ++bit;
+      b[data + 8 + i] = (g_padButtons & order[i]) ? 0x00 : (g_padPressure[bit] ? g_padPressure[bit] : 0xFF);
+    }
   }
   const std::size_t state = p.type == 2 ? 0x70 : 4;
   b[state] = 6;      // stable
@@ -1589,37 +1610,43 @@ void PadPoll() {
     HMODULE m = LoadLibraryW(L"xinput1_4.dll");
     return m ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(m, "XInputGetState")) : nullptr;
   }();
+  // The layouts (controls.h, hp2native.ini next to the executable): read once; the F1 menu switches the controller's.
+  static const ctl::Config controls = [] {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    return ctl::Load((std::filesystem::path(exe).parent_path() / L"hp2native.ini").wstring());
+  }();
   std::uint16_t pressed = 0;  // 1 = pressed, in the PS2 bit order
-  std::uint8_t axes[4] = {0x7F, 0x7F, 0x7F, 0x7F};
-  auto key = [&](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+  std::uint8_t pressure[16] = {};  // per PS2 bit position: how far it is pressed (keys and buttons 255; triggers by travel)
+  std::uint8_t axes[4] = {0x7F, 0x7F, 0x7F, 0x7F};  // right x, right y, left x, left y (0 = left / up)
+  auto press = [&](int action, int amount) {
+    const std::uint16_t bit = ctl::Ps2Bit(action);
+    pressed = static_cast<std::uint16_t>(pressed | bit);
+    for (int b = 0; b < 16; ++b)
+      if (bit == (1u << b)) pressure[b] = static_cast<std::uint8_t>(std::max<int>(pressure[b], amount));
+  };
+  auto key = [&](int vk) { return vk && (GetAsyncKeyState(vk) & 0x8000) != 0; };
   if (gs::WindowFocused()) {
-    if (key(VK_BACK) || key(VK_RSHIFT)) pressed |= 0x0001;  // select
-    if (key(VK_RETURN) || key(VK_SPACE)) pressed |= 0x0008; // start
-    if (key(VK_UP)) pressed |= 0x0010;
-    if (key(VK_RIGHT)) { pressed |= 0x0020; axes[2] = 0xFF; }
-    if (key(VK_DOWN)) pressed |= 0x0040;
-    if (key(VK_LEFT)) { pressed |= 0x0080; axes[2] = 0x00; }
-    if (key('1')) pressed |= 0x0100;  // L2
-    if (key('2')) pressed |= 0x0200;  // R2
-    if (key('Q')) pressed |= 0x0400;  // L1
-    if (key('W')) pressed |= 0x0800;  // R1
-    if (key('S')) pressed |= 0x1000;  // triangle
-    if (key('X')) pressed |= 0x2000;  // circle
-    if (key('Z')) pressed |= 0x4000;  // cross
-    if (key('A')) pressed |= 0x8000;  // square
+    const auto keys = controls.Keys();
+    for (int a = 0; a < ctl::kActionCount; ++a)
+      if (key(keys[a][0]) || key(keys[a][1])) press(a, 255);
+    if (pressed & 0x0020) axes[2] = 0xFF;  // keyboard steering: full lock on the left stick too
+    if (pressed & 0x0080) axes[2] = 0x00;
   }
   if (xinput) {
     struct { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; } st = {};
     if (xinput(0, &st) == 0) {
-      struct PadMap { unsigned xi, ps; };
-      static const PadMap map[] = {{0x0001, 0x0010}, {0x0008, 0x0020}, {0x0002, 0x0040}, {0x0004, 0x0080}, {0x0010, 0x0008},
-                                                            {0x0020, 0x0001}, {0x0040, 0x0002}, {0x0080, 0x0004}, {0x0100, 0x0400}, {0x0200, 0x0800},
-                                                            {0x1000, 0x4000}, {0x2000, 0x2000}, {0x4000, 0x8000}, {0x8000, 0x1000}};
-      for (const PadMap& m : map) if (st.buttons & m.xi) pressed = static_cast<std::uint16_t>(pressed | m.ps);
-      if (st.lt > 100) pressed |= 0x0100;
-      if (st.rt > 100) pressed |= 0x0200;
+      ctl::Config c = controls;
+      if (ctl::ActivePadLayout() >= 0) c.padLayout = ctl::ActivePadLayout();
+      const auto pad = c.Pad();
+      const ctl::PadState ps{st.buttons, st.lt, st.rt, st.lx, st.ly, st.rx, st.ry};
+      for (int a = 0; a < ctl::kActionCount; ++a)
+        for (int k = 0; k < ctl::kBindings; ++k) {
+          const int amount = pad[a][k] == ctl::kNone ? 0 : ctl::Amount(ps, pad[a][k]);
+          if (amount > 40) press(a, amount);  // a trigger counts from a light pull; its travel is the button's pressure
+        }
       auto axis = [](SHORT v, bool invert) { int a = (v + 32768) >> 8; if (invert) a = 255 - a; return static_cast<std::uint8_t>(a < 0 ? 0 : a > 255 ? 255 : a); };
-      if (std::abs(st.lx) > 7000) axes[2] = axis(st.lx, false);
+      if (std::abs(st.lx) > 7000) axes[2] = axis(st.lx, false);  // the sticks pass through (the left one steers)
       if (std::abs(st.ly) > 7000) axes[3] = axis(st.ly, true);
       if (std::abs(st.rx) > 7000) axes[0] = axis(st.rx, false);
       if (std::abs(st.ry) > 7000) axes[1] = axis(st.ry, true);
@@ -1640,8 +1667,15 @@ void PadPoll() {
         const std::size_t at = item.find('@'), dash = item.find('-');
         if (at != std::string::npos && dash != std::string::npos) {
           const double from = atof(item.c_str() + at + 1), to = atof(item.c_str() + dash + 1);
-          if (now >= from && now < to)
-            for (const NamedBit& nb : names) if (item.compare(0, at, nb.name) == 0) pressed = static_cast<std::uint16_t>(pressed | nb.bit);
+          if (now >= from && now < to) {
+            for (const NamedBit& nb : names)
+              if (item.compare(0, at, nb.name) == 0) {
+                pressed = static_cast<std::uint16_t>(pressed | nb.bit);
+                static const int force = [] { const char* e = getenv("HP2_PRESS_PRESSURE"); return e ? atoi(e) : 0; }();
+                for (int b = 0; b < 16; ++b)  // tests: how hard the scripted presses push (pressure-sensitive buttons)
+                  if (force > 0 && nb.bit == (1u << b)) pressure[b] = static_cast<std::uint8_t>(std::min(force, 255));
+              }
+          }
         }
         i = stop + 1;
       }
@@ -1828,6 +1862,7 @@ void PadPoll() {
   }
   g_padButtons = static_cast<std::uint16_t>(~pressed);
   memcpy(g_padAxes, axes, 4);
+  for (int b = 0; b < 16; ++b) g_padPressure[b] = pressure[b] ? pressure[b] : 0xFF;
   {  // like the real pad library: every vblank the I/O side fills the other of the two structs and gives it a newer frame number
     static std::uint32_t frame = 2;
     ++frame;

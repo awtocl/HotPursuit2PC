@@ -26,12 +26,16 @@
 #include <thread>
 #include <vector>
 
+#include "controls.h"
 #include "hp2_style.h"
+#include "i18n.h"
 #include "overlay.h"
 #include "tasks.h"
 
 using namespace Gdiplus;
 using namespace launcher;
+using i18n::F;
+using i18n::T;
 
 namespace {
 
@@ -44,7 +48,7 @@ constexpr UINT_PTR kTimer = 1;
 constexpr float kW = 1280, kH = 720;            // logical size; everything is laid out in these units
 constexpr float kTitleH = 36;                    // the window's own title bar
 
-enum class Page { Home, Settings, Saves, Screenshots, Setup, About, Count };
+enum class Page { Home, Settings, Controls, Saves, Screenshots, Setup, About, Count };
 enum class Step { Welcome, Disc, Copy, Check, Prepare, Ready };
 enum class Pkg { Unknown, Checking, Ok, Missing, Stale };
 
@@ -58,6 +62,7 @@ enum : int {
   kShotFolder = 60, kShot = 1000,                 // + screenshot
   kSetupCheck = 70, kSetupPrepare, kSetupDisc, kSetupFolder, kSetupShortcut, kJobCancel,
   kAboutProject = 80, kAboutGuide, kAboutReport, kAboutLog,
+  kCtlPad = 600, kCtlKeys, kCtlRestoreKeys, kCtlRestorePad, kCtlCell = 700,  // + action * 4 + column (key 1, key 2, pad 1, pad 2)
   kWizStart = 90, kWizFolder, kWizPlay, kWizLauncher, kWizRetry, kWizDrive = 300,  // + drive
 };
 
@@ -117,7 +122,15 @@ struct App {
   std::unique_ptr<Bitmap> bg;  // cached background (grid, strips) of the current size
   std::unique_ptr<Bitmap> viewerBmp;  // the screenshot shown full size
   std::wstring viewerPath;
-  DiscCheck disc;              // of cfg.disc (the quick check reads 3 MB: not at every frame)
+  DiscCheck disc;
+  std::wstring ini;  // hp2native.ini (the game's settings, next to the launcher)
+  ctl::Config ctl;   // the controls (controls.h)
+  struct Capture {   // "press a key / button" for one binding
+    int action = -1, slot = 0;
+    bool pad = false;
+    double since = 0;
+    ctl::PadState before;
+  } capture;              // of cfg.disc (the quick check reads 3 MB: not at every frame)
   int bgKey = -1;
   HDC memDc = nullptr;
   HBITMAP memBmp = nullptr;
@@ -175,11 +188,10 @@ void Toast(std::wstring s) {
   g.toastAt = Clock();
   g.dirty = true;
 }
-std::wstring Recommendation() {
-  return std::wstring(ui::Setting(1).names[g.recommended]) + L" for your " + std::to_wstring(g.screenW) + L" × " +
-         std::to_wstring(g.screenH) + L" screen";
-}
 const wchar_t* kQuality[] = {L"Original (1x)", L"Performance (2x)", L"Balanced (3x)", L"Quality (4x)", L"Ultra (6x)", L"Maximum (8x)"};
+std::wstring Recommendation() {
+  return F(L"{0} for your {1} × {2} screen", {T(kQuality[g.recommended]), std::to_wstring(g.screenW), std::to_wstring(g.screenH)});
+}
 
 void ReadScreen() {
   HMONITOR mon = MonitorFromWindow(g.wnd, MONITOR_DEFAULTTOPRIMARY);
@@ -383,7 +395,7 @@ void PaintBackground(Graphics& gr) {
 }
 
 // --------------------------------------------------------------------------------------------------- chrome ----
-const wchar_t* kPageTitles[] = {L"Hot Pursuit 2", L"Settings", L"Memory Card", L"Screenshots", L"Disc & Setup", L"About"};
+const wchar_t* kPageTitles[] = {L"Hot Pursuit 2", L"Settings", L"Controls", L"Memory Card", L"Screenshots", L"Disc & Setup", L"About"};
 
 void PaintTitleBar(Graphics& gr) {
   SolidBrush dark(Color(0xE6030507));
@@ -411,9 +423,9 @@ void PaintTitleBar(Graphics& gr) {
 void PaintPageTitle(Graphics& gr, const std::wstring& title) { st::Title(gr, title, 300, kStripY - 22, 62); }
 
 void PaintRail(Graphics& gr) {
-  const wchar_t* names[] = {L"Play", L"Settings", L"Memory Card", L"Screenshots", L"Disc & Setup", L"About"};
+  const wchar_t* names[] = {L"Play", L"Settings", L"Controls", L"Memory Card", L"Screenshots", L"Disc & Setup", L"About"};
   for (int i = 0; i < static_cast<int>(Page::Count); ++i) {
-    const RectF r(18, kPanelY + 8 + i * 54.0f, 240, 46);
+    const RectF r(18, kPanelY + 6 + i * 50.0f, 240, 44);
     const bool sel = static_cast<int>(g.page) == i;
     const bool f = Add(kRail + i, r, i, -1);
     st::Row(gr, r, sel || f);  // the page shown keeps its band; only the focus is orange (as in the game, one at a time)
@@ -427,6 +439,7 @@ void PaintTicker(Graphics& gr) {
   std::wstring s;
   if (g.job.running && g.job.job != Job::CheckPackage) s = g.job.Status();
   else if (g.wizard) s = L"Your disc is only read. Nothing is downloaded and nothing leaves this PC.";
+  else if (g.page == Page::Controls) s = L"Select a box and press a key or button for it. Esc cancels, Delete clears a key.";
   else if (g.pkg == Pkg::Checking) s = L"Checking the game files...";
   else if (g.pkg == Pkg::Stale || g.pkg == Pkg::Missing) s = L"The game needs preparing (about a minute) - press Play.";
   else s = L"Ready to race! In the game: F1 settings, F12 screenshot, Alt+Enter full screen.";
@@ -447,13 +460,13 @@ void PaintHints(Graphics& gr) {
   float x = 640;
   const float y = 684;
   if (g.controller) {
-    Hint(gr, x, y, L"A", L"Select", 0xFF6BBF59);
-    Hint(gr, x, y, L"B", L"Back", 0xFFD9453A);
+    Hint(gr, x, y, L"A", L"Choose", 0xFF6BBF59);
+    Hint(gr, x, y, L"B", L"Go back", 0xFFD9453A);
     if (!g.wizard) Hint(gr, x, y, L"LB RB", L"Pages", 0xFF8F959B);
     if (!g.wizard) Hint(gr, x, y, L"START", L"Play", 0xFF8F959B);
   } else {
-    Hint(gr, x, y, L"ENTER", L"Select", 0xFF8F959B);
-    Hint(gr, x, y, L"ESC", L"Back", 0xFF8F959B);
+    Hint(gr, x, y, L"ENTER", L"Choose", 0xFF8F959B);
+    Hint(gr, x, y, L"ESC", L"Go back", 0xFF8F959B);
     Hint(gr, x, y, L"← →", L"Change", 0xFF8F959B);
     if (!g.wizard) Hint(gr, x, y, L"PGUP PGDN", L"Pages", 0xFF8F959B);
   }
@@ -463,7 +476,7 @@ void PaintToast(Graphics& gr) {
   const double age = Clock() - g.toastAt;
   if (g.toast.empty() || age > 3.5) return;
   const float a = static_cast<float>(age > 3.0 ? (3.5 - age) / 0.5 : 1.0);
-  const float w = std::min(600.0f, st::PlainWidth(gr, g.toast, 16) + 48), h = 40, x = kPanelR - w - 16, y = kPanelB - h - 14;
+  const float w = std::min(940.0f, st::PlainWidth(gr, g.toast, 16) + 48), h = 40, x = kPanelR - w - 16, y = kPanelB - h - 14;
   SolidBrush b(Color(static_cast<BYTE>(235 * a), 30, 30, 30));
   gr.FillRectangle(&b, x, y, w, h);
   SolidBrush o(Color(static_cast<BYTE>(255 * a), 0xE4, 0x7C, 0x08));
@@ -501,8 +514,8 @@ void PaintHome(Graphics& gr) {
   }
   Button(gr, kHomeSettings, RectF(kIn0, 276, 290, 44), L"Settings", 1, 0, 23, true, Align::Left);
   Button(gr, kHomeFolder, RectF(kIn0 + 310, 276, 290, 44), L"Game Folder", 1, 1, 23, true, Align::Left);
-  const std::wstring stats = g.cfg.sessions ? L"Last played " + FormatAgo(g.cfg.lastPlayed) + L"   ·   " +
-                                                  FormatDuration(g.cfg.playedSeconds) + L" behind the wheel"
+  const std::wstring stats = g.cfg.sessions ? F(L"Last played {0}  ·  {1} behind the wheel",
+                                                {FormatAgo(g.cfg.lastPlayed), FormatDuration(g.cfg.playedSeconds)})
                                             : L"Not played yet - have a good race!";
   Body(gr, stats, RectF(kIn0 + 4, 330, 600, 26), hc::dim, 16, false);
 
@@ -519,8 +532,8 @@ void PaintHome(Graphics& gr) {
   if (g.pkg == Pkg::Ok) cell(L"Game prepared", 1);
   else if (g.pkg == Pkg::Checking || g.pkg == Pkg::Unknown) cell(L"Checking the game...", -1);
   else cell(g.pkg == Pkg::Missing ? L"Not prepared yet" : L"New version: prepare again", 0);
-  cell(std::wstring(kQuality[g.set.resolution]) + L"  ·  " + (g.set.frameRate ? L"60" : L"30") + L" fps  ·  " +
-           ui::Setting(6).names[g.set.aspect], -1);
+  cell(std::wstring(T(kQuality[g.set.resolution])) + L"  ·  " + (g.set.frameRate ? L"60" : L"30") + L" fps  ·  " +
+           T(ui::Setting(6).names[g.set.aspect]), -1);
 
   const float rx = kIn0 + 420, rw = kIn1 - rx;
   if (!g.problem.empty()) {
@@ -561,6 +574,7 @@ const SettingRow kRows[] = {
     {8, L"Darkens alternate lines like a CRT television."},
     {0, L"GPU draws the game with your graphics card (fast, with every picture option). Software is a slower reference "
         L"kept for comparison."},
+    {10, L"The language of the launcher and of the in-game settings menu. The game's own text stays as it is on your disc."},
     {-1, L"What happens when you quit the game: come back to this launcher, or close it too."},
 };
 constexpr int kRowCount = static_cast<int>(sizeof kRows / sizeof kRows[0]);
@@ -582,12 +596,12 @@ std::wstring RowLabel(int r) {
 }
 
 void PaintSettings(Graphics& gr) {
-  const float x = kIn0, w = 590, rh = 37;
+  const float x = kIn0, w = 590, rh = 34;
   float y = 154;
   int focusedRow = -1;
   for (int r = 0; r < kRowCount; ++r) {
-    if (r == 0 || r == kRowCount - 1) {
-      Section(gr, r == 0 ? L"Picture" : L"Launcher", x, y, 300);
+    if (r == 0 || r == kRowCount - 2) {
+      Section(gr, r == 0 ? L"Picture" : L"General", x, y, 300);
       y += 26;
     }
     const RectF row(x, y, w, rh - 3);
@@ -600,7 +614,7 @@ void PaintSettings(Graphics& gr) {
     std::wstring value = kRows[r].setting == 1   ? kQuality[v]
                          : kRows[r].setting < 0 ? (v ? L"Close the launcher" : L"Show the launcher")
                                                 : ui::Setting(kRows[r].setting).names[v];
-    if (f) value = L"‹  " + value + L"  ›";
+    if (f) value = L"‹  " + std::wstring(T(value.c_str())) + L"  ›";
     st::Item(gr, value, RectF(x + 270, y, w - 286, rh - 3), 21, f, Align::Right);
     if (kRows[r].setting == 1 && v == g.recommended)
       st::Outlined(gr, L"Recommended", RectF(x + w + 12, y, 140, rh - 3), st::ItemFamily(), FontStyleBold, 15, hc::orangeHi,
@@ -612,14 +626,97 @@ void PaintSettings(Graphics& gr) {
   const float hx = x + w + 30, hw = kIn1 - hx;
   if (focusedRow >= 0) {
     Section(gr, RowLabel(focusedRow), hx, 182, hw);
-    std::wstring help = kRows[focusedRow].help;
-    if (kRows[focusedRow].setting == 1) help += L"\n\nRecommended: " + Recommendation() + L".";
+    std::wstring help = T(kRows[focusedRow].help);
+    if (kRows[focusedRow].setting == 1) help += L"\n\n" + F(L"Recommended: {0}.", {Recommendation()});
     Body(gr, help, RectF(hx, 212, hw, 300), hc::text, 15.5f);
   } else {
     Body(gr, L"Pick a setting to see what it does.", RectF(hx, 182, hw, 60), hc::dim, 15.5f);
   }
   Body(gr, L"Saved in hp2native.ini in the game folder. In the game, F1 changes them while you play.", RectF(hx, 540, hw, 60),
        hc::faint, 14);
+}
+
+
+// ---- Controls: the layouts, every binding, "press a key / button", restore defaults ----
+const wchar_t* kPadLayouts[] = {L"Classic (PS2)", L"Modern (triggers)", L"Custom"};
+const wchar_t* kKeyLayouts[] = {L"Default", L"Custom"};
+
+void SaveControls() {
+  g.set.padLayout = g.ctl.padLayout;  // (the in-game menu's copy of the controller layout)
+  ui::Save(g.set);
+  ctl::Save(g.ini, g.ctl);
+}
+
+// Changing a binding while a preset is in use starts a custom layout from that preset.
+void Assign(bool pad, int action, int slot, int value) {
+  if (pad) {
+    if (g.ctl.padLayout != ctl::kPadCustom) {
+      g.ctl.customPad = g.ctl.padLayout == ctl::kModern ? ctl::ModernPad() : ctl::ClassicPad();
+      g.ctl.padLayout = ctl::kPadCustom;
+      Toast(L"Now using your custom controller layout - Restore Defaults goes back");
+    }
+    g.ctl.customPad.pad[action][slot] = static_cast<std::uint8_t>(value);
+  } else {
+    if (g.ctl.keyLayout != ctl::kKeyCustom) {
+      g.ctl.customKeys = ctl::DefaultKeys();
+      g.ctl.keyLayout = ctl::kKeyCustom;
+      Toast(L"Now using your custom keyboard layout - Restore Defaults goes back");
+    }
+    g.ctl.customKeys.keys[action][slot] = static_cast<std::uint16_t>(value);
+  }
+  SaveControls();
+}
+
+void PaintControls(Graphics& gr) {
+  const float x = kIn0, w = kIn1 - kIn0;
+  auto option = [&](int id, float ox, float ow, const std::wstring& label, const std::wstring& value, int col) {
+    const RectF r(ox, 150, ow, 34);
+    const bool f = Add(id, r, 0, col, true);
+    st::Row(gr, r, f);
+    st::Item(gr, label, RectF(r.X + 14, r.Y, 160, r.Height), 20, f);
+    st::Item(gr, f ? L"‹  " + std::wstring(T(value.c_str())) + L"  ›" : value, RectF(r.X + 170, r.Y, ow - 184, r.Height), 20, f, Align::Right);
+  };
+  option(kCtlPad, x, w / 2 - 10, L"Controller", kPadLayouts[g.ctl.padLayout], 0);
+  option(kCtlKeys, x + w / 2 + 10, w / 2 - 10, L"Keyboard", kKeyLayouts[g.ctl.keyLayout], 1);
+
+  const float cAction = x, cK1 = x + 330, cK2 = x + 478, cP1 = x + 626, cP2 = x + 776, cw = 140, top = 206, rh = 24.6f;
+  st::Plain(gr, L"Action (the game's Configuration A)", RectF(cAction + 4, 188, 320, 18), 13, hc::dim);
+  st::Plain(gr, L"Key", RectF(cK1, 188, cw, 18), 13, hc::dim, Align::Center);
+  st::Plain(gr, L"Key 2", RectF(cK2, 188, cw, 18), 13, hc::dim, Align::Center);
+  st::Plain(gr, L"Controller", RectF(cP1, 188, cw, 18), 13, hc::dim, Align::Center);
+  st::Plain(gr, L"Controller 2", RectF(cP2, 188, cw, 18), 13, hc::dim, Align::Center);
+  const auto keys = g.ctl.Keys();
+  const auto pad = g.ctl.Pad();
+  auto used = [&](bool isPad, int value) {  // the same key / input on more than one action
+    if (!value) return 0;
+    int n = 0;
+    for (int a = 0; a < ctl::kActionCount; ++a)
+      for (int k = 0; k < ctl::kBindings; ++k) n += isPad ? pad[a][k] == value : keys[a][k] == value;
+    return n;
+  };
+  for (int a = 0; a < ctl::kActionCount; ++a) {
+    const float y = top + a * rh;
+    st::Cell(gr, RectF(cAction, y, w, rh - 1.5f), false);
+    st::Plain(gr, ctl::ActionName(a), RectF(cAction + 12, y, 250, rh - 1.5f), 15, hc::text);
+    st::Outlined(gr, ctl::Ps2Button(a), RectF(cAction + 262, y, 60, rh - 1.5f), st::ItemFamily(), FontStyleBold, 15, hc::silver,
+                 Align::Center, 0.0f, 0.0f);
+    const float cols[4] = {cK1, cK2, cP1, cP2};
+    for (int c = 0; c < 4; ++c) {
+      const bool isPad = c >= 2;
+      const int slot = c % 2, value = isPad ? pad[a][slot] : keys[a][slot];
+      const int id = kCtlCell + a * 4 + c;
+      const RectF r(cols[c], y + 1, cw, rh - 3.5f);
+      const bool f = Add(id, r, a + 1, c);
+      const bool capturing = g.capture.action == a && g.capture.slot == slot && g.capture.pad == isPad;
+      st::Cell(gr, r, f || capturing);
+      std::wstring text = capturing ? (isPad ? L"press a button" : L"press a key") : isPad ? ctl::SourceName(value) : ctl::KeyName(static_cast<std::uint16_t>(value));
+      const ARGB colr = capturing ? hc::orangeHi : f ? hc::orange : used(isPad, value) > 1 ? hc::bad : value ? hc::text : hc::faint;
+      st::Plain(gr, text, r, 14.5f, colr, Align::Center, false, f || capturing);
+    }
+  }
+  const float by = top + static_cast<float>(ctl::kActionCount) * rh + 6;
+  Button(gr, kCtlRestoreKeys, RectF(x, by, w / 2 - 10, 30), L"Restore Default Keyboard", ctl::kActionCount + 1, 0, 19);
+  Button(gr, kCtlRestorePad, RectF(x + w / 2 + 10, by, w / 2 - 10, 30), L"Restore Default Controller", ctl::kActionCount + 1, 1, 19);
 }
 
 void PaintSaves(Graphics& gr) {
@@ -687,8 +784,8 @@ void PaintScreenshots(Graphics& gr) {
   }
   const int rows = (static_cast<int>(g.shots.size()) + cols - 1) / cols;
   if (rows > visibleRows)
-    st::Plain(gr, L"Row " + std::to_wstring(g.shotScroll + 1) + L"-" + std::to_wstring(std::min(rows, g.shotScroll + visibleRows)) +
-                  L" of " + std::to_wstring(rows),
+    st::Plain(gr, F(L"Row {0}-{1} of {2}", {std::to_wstring(g.shotScroll + 1), std::to_wstring(std::min(rows, g.shotScroll + visibleRows)),
+                                             std::to_wstring(rows)}),
               RectF(kIn0, 600, 300, 24), 14, hc::faint);
 }
 
@@ -707,8 +804,8 @@ void PaintViewer(Graphics& gr) {
     gr.SetInterpolationMode(InterpolationModeHighQualityBilinear);
     gr.DrawImage(full, RectF((kW - sw * s) / 2, 48, sw * s, sh * s));
   }
-  st::Plain(gr, p.filename().wstring() + L"   ·   " + std::to_wstring(g.viewer + 1) + L" of " + std::to_wstring(g.shots.size()) +
-                L"   ·   ← → browse   ·   Esc close",
+  st::Plain(gr, F(L"{0}   ·   {1} of {2}   ·   \u2190 \u2192 browse   ·   Esc close",
+                  {p.filename().wstring(), std::to_wstring(g.viewer + 1), std::to_wstring(g.shots.size())}),
             RectF(40, 672, kW - 80, 32), 15, hc::dim, Align::Center);
 }
 
@@ -718,10 +815,9 @@ void PaintJob(Graphics& gr, float x, float y, float w) {  // a running job: bar 
   if (g.job.job == Job::Copy && g.job.total) {
     const double el = std::max(0.5, Clock() - g.job.started);
     const double rate = static_cast<double>(g.job.bytes) / el;
-    wchar_t b[160];
-    swprintf(b, 160, L"%ls of %ls  ·  %.0f MB/s", FormatBytes(g.job.bytes).c_str(), FormatBytes(g.job.total).c_str(), rate / 1048576.0);
-    s = b;
-    if (rate > 0 && el > 3) s += L"  ·  about " + FormatDuration(static_cast<std::int64_t>((g.job.total - g.job.bytes) / rate) + 30) + L" left";
+    s = F(L"{0} of {1}  ·  {2} MB/s", {FormatBytes(g.job.bytes), FormatBytes(g.job.total), std::to_wstring(static_cast<int>(rate / 1048576.0))});
+    if (rate > 0 && el > 3)
+      s += L"  ·  " + F(L"about {0} left", {FormatDuration(static_cast<std::int64_t>((g.job.total - g.job.bytes) / rate) + 30)});
   }
   st::Plain(gr, s, RectF(x, y + 28, w - 120, 26), 15, hc::dim);
   wchar_t pct[16];
@@ -741,13 +837,13 @@ void PaintSetup(Graphics& gr) {
   const DiscCheck& dc = g.disc;
   row(L"Disc Folder", g.cfg.disc.empty() ? L"(none)" : g.cfg.disc, dc.state == DiscState::Ok ? 1 : 0);
   row(L"Edition", dc.state == DiscState::Ok ? L"North America, SLUS-20362 (supported)" : dc.detail, dc.state == DiscState::Ok ? 1 : 0);
-  row(L"Disc Files", g.cfg.verified ? L"All files match the original disc (checked " + FormatAgo(g.cfg.verified) + L")"
+  row(L"Disc Files", g.cfg.verified ? F(L"All files match the original disc (checked {0})", {FormatAgo(g.cfg.verified)})
                                     : L"Not checked file by file yet", g.cfg.verified ? 1 : -1);
   std::error_code ec;
   const bool hasPkg = fs::exists(g.paths.package, ec);
   std::wstring pkg = g.pkg == Pkg::Ok ? L"Prepared for this version" : g.pkg == Pkg::Checking ? L"Checking..."
                      : hasPkg ? L"Made by another version: prepare again" : L"Not prepared yet";
-  if (hasPkg && g.pkg == Pkg::Ok) pkg += L" (" + FormatBytes(fs::file_size(g.paths.package, ec)) + L")";
+  if (hasPkg && g.pkg == Pkg::Ok) pkg = std::wstring(T(pkg.c_str())) + L" (" + FormatBytes(fs::file_size(g.paths.package, ec)) + L")";
   row(L"Game", pkg, g.pkg == Pkg::Ok ? 1 : g.pkg == Pkg::Checking ? -1 : 0);
   row(L"Game Folder", g.paths.dir.wstring(), -1);
   row(L"Recompiler", g.paths.recomp.empty() ? L"hp2recomp.exe not found" : g.paths.recomp.filename().wstring(), g.paths.recomp.empty() ? 0 : 1);
@@ -795,7 +891,7 @@ void PaintAbout(Graphics& gr) {
   Button(gr, kAboutGuide, RectF(kIn0 + 230, 580, 214, 40), L"Getting Started", 0, 1, 20);
   Button(gr, kAboutReport, RectF(kIn0 + 460, 580, 230, 40), L"Report a Problem", 0, 2, 20);
   Button(gr, kAboutLog, RectF(kIn0 + 706, 580, 214, 40), L"Open Log", 0, 3, 20);
-  st::Plain(gr, std::wstring(L"HotPursuit2PC ") + kVersion + L"  ·  MIT license", RectF(kIn0, 548, 400, 24), 14, hc::faint);
+  st::Plain(gr, F(L"HotPursuit2PC {0}  ·  MIT license", {kVersion}), RectF(kIn0, 548, 400, 24), 14, hc::faint);
 }
 
 // --------------------------------------------------------------------------------------------------- the wizard ----
@@ -807,7 +903,7 @@ void PaintWizard(Graphics& gr) {
   for (int i = 0; i < 4; ++i) {
     const RectF r(x0 + i * 248.0f, kPanelY, 236, 36);
     st::Cell(gr, r, i == cur);
-    st::Outlined(gr, std::to_wstring(i + 1) + L"  " + steps[i], RectF(r.X + 16, r.Y, r.Width - 20, r.Height), st::ItemFamily(),
+    st::Outlined(gr, std::to_wstring(i + 1) + L"  " + T(steps[i]), RectF(r.X + 16, r.Y, r.Width - 20, r.Height), st::ItemFamily(),
                  FontStyleBold, 20, i == cur ? hc::orange : i < cur ? hc::text : hc::faint, Align::Left, 0.0f, 2.0f);
   }
   st::Panel(gr, RectF(x0 - 20, 190, x1 - x0 + 40, kPanelB - 190));
@@ -835,9 +931,9 @@ void PaintWizard(Graphics& gr) {
         const RectF r(x0, y, 760, 64);
         const bool f = Add(kWizDrive + static_cast<int>(i), r, row, 0);
         st::Row(gr, r, f);
-        st::Item(gr, L"Copy from " + d.root.substr(0, 2) + (d.label.empty() ? L"" : L"  " + d.label), RectF(x0 + 18, y + 2, 720, 34), 26, f);
-        st::Plain(gr, std::wstring(d.optical ? L"Your disc or a mounted .iso" : L"A removable drive") + L"  ·  copies " +
-                          FormatBytes(DiscBytes()) + L" to the game folder (recommended)",
+        st::Item(gr, F(L"Copy from {0}", {d.root.substr(0, 2) + (d.label.empty() ? L"" : L"  " + d.label)}), RectF(x0 + 18, y + 2, 720, 34), 26, f);
+        st::Plain(gr, F(L"{0}  ·  copies {1} to the game folder (recommended)",
+                        {T(d.optical ? L"Your disc or a mounted .iso" : L"A removable drive"), FormatBytes(DiscBytes())}),
                   RectF(x0 + 20, y + 34, 720, 26), 14.5f, hc::dim);
       }
       if (g.drives.empty()) {
@@ -885,8 +981,9 @@ void PaintWizard(Graphics& gr) {
       };
       line(L"Disc checked: North America, SLUS-20362");
       line(L"Game prepared for your processor");
-      line(L"Picture quality: " + std::wstring(kQuality[g.set.resolution]) + (g.set.frameRate ? L", 60 fps, " : L", 30 fps, ") +
-           ui::Setting(6).names[g.set.aspect] + (g.set.fullscreen ? L", full screen" : L", in a window"));
+      line(F(L"Picture quality: {0}, {1} fps, {2}, {3}", {T(kQuality[g.set.resolution]), g.set.frameRate ? L"60" : L"30",
+                                                           T(ui::Setting(6).names[g.set.aspect]),
+                                                           T(g.set.fullscreen ? L"full screen" : L"in a window")}));
       Button(gr, kWizPlay, RectF(x0, 452, 300, 60), L"Play Now", 0, 0, 34, true, Align::Left);
       Button(gr, kWizLauncher, RectF(x0 + 320, 460, 300, 46), L"Open the Launcher", 0, 1, 22, true, Align::Left);
       break;
@@ -922,6 +1019,7 @@ void PaintAll(Graphics& gr) {
     switch (g.page) {
       case Page::Home: PaintHome(gr); break;
       case Page::Settings: PaintSettings(gr); break;
+      case Page::Controls: PaintControls(gr); break;
       case Page::Saves: PaintSaves(gr); break;
       case Page::Screenshots: PaintScreenshots(gr); break;
       case Page::Setup: PaintSetup(gr); break;
@@ -975,6 +1073,13 @@ const Widget* Find(int id) {
 }
 
 void ChangeOption(int id, int delta) {
+  if (id == kCtlPad || id == kCtlKeys) {
+    int& v = id == kCtlPad ? g.ctl.padLayout : g.ctl.keyLayout;
+    const int n = id == kCtlPad ? 3 : 2;
+    v = (v + delta + n) % n;
+    SaveControls();
+    return;
+  }
   const int row = id - kSetRow;
   if (row < 0 || row >= kRowCount) return;
   int* field = nullptr;
@@ -1014,8 +1119,24 @@ void Activate(int id) {
     }
     return;
   }
+  if (id >= kCtlCell && id < kCtlCell + ctl::kActionCount * 4) {  // wait for a key / button for this binding
+    const int a = (id - kCtlCell) / 4, c = (id - kCtlCell) % 4;
+    g.capture.action = a;
+    g.capture.slot = c % 2;
+    g.capture.pad = c >= 2;
+    g.capture.since = Clock();
+    return;
+  }
   switch (id) {
     case kPlay: return Play();
+    case kCtlRestoreKeys:
+      g.ctl.keyLayout = ctl::kKeyDefault;
+      SaveControls();
+      return Toast(L"Keyboard back to the default layout (your custom one is kept)");
+    case kCtlRestorePad:
+      g.ctl.padLayout = ctl::kClassic;
+      SaveControls();
+      return Toast(L"Controller back to the Classic layout (your custom one is kept)");
     case kHomeSettings: return GoPage(Page::Settings, false);
     case kHomeFolder: case kSetupFolder: return OpenFolder(g.paths.dir);
     case kHomeLog: case kAboutLog: return OpenFolder(g.paths.game.parent_path());
@@ -1191,6 +1312,25 @@ void PollController() {
     prev = 0;
     return;
   }
+  {  // waiting for a controller input for a binding: the first new press is it (6 seconds, then it gives up)
+    static ctl::PadState before;
+    const ctl::PadState now{st.Gamepad.wButtons, st.Gamepad.bLeftTrigger, st.Gamepad.bRightTrigger, st.Gamepad.sThumbLX,
+                            st.Gamepad.sThumbLY, st.Gamepad.sThumbRX, st.Gamepad.sThumbRY};
+    if (g.capture.action >= 0 && g.capture.pad) {
+      const int s = ctl::NewlyPressed(now, before);
+      before = now;
+      if (s != ctl::kNone) {
+        Assign(true, g.capture.action, g.capture.slot, s);
+        g.capture.action = -1;
+        prev = 0xFFFF;  // the press that was just taken does not also move the focus
+      } else if (Clock() - g.capture.since > 6) {
+        g.capture.action = -1;
+      }
+      g.dirty = true;
+      return;
+    }
+    before = now;
+  }
   WORD b = st.Gamepad.wButtons;
   const SHORT lx = st.Gamepad.sThumbLX, ly = st.Gamepad.sThumbLY;
   if (ly > 16000) b |= XINPUT_GAMEPAD_DPAD_UP;
@@ -1311,7 +1451,7 @@ void GameEnded() {
   ++g.cfg.sessions;
   SaveConfig(g.paths, g.cfg);
   const std::wstring reason = GameEndProblem(g.paths);
-  g.problem = reason.empty() ? L"" : L"The game stopped: " + reason;
+  g.problem = reason.empty() ? L"" : F(L"The game stopped: {0}", {reason});
   g.set = ui::Load();  // changed in the game with F1
   RefreshLists();
   if (g.problem.empty() && g.cfg.afterGame == 1) {
@@ -1413,6 +1553,18 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       }
       return 0;
     case WM_KEYDOWN:
+      if (g.capture.action >= 0 && g.capture.pad && w == VK_ESCAPE) {  // Esc also cancels waiting for a controller input
+        g.capture.action = -1;
+        g.dirty = true;
+        return 0;
+      }
+      if (g.capture.action >= 0 && !g.capture.pad) {  // waiting for a key for a binding: Esc cancels, Delete clears
+        if (w != VK_ESCAPE) Assign(false, g.capture.action, g.capture.slot, w == VK_DELETE ? 0 : static_cast<int>(w & 0xFF));
+        g.capture.action = -1;
+        g.dirty = true;
+        return 0;
+      }
+      if (w == VK_SHIFT || w == VK_CONTROL) break;
       switch (w) {
         case VK_UP: Input(In::Up); break;
         case VK_DOWN: Input(In::Down); break;
@@ -1476,7 +1628,7 @@ bool EncoderClsid(const wchar_t* mime, CLSID* out) {
 int DrawScreens(const fs::path* outDir) {
   struct Screen { const wchar_t* name; bool wizard; Step step; Page page; };
   const Screen screens[] = {
-      {L"home", false, Step::Welcome, Page::Home},          {L"settings", false, Step::Welcome, Page::Settings},
+      {L"home", false, Step::Welcome, Page::Home},          {L"settings", false, Step::Welcome, Page::Settings},      {L"controls", false, Step::Welcome, Page::Controls},
       {L"saves", false, Step::Welcome, Page::Saves},        {L"screenshots", false, Step::Welcome, Page::Screenshots},
       {L"setup", false, Step::Welcome, Page::Setup},        {L"about", false, Step::Welcome, Page::About},
       {L"wizard-welcome", true, Step::Welcome, Page::Home}, {L"wizard-disc", true, Step::Disc, Page::Home},
@@ -1562,6 +1714,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     g.firstSettings = !fs::exists(fs::path(self).parent_path() / L"hp2native.ini", ec);
   }
   g.set = ui::Load();
+  {
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    g.ini = (fs::path(self).parent_path() / L"hp2native.ini").wstring();  // the file the game and its F1 menu use
+    g.ctl = ctl::Load(g.ini);
+  }
 
   WNDCLASSEXW wc{sizeof wc};
   wc.lpfnWndProc = WndProc;

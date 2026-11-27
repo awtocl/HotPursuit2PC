@@ -1,6 +1,8 @@
 // The launcher's work behind the screens (ADR 0016). See tasks.h.
 #include "tasks.h"
 
+#include "i18n.h"
+
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -227,7 +229,7 @@ DiscCheck QuickCheck(const fs::path& folder) {
       if (const auto at = line.find("cdrom0:\\"); at != std::string::npos) code = line.substr(at + 8, 11);
     r.state = code.empty() ? DiscState::NotDisc : DiscState::OtherRegion;
     r.detail = code.empty() ? L"SLUS_203.62 is missing: this is not the North American Hot Pursuit 2 disc."
-                            : L"This disc is " + Widen(code) + L". Only the North American release (SLUS-20362) is supported.";
+                            : i18n::F(L"This disc is {0}. Only the North American release (SLUS-20362) is supported.", {Widen(code)});
     return r;
   }
   if (!fs::exists(folder / L"NFSHP2", ec)) {
@@ -291,7 +293,7 @@ bool StartCopy(Progress& pr, const fs::path& from, const fs::path& to, void* win
       }
       if (it->is_regular_file(ec)) files.emplace_back(it->path(), it->file_size(ec));
     }
-    if (files.empty()) return Finish(pr, L"Nothing could be read from " + from.wstring() + L".", window, done);
+    if (files.empty()) return Finish(pr, i18n::F(L"Nothing could be read from {0}.", {from.wstring()}), window, done);
     std::uint64_t total = 0;
     for (const auto& f : files) total += f.second;
     pr.total = total;
@@ -299,7 +301,7 @@ bool StartCopy(Progress& pr, const fs::path& from, const fs::path& to, void* win
     for (const auto& [file, size] : files) {
       const fs::path target = to / fs::relative(file, from, ec);
       fs::create_directories(target.parent_path(), ec);
-      pr.SetStatus(L"Copying " + fs::relative(file, from, ec).wstring());
+      pr.SetStatus(i18n::F(L"Copying {0}", {fs::relative(file, from, ec).wstring()}));
       struct Ctx { Progress* pr; std::uint64_t base, total; } ctx{&pr, base, total};
       auto routine = [](LARGE_INTEGER, LARGE_INTEGER done, LARGE_INTEGER, LARGE_INTEGER, DWORD, DWORD, HANDLE, HANDLE,
                         LPVOID data) -> DWORD {
@@ -312,8 +314,8 @@ bool StartCopy(Progress& pr, const fs::path& from, const fs::path& to, void* win
       if (!CopyFileExW(file.c_str(), target.c_str(), routine, &ctx, nullptr, 0)) {
         const DWORD e = GetLastError();
         if (pr.cancel || e == ERROR_REQUEST_ABORTED) return Finish(pr, L"Copy cancelled.", window, done);
-        return Finish(pr, L"Copying " + file.filename().wstring() + L" failed (Windows error " + std::to_wstring(e) +
-                              L"). Is the disc clean, and is there enough free space?", window, done);
+        return Finish(pr, i18n::F(L"Copying {0} failed (Windows error {1}). Is the disc clean, and is there enough free space?",
+                                  {file.filename().wstring(), std::to_wstring(e)}), window, done);
       }
       SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);  // files from a DVD are read-only
       base += size;
@@ -337,11 +339,11 @@ bool StartVerify(Progress& pr, const fs::path& folder, void* window, unsigned do
         file /= std::wstring(s, t);
         s = *t ? t + 1 : t;
       }
-      pr.SetStatus(std::wstring(L"Checking ") + e.path);
+      pr.SetStatus(i18n::F(L"Checking {0}", {e.path}));
       std::error_code ec;
-      if (!fs::exists(file, ec)) return Finish(pr, std::wstring(e.path) + L" is missing from the disc folder.", window, done);
+      if (!fs::exists(file, ec)) return Finish(pr, i18n::F(L"{0} is missing from the disc folder.", {e.path}), window, done);
       if (fs::file_size(file, ec) != e.size)
-        return Finish(pr, std::wstring(e.path) + L" has the wrong size: the copy is incomplete or damaged.", window, done);
+        return Finish(pr, i18n::F(L"{0} has the wrong size: the copy is incomplete or damaged.", {e.path}), window, done);
       std::string hex;
       const bool read = HashFile(file, hex, [&](DWORD n) {
         pr.bytes += n;
@@ -349,9 +351,9 @@ bool StartVerify(Progress& pr, const fs::path& folder, void* window, unsigned do
         return !pr.cancel.load();
       });
       if (pr.cancel) return Finish(pr, L"Check cancelled.", window, done);
-      if (!read) return Finish(pr, std::wstring(e.path) + L" could not be read.", window, done);
+      if (!read) return Finish(pr, i18n::F(L"{0} could not be read.", {e.path}), window, done);
       if (hex != e.sha256)
-        return Finish(pr, std::wstring(e.path) + L" differs from the original disc: copy the disc again.", window, done);
+        return Finish(pr, i18n::F(L"{0} differs from the original disc: copy the disc again.", {e.path}), window, done);
       base += e.size;
       pr.bytes = base;
     }
@@ -385,7 +387,7 @@ bool StartPrepare(Progress& pr, const Paths& p, const fs::path& disc, void* wind
     CloseHandle(writeEnd);
     if (!started) {
       CloseHandle(readEnd);
-      return Finish(pr, L"hp2recomp.exe could not be started (Windows error " + std::to_wstring(GetLastError()) + L").", window, done);
+      return Finish(pr, i18n::F(L"hp2recomp.exe could not be started (Windows error {0}).", {std::to_wstring(GetLastError())}), window, done);
     }
     // Phases, from its messages: translating (about 10% of the time), compiling (about 90%), linking.
     std::FILE* log = _wfopen((p.dir / L"prepare.log").c_str(), L"wb");
@@ -433,7 +435,7 @@ bool StartPrepare(Progress& pr, const Paths& p, const fs::path& disc, void* wind
     CloseHandle(readEnd);
     if (log) fclose(log);
     if (pr.cancel) return Finish(pr, L"Cancelled.", window, done);
-    if (code != 0) return Finish(pr, L"Preparing the game failed: " + Widen(last) + L" (details in prepare.log)", window, done);
+    if (code != 0) return Finish(pr, i18n::F(L"Preparing the game failed: {0} (details in prepare.log)", {Widen(last)}), window, done);
     pr.fraction = 1;
     Finish(pr, L"", window, done);
   });
@@ -471,7 +473,7 @@ void* StartGame(const Paths& p, const fs::path& disc, std::wstring& error) {
   PROCESS_INFORMATION pi{};
   std::wstring cmd = L"\"" + p.game.wstring() + L"\" --rom \"" + disc.wstring() + L"\"";
   if (!CreateProcessW(p.game.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, p.game.parent_path().c_str(), &si, &pi)) {
-    error = L"HotPursuit2Native.exe could not be started (Windows error " + std::to_wstring(GetLastError()) + L").";
+    error = i18n::F(L"HotPursuit2Native.exe could not be started (Windows error {0}).", {std::to_wstring(GetLastError())});
     return nullptr;
   }
   CloseHandle(pi.hThread);
@@ -537,7 +539,7 @@ bool BackupSaves(const Paths& p, std::wstring& message) {
   }
   const std::wstring name = Stamp();
   if (!CopyTree(saves / L"mc0", saves / L"backups" / name / L"mc0", message)) return false;
-  message = L"Backup saved: " + name;
+  message = i18n::F(L"Backup saved: {0}", {name});
   return true;
 }
 
@@ -559,7 +561,7 @@ bool RestoreSaves(const Paths& p, const std::wstring& backup, std::wstring& mess
     }
   }
   if (!CopyTree(source, saves / L"mc0", message)) return false;
-  message = L"Restored the backup of " + backup;
+  message = i18n::F(L"Restored the backup of {0}", {backup});
   return true;
 }
 
@@ -588,20 +590,19 @@ std::wstring FormatBytes(std::uint64_t bytes) {
 
 std::wstring FormatAgo(std::int64_t time) {
   const std::int64_t d = std::time(nullptr) - time;
-  auto plural = [](std::int64_t n, const wchar_t* unit) {
-    return std::to_wstring(n) + L" " + unit + (n == 1 ? L"" : L"s") + L" ago";
-  };
-  if (d < 90) return L"just now";
-  if (d < 3600) return plural(d / 60, L"minute");
-  if (d < 86400) return plural(d / 3600, L"hour");
-  if (d < 86400 * 60) return plural(d / 86400, L"day");
-  return plural(d / (86400 * 30), L"month");
+  if (d < 90) return i18n::T(L"just now");
+  if (d < 3600) return i18n::F(L"{0} min ago", {std::to_wstring(d / 60)});
+  if (d < 86400) return i18n::F(L"{0} h ago", {std::to_wstring(d / 3600)});
+  if (d < 86400 * 2) return i18n::T(L"yesterday");
+  if (d < 86400 * 45) return i18n::F(L"{0} days ago", {std::to_wstring(d / 86400)});
+  if (d < 86400 * 75) return i18n::T(L"a month ago");
+  return i18n::F(L"{0} months ago", {std::to_wstring(d / (86400 * 30))});
 }
 
 std::wstring FormatDuration(std::int64_t seconds) {
-  if (seconds < 60) return L"less than a minute";
+  if (seconds < 60) return i18n::T(L"less than a minute");
   const std::int64_t h = seconds / 3600, m = (seconds % 3600) / 60;
-  return h ? std::to_wstring(h) + L" h " + std::to_wstring(m) + L" min" : std::to_wstring(m) + L" min";
+  return h ? i18n::F(L"{0} h {1} min", {std::to_wstring(h), std::to_wstring(m)}) : i18n::F(L"{0} min", {std::to_wstring(m)});
 }
 
 void OpenFolder(const fs::path& folder) {

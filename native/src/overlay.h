@@ -16,6 +16,8 @@ struct Settings {
   int aspect = 0;      // 0 16:9 (the game's widescreen patches, ADR 0015), 1 4:3, 2 4:3 integer scale, 3 stretch to the window
   int sharpen = 0;     // 0 off, 1 low, 2 medium, 3 high
   int scanlines = 0;   // 0 off, 1 light, 2 strong
+  int language = 0;    // i18n::Lang of the launcher and this menu (first start: Windows' display language)
+  int padLayout = 0;   // controller layout (controls.h): 0 Classic (PS2), 1 Modern (triggers), 2 Custom (made in the launcher)
 };
 
 // The settings in menu order, with their ini keys (section [graphics]) and value names; shared with the launcher.

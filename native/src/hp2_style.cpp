@@ -1,6 +1,8 @@
 // Hot Pursuit 2's front-end style for the port's own UI. See hp2_style.h.
 #include "hp2_style.h"
 
+#include "i18n.h"
+
 #include <cmath>
 #include <mutex>
 
@@ -102,11 +104,12 @@ void SteelStrip(Graphics& g, RectF r, float alpha) {
   g.DrawLine(&bottom, r.X, r.GetBottom() - 0.5f, r.GetRight(), r.GetBottom() - 0.5f);
 }
 
-void Outlined(Graphics& g, const std::wstring& s, RectF r, FontFamily* family, int style, float size, ARGB fill, Align a,
+void Outlined(Graphics& g, const std::wstring& text, RectF r, FontFamily* family, int style, float size, ARGB fill, Align a,
               float lean, float outline) {
-  if (s.empty()) return;
+  if (text.empty()) return;
+  const wchar_t* s = i18n::T(text.c_str());  // every drawn string is shown in the chosen language (i18n.h)
   GraphicsPath path(FillModeWinding);  // winding: the fonts' overlapping contours stay filled
-  path.AddString(s.c_str(), -1, family, style, size, r, Format(a, false));
+  path.AddString(s, -1, family, style, size, r, Format(a, false));
   if (lean != 0.0f) {  // lean around the middle of the row, so the text stays where it was laid out
     const float cy = r.Y + r.Height / 2;
     Matrix m(1, 0, -lean, 1, lean * cy, 0);
@@ -125,7 +128,7 @@ void Outlined(Graphics& g, const std::wstring& s, RectF r, FontFamily* family, i
 void Title(Graphics& g, const std::wstring& s, float x, float top, float size) {
   RectF r(x, top, 1200, size * 1.25f);
   GraphicsPath path(FillModeWinding);  // winding: the fonts' overlapping contours stay filled
-  path.AddString(s.c_str(), -1, TitleFamily(), FontStyleRegular, size, r, Format(Align::Left, false));
+  path.AddString(i18n::T(s.c_str()), -1, TitleFamily(), FontStyleRegular, size, r, Format(Align::Left, false));
   const float cy = top + size * 0.62f;
   Matrix lean(1, 0, -0.3f, 1, 0.3f * cy, 0);
   path.Transform(&lean);
@@ -183,13 +186,13 @@ void Plain(Graphics& g, const std::wstring& s, RectF r, float size, ARGB c, Alig
   Font fallback(BodyFamily(), size, FontStyleRegular, UnitPixel);
   if (font.GetLastStatus() != Ok) f = &fallback;
   SolidBrush b{Color(c)};
-  g.DrawString(s.c_str(), -1, f, r, Format(a, wrap), &b);
+  g.DrawString(i18n::T(s.c_str()), -1, f, r, Format(a, wrap), &b);
 }
 
 float PlainWidth(Graphics& g, const std::wstring& s, float size, bool bold) {
   Font font(BodyFamily(), size, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
   RectF out;
-  g.MeasureString(s.c_str(), -1, &font, PointF(0, 0), Format(Align::Left, false), &out);
+  g.MeasureString(i18n::T(s.c_str()), -1, &font, PointF(0, 0), Format(Align::Left, false), &out);
   return out.Width;
 }
 

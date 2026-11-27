@@ -4,6 +4,7 @@
 #include "overlay.h"
 
 #include "hp2_style.h"
+#include "i18n.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,6 +31,8 @@ const Item kItems[] = {
     {L"aspect_ratio", L"Aspect ratio", &Settings::aspect, 4, {L"16:9", L"4:3", L"4:3 integer scale", L"Stretch"}},
     {L"sharpen", L"Sharpening", &Settings::sharpen, 4, {L"Off", L"Low", L"Medium", L"High"}},
     {L"scanlines", L"Scanlines", &Settings::scanlines, 3, {L"Off", L"Light", L"Strong"}},
+    {L"controller_layout", L"Controller layout", &Settings::padLayout, 3, {L"Classic (PS2)", L"Modern (triggers)", L"Custom"}},
+    {L"language", L"Language", &Settings::language, 6, {L"English", L"Español", L"Português (Brasil)", L"Français", L"Deutsch", L"Italiano"}},
 };
 constexpr int kItemCount = static_cast<int>(sizeof kItems / sizeof kItems[0]);
 constexpr int kRows = kItemCount + 1;  // the settings, then Quit game
@@ -56,12 +59,15 @@ Settings Load() {
     const int v = static_cast<int>(GetPrivateProfileIntW(L"graphics", Key(i), s.*kItems[i].field, ini.c_str()));
     s.*kItems[i].field = std::clamp(v, 0, kItems[i].count - 1);
   }
+  if (GetPrivateProfileIntW(L"graphics", L"language", -1, ini.c_str()) == static_cast<UINT>(-1)) s.language = i18n::Detect();
+  i18n::Set(s.language);
   if (const char* e = std::getenv("HP2_ASPECT")) s.aspect = std::clamp(std::atoi(e), 0, 3);  // tests: without touching the file
   if (const char* e = std::getenv("HP2_FPS")) s.frameRate = std::atoi(e) >= 60 ? 1 : 0;
   return s;
 }
 
 void Save(const Settings& s) {
+  i18n::Set(s.language);
   const std::wstring ini = IniPath();
   for (int i = 0; i < kItemCount; ++i)
     WritePrivateProfileStringW(L"graphics", Key(i), std::to_wstring(s.*kItems[i].field).c_str(), ini.c_str());
@@ -124,7 +130,7 @@ bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>
     g.TranslateTransform((width - 1280 * k) / 2, (height - 720 * k) / 2);
     g.ScaleTransform(k, k);
 
-    const float x0 = 290, x1 = 990, y0 = 104, rowH = 38, gap = 12;
+    const float x0 = 290, x1 = 990, y0 = 104, rowH = 34, gap = 10;
     const float listY = 206, y1 = listY + rowH * kRows + gap + 52;
     {
       const GraphicsState clip = g.Save();
@@ -143,13 +149,13 @@ bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>
       st::Row(g, row, sel);
       const RectF label(row.X + 16, y, 300, row.Height), value(row.X + 300, y, row.Width - 316, row.Height);
       if (i == kItemCount) {  // Quit game
-        st::Item(g, L"Quit Game", label, 23, sel);
+        st::Item(g, L"Quit Game", label, 23, sel);  // (the st:: functions translate)
         st::Item(g, g_quitArmed && sel ? L"Press again to quit" : L"Exit to Windows", value, 21, g_quitArmed && sel, st::Align::Right);
         continue;
       }
       st::Item(g, kItems[i].label, label, 23, sel);
-      std::wstring name = kItems[i].names[s.*kItems[i].field];
-      if (kItems[i].field == &Settings::aspect && (s.aspect == 0) != g_wideActive) name += L" (restart)";  // 16:9 <-> 4:3
+      std::wstring name = i18n::T(kItems[i].names[s.*kItems[i].field]);
+      if (kItems[i].field == &Settings::aspect && (s.aspect == 0) != g_wideActive) name += std::wstring(L" ") + i18n::T(L"(restart)");  // 16:9 <-> 4:3
       st::Item(g, sel ? L"\u2039  " + name + L"  \u203A" : name, value, 21, sel, st::Align::Right);
     }
     st::SteelStrip(g, RectF(x0, y1 - 38, x1 - x0, 30));

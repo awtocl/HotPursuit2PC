@@ -1,5 +1,6 @@
 #include "gs.h"
 
+#include "controls.h"
 #include "overlay.h"
 #include "present.h"
 #include "gs_gpu.h"
@@ -532,6 +533,7 @@ void PublishRendererSettings(const ui::Settings& s) {
   g_wantWide = s.aspect == 0 ? 1 : 0;
   g_want60 = s.frameRate == 1 ? 1 : 0;
   g_wantRenderer = s.renderer;
+  ctl::SetActivePadLayout(s.padLayout);  // the controller layout (F1 menu): PadPoll reads it
 }
 
 void SettingsChanged(HWND h) {

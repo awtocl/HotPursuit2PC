@@ -3,7 +3,8 @@
 // title bar and the ticker), a heavy italic silver title with a black outline, a thin red rule under the title strip,
 // menu rows on dark translucent bands with condensed bold outlined lettering, the selection in orange with an orange
 // underline, small list cells (like the music list). Everything is drawn; no image or font of the game is used.
-// GDI+ (a Windows component). Coordinates are whatever the caller's Graphics transform says.
+// GDI+ (a Windows component). Coordinates are whatever the caller's Graphics transform says. Every string drawn here
+// goes through i18n::T (English in, the chosen language out; anything not in its table is drawn as it is).
 #pragma once
 #include <windows.h>
 
