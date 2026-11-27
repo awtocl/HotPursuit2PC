@@ -87,7 +87,7 @@ struct Voice {
 } g_voice[kVoices];
 
 struct Stream {
-  bool on = false, eof = false;
+  bool on = false, eof = false, paused = false;  // paused: the game set its voices' pitch to 0 (the pause menu)
   Reader read = nullptr;
   int channels = 2;
   std::uint64_t start = 0, generation = 0, played = 0;
@@ -202,7 +202,7 @@ void Mix(float* out) {  // kFrames stereo frames, lock held
     if (!v.on) v.outL = v.outR = 0;
   }
   for (Stream& s : g_stream) {
-    if (!s.on) continue;
+    if (!s.on || s.paused) continue;
     if (!s.eof && s.Available() < kDecodedAhead / 2) g_feed.notify_one();
     for (std::uint32_t f = 0; f < kFrames; ++f) {
       if (s.Available() > 0) s.frac += s.pitch;  // starved (the feeder is late): hold the last sample, no jump later
@@ -465,6 +465,7 @@ void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t byt
   s.channels = channels == 1 ? 1 : 2;
   s.interleave = std::clamp<std::uint32_t>(interleave & ~15u, 0x800, 0x40000);
   s.pitch = std::clamp<std::uint32_t>(pitch, 0x100, 0x3FFF);
+  s.paused = false;
   s.frac = 0;
   s.left = s.wantLeft = Vol(left);
   s.right = s.wantRight = Vol(right);
@@ -495,6 +496,14 @@ void StreamVolume(int stream, int left, int right) {
   Stream& s = g_stream[stream];
   if (left >= 0) s.wantLeft = Vol(static_cast<std::uint16_t>(left));
   if (right >= 0) s.wantRight = Vol(static_cast<std::uint16_t>(right));
+}
+
+void StreamPitch(int stream, std::uint16_t pitch) {
+  if (stream < 0 || stream >= static_cast<int>(kStreams)) return;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  Stream& s = g_stream[stream];
+  s.paused = pitch == 0;  // the voices stop where they are (as on the console): the music resumes from there
+  if (pitch) s.pitch = std::clamp<std::uint32_t>(pitch, 0x100, 0x3FFF);
 }
 
 void StreamStop(int stream) {

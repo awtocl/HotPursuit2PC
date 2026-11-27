@@ -1406,7 +1406,7 @@ int FileRead(int fd, std::uint32_t buffer, std::uint32_t size) {
 // audio.cpp plays all of it. Without an audio device music and speech advance in game time and effects are not reported.
 struct StreamerChannel {
   bool active = false, audioStarted = false;
-  std::uint64_t start = 0, durationVblanks = 0;
+  std::uint64_t start = 0, durationVblanks = 0, pausedAt = 0;  // pausedAt: the voices' pitch went to 0 (the pause menu)
   std::uint16_t voice[2] = {0x2E, 0x2F}, volume = 0x3FFF;
   std::uint32_t rate = 32332, bytes = 0;
 } g_music, g_speech;
@@ -1469,7 +1469,19 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
         if (na >= 1 && s < 48 && !voiceStream(s)) audio::VoiceKeyOff(s);
         break;
       case 0x03:
-        if (na >= 2 && s < 48 && !voiceStream(s)) audio::VoicePitch(s, c[i + 3]);
+        if (na >= 2 && s < 48 && !voiceStream(s)) {
+          audio::VoicePitch(s, c[i + 3]);
+        } else if (na >= 2 && s < 48) {  // a stream's voice: the pause menu sets the pitch to 0 and back (the song must
+          // stop where it is, or it ends early and the game moves to the next one)
+          const bool music = g_music.active && (s == g_music.voice[0] || s == g_music.voice[1]);
+          StreamerChannel& ch = music ? g_music : g_speech;
+          if (c[i + 3] == 0 && !ch.pausedAt) ch.pausedAt = g_vblanks;
+          if (c[i + 3] != 0 && ch.pausedAt) {
+            ch.start += g_vblanks - ch.pausedAt;  // (the game-time duration of a stream without audio stops too)
+            ch.pausedAt = 0;
+          }
+          audio::StreamPitch(music ? 0 : 2, c[i + 3]);
+        }
         break;
       case 0xCB:
         if (na >= 3 && s < 48 && !voiceStream(s)) {
@@ -1487,6 +1499,7 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
           StreamerChannel& ch = s == 0 ? g_music : g_speech;
           ch.active = true;
           ch.start = g_vblanks;
+          ch.pausedAt = 0;
           ch.voice[0] = c[i + 3] & 0x3F;
           ch.volume = c[i + 4];
           if (s == 0 && ch.voice[0] == 0x2E) g_menuMusic = true;
@@ -1557,14 +1570,15 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
   };
   for (int k = 0; k < 2; ++k) {  // music (slots 0 and 1) and speech (slot 2)
     StreamerChannel& ch = k == 0 ? g_music : g_speech;
-    if (ch.active && (ch.audioStarted ? !audio::StreamPlaying(k == 0 ? 0 : 2) : g_vblanks - ch.start >= ch.durationVblanks)) {
+    if (ch.active && !ch.pausedAt &&
+        (ch.audioStarted ? !audio::StreamPlaying(k == 0 ? 0 : 2) : g_vblanks - ch.start >= ch.durationVblanks)) {
       ch.active = false;  // it ended: the slot leaves the reply
       static int logged = 0;
       if (logged++ < 40) Log("streamer: vblank %llu %s ended", static_cast<unsigned long long>(g_vblanks), k == 0 ? "music" : "speech");
     }
     if (!ch.active) continue;
     const std::uint64_t bytes = ch.audioStarted ? audio::StreamFramesPlayed(k == 0 ? 0 : 2) * 16 / 28  // per voice, PS-ADPCM bytes
-                                                : (g_vblanks - ch.start) * ch.rate * 16 / 28 * 1001 / 60000;
+                                                : ((ch.pausedAt ? ch.pausedAt : g_vblanks) - ch.start) * ch.rate * 16 / 28 * 1001 / 60000;
     const std::uint32_t pos = static_cast<std::uint32_t>(bytes & 0xFFFF), wraps = static_cast<std::uint32_t>(bytes >> 16);
     if (k == 0) {
       for (std::uint32_t c2 = 0; c2 < 2; ++c2) {

@@ -30,6 +30,7 @@ void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t byt
                  std::uint16_t pitch, std::uint16_t left, std::uint16_t right);
 void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes);  // plays after what is playing or queued
 void StreamVolume(int stream, int left, int right);  // 0..0x3FFF, -1 keeps that side; moves there over ~20 ms
+void StreamPitch(int stream, std::uint16_t pitch);  // 0 pauses the stream (the game's pause menu), other values resume at that rate
 void StreamStop(int stream);
 bool StreamPlaying(int stream);
 std::uint64_t StreamFramesPlayed(int stream);  // sample frames played since StreamStart
