@@ -2369,6 +2369,8 @@ bool EventPrivWrite(std::uint32_t address, u64 value, std::uint32_t size) {  // 
   }
 }
 
+#pragma warning(push)
+#pragma warning(disable : 4324)  // padded on purpose: each side's counters on cache lines of their own
 class GsThread {
  public:
   enum Type : u32 { kReg, kStQ, kImage, kPriv, kPresent, kReset };
@@ -2382,11 +2384,25 @@ class GsThread {
   }
   ~GsThread() { Stop(); }
   bool On() const { return m_on && !m_stopped; }
+  // Commands are published to the GS thread in batches (and whenever the game's thread waits for the GS, a present is
+  // queued or Flush is called): publishing each register write made its counter's cache line bounce between the two
+  // threads hundreds of thousands of times per refresh (21 % of the game's thread in a race, HP2_SAMPLE).
   void Push(u32 type, u32 a, u64 v, u64 w = 0) {
-    while (m_head - m_tail.load(std::memory_order_acquire) >= kCmds) Pause();
+    if (m_head - m_tailSeen >= kCmds) {  // the GS's progress is read only when the queue looks full (its cache line stays put)
+      m_tailSeen = m_tail.load(std::memory_order_acquire);
+      while (m_head - m_tailSeen >= kCmds) {
+        Pause();
+        m_tailSeen = m_tail.load(std::memory_order_acquire);
+      }
+    }
     m_cmds[m_head % kCmds] = {type, a, v, w};
     ++m_head;
-    m_published.store(m_head);
+    if (m_head - m_lastPublished >= kBatch) Publish();
+  }
+  void Publish() {
+    if (m_head == m_lastPublished) return;
+    m_lastPublished = m_head;
+    m_published.store(m_head);  // (seq_cst: ordered before the load of m_sleeping, against a missed wake-up)
     if (m_sleeping.load()) {
       m_signal.fetch_add(1);
       m_signal.notify_one();
@@ -2409,8 +2425,10 @@ class GsThread {
     while (m_presents.load(std::memory_order_acquire) >= 1) Pause();
     m_presents.fetch_add(1);
     Push(kPresent, 0, 0);
+    Publish();
   }
   void Flush() {
+    Publish();
     while (m_tail.load(std::memory_order_acquire) != m_head) Pause();
   }
   void Stop() {
@@ -2425,10 +2443,11 @@ class GsThread {
 
  private:
   struct Cmd { u32 type, a; u64 v, w; };
-  static constexpr u64 kCmds = 1ull << 18, kBytes = 64ull << 20;
+  static constexpr u64 kCmds = 1ull << 18, kBytes = 64ull << 20, kBatch = 256;
   static constexpr u64 kSpinCycles = 2'000'000;  // the GS thread spins ~0.5 ms for more work before it sleeps
   int m_pauses = 0;
-  void Pause() {  // the game's thread waiting for the GS
+  void Pause() {  // the game's thread waiting for the GS (which must see everything queued so far)
+    Publish();
     if (++m_pauses < 2000) _mm_pause();
     else { m_pauses = 0; std::this_thread::yield(); }
   }
@@ -2468,16 +2487,24 @@ class GsThread {
   bool m_on = false, m_stopped = false;
   std::vector<Cmd> m_cmds;
   std::vector<u8> m_bytes;
-  u64 m_head = 0, m_byteHead = 0;  // game's thread only
-  std::atomic<u64> m_published{0}, m_tail{0}, m_byteTail{0};
-  std::atomic<int> m_presents{0};
-  std::atomic<u32> m_signal{0};
+  // each side's counters on cache lines of their own (written by one thread, read by the other)
+  alignas(64) u64 m_head = 0, m_byteHead = 0, m_lastPublished = 0, m_tailSeen = 0;  // game's thread only
+  alignas(64) std::atomic<u64> m_published{0};                       // written by the game's thread
+  alignas(64) std::atomic<u64> m_tail{0};                            // written by the GS thread
+  alignas(64) std::atomic<u64> m_byteTail{0};                        // written by the GS thread
+  alignas(64) std::atomic<int> m_presents{0};
+  alignas(64) std::atomic<u32> m_signal{0};
   std::atomic<bool> m_sleeping{false}, m_quit{false};
   std::thread m_thread;
 };
+#pragma warning(pop)
+GsThread* g_gsThread = nullptr;  // (a plain pointer: the function-local static's guard was 4 % of the game's thread)
 GsThread& Gs() {
-  static GsThread t;
-  return t;
+  if (!g_gsThread) {
+    static GsThread t;
+    g_gsThread = &t;
+  }
+  return *g_gsThread;
 }
 }  // namespace
 

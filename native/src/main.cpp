@@ -12,6 +12,7 @@
 //     services at the library's entry functions.
 // Development build: it reports how far the game gets and why it stops.
 #include <windows.h>
+#include <intrin.h>
 
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
@@ -53,7 +54,8 @@ using namespace hp2;
 namespace {
 
 constexpr std::uint32_t kReturn = 0xFFFFFFF0u;  // return address of threads and handlers: back to the runtime
-constexpr int kSliceQuota = 20000;
+constexpr int kSliceQuota = 100000;  // guest cycles before the translated code returns to the scheduler (refresh interrupts have
+                                     // their own check every 64 entries; 20000 cost two fiber switches far too often in races)
 
 using EeCode = void (*)(std::uint8_t* state, std::uint8_t* ram, std::uint8_t* spr, const void* runtime);
 
@@ -106,13 +108,20 @@ std::string GuestString(std::uint32_t a, std::size_t max = 200) {
 // ---- code package ------------------------------------------------------------
 const Hp2CodeTable* g_table = nullptr;
 void* FindCode(std::uint32_t pc) {
+  // a direct-mapped cache in front of the two binary searches (about 2.4 million lookups per second in a race)
+  struct Slot { std::uint32_t pc; void* code; };
+  static Slot cache[1 << 14] = {};
+  Slot& slot = cache[(pc >> 2) & ((1 << 14) - 1)];
+  if (slot.code && slot.pc == pc) return slot.code;
   auto find = [&](const Hp2CodeEntry* list, std::uint32_t n) -> void* {
     const auto* end = list + n;
     const auto* it = std::lower_bound(list, end, pc, [](const Hp2CodeEntry& e, std::uint32_t a) { return e.address < a; });
     return it != end && it->address == pc ? it->code : nullptr;
   };
-  if (void* c = find(g_table->functions, g_table->function_count)) return c;
-  return find(g_table->entries, g_table->entry_count);
+  void* c = find(g_table->functions, g_table->function_count);
+  if (!c) c = find(g_table->entries, g_table->entry_count);
+  if (c) slot = {pc, c};
+  return c;
 }
 
 // ---- development: sampling profiler of the game's thread (HP2_SAMPLE=<script s>: from then until the end) ------------
@@ -268,8 +277,33 @@ std::uint64_t g_vblanks = 0, g_steps = 0, g_syscalls = 0, g_rpcCalls = 0;
 std::unordered_map<std::uint32_t, std::uint64_t> g_funcCount;  // function -> entries (traced packages)
 std::vector<std::uint32_t> g_funcOrder;                        // functions in order of their first entry
 LARGE_INTEGER g_qpf, g_nextVblank;
+// A cheap clock in QPC units for the hot paths (refresh due checks, the game's timer and Count reads): the CPU's cycle
+// counter, anchored to QueryPerformanceCounter once per refresh (a QPC read per check cost ~7 % of the game's thread).
+double g_qpcPerTsc = 0.0;
+std::uint64_t g_anchorTsc = 0;
+LONGLONG g_anchorQpc = 0;
+LONGLONG NowQpc() {
+  if (g_qpcPerTsc <= 0.0) {
+    LARGE_INTEGER n;
+    QueryPerformanceCounter(&n);
+    return n.QuadPart;
+  }
+  return g_anchorQpc + static_cast<LONGLONG>(static_cast<double>(__rdtsc() - g_anchorTsc) * g_qpcPerTsc);
+}
+void AnchorClock() {  // once per refresh: exact again, and the cycle rate refined
+  LARGE_INTEGER n;
+  QueryPerformanceCounter(&n);
+  const std::uint64_t t = __rdtsc();
+  if (g_anchorTsc && t > g_anchorTsc && n.QuadPart > g_anchorQpc) {
+    const double r = static_cast<double>(n.QuadPart - g_anchorQpc) / static_cast<double>(t - g_anchorTsc);
+    g_qpcPerTsc = g_qpcPerTsc > 0.0 ? g_qpcPerTsc * 0.9 + r * 0.1 : r;
+  }
+  g_anchorQpc = n.QuadPart;
+  g_anchorTsc = t;
+}
 std::uint64_t g_idleTicks = 0;  // time with every game thread waiting (perf line: what is left of each refresh)
 std::uint64_t g_codeTicks = 0, g_vu1Ticks = 0;  // time in translated EE code (everything it starts included), in VU1 microprograms
+                                                // (CPU cycles, __rdtsc: a QueryPerformanceCounter per entry cost ~2 ms per refresh)
 // Tests (HP2_TURBO=n or max): refreshes n times faster than real time, or as soon as every game thread waits. The game's
 // logic follows the refresh count, so a scripted run (HP2_PRESS, --until) gives the same result in less time. Silent.
 double g_turbo = 1.0;
@@ -451,9 +485,8 @@ VuCodeFn VuCodeAt(std::uint32_t pc) {
 void RunVu1(std::uint32_t pc) {
   ++g_vuRuns;
   struct Timer {  // (the GS work its XGKICKs start is included)
-    LARGE_INTEGER t0;
-    Timer() { QueryPerformanceCounter(&t0); }
-    ~Timer() { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_vu1Ticks += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart); }
+    std::uint64_t t0 = __rdtsc();
+    ~Timer() { g_vu1Ticks += __rdtsc() - t0; }
   } timer;
   g_vu1.pc = pc & 0x3FFF;
   g_vu1.has_exception = 0;
@@ -482,10 +515,23 @@ void VifUnpack(std::uint32_t cmd, std::uint32_t num, std::uint32_t imm, const st
   const std::uint32_t total = num ? num : 256;
   const std::uint32_t bits = (vn == 3 && vl == 3) ? 16 : (32u >> vl) * (vn + 1);
   const std::size_t in = pos;
+  // fast path, the common case: V4-32 vectors, no mask, no addition mode, every cycle written (CL == WL): plain copies
+  if (vn == 3 && vl == 0 && g_vifMode == 0 && (cl == wl || wl == 0) && in + static_cast<std::size_t>(total) * 16 <= d.size()) {
+    bool masked = false;
+    for (std::uint32_t r = 0; r < (std::min)(total, 4u); ++r) masked |= ((g_vifMask >> (r * 8)) & 0xFF) != 0;
+    if (!masked) {
+      for (std::uint32_t j = 0; j < total; ++j)
+        memcpy(g_vu1Data + ((dest + j) & 0x3FF) * 16, d.data() + in + static_cast<std::size_t>(j) * 16, 16);
+      pos += static_cast<std::size_t>(total) * 16;
+      return;
+    }
+  }
   auto fetch = [&](std::uint32_t bitOffset, std::uint32_t width) -> std::uint32_t {  // one element, sign/zero extended
     std::uint32_t v = 0;
     const std::size_t at = in + bitOffset / 8;
-    for (std::uint32_t i = 0; i < width / 8 && at + i < d.size(); ++i) v |= static_cast<std::uint32_t>(d[at + i]) << (8 * i);
+    if (at + width / 8 <= d.size()) memcpy(&v, d.data() + at, width / 8);  // (little-endian: the low bytes)
+    else
+      for (std::uint32_t i = 0; i < width / 8 && at + i < d.size(); ++i) v |= static_cast<std::uint32_t>(d[at + i]) << (8 * i);
     if (!usn && width < 32) v = static_cast<std::uint32_t>(static_cast<std::int32_t>(v << (32 - width)) >> (32 - width));
     return v;
   };
@@ -619,6 +665,17 @@ void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
   std::vector<std::uint8_t> data;
   auto take = [&](std::uint32_t address, std::uint32_t qwc) {
     const bool spr = (address & 0x80000000u) != 0;
+    const std::uint32_t a0 = address & 0x7FFFFFFFu, n = qwc * 16;
+    if (!spr && InRam(a0, n)) {  // one contiguous copy (was 16 bytes at a time)
+      const std::uint8_t* src = g_ram + Phys(a0);
+      data.insert(data.end(), src, src + n);
+      return;
+    }
+    if (spr && (a0 & 0x3FFF) + n <= 0x4000) {
+      const std::uint8_t* src = g_spr + (a0 & 0x3FFF);
+      data.insert(data.end(), src, src + n);
+      return;
+    }
     for (std::uint32_t i = 0; i < qwc; ++i) {
       const std::uint32_t a = (address & 0x7FFFFFFFu) + i * 16;
       const std::uint8_t* src = spr ? g_spr + (a & 0x3FFF) : g_ram + (InRam(a, 16) ? Phys(a) : 0);
@@ -683,9 +740,8 @@ std::uint64_t HwRead(std::uint8_t*, std::uint32_t address, std::uint32_t size) {
   }
   if (a >= 0x10000000 && a < 0x10002000) {  // timers: Tn_COUNT from host time
     if ((a & 0xFF) == 0x00) {
-      LARGE_INTEGER now;
-      QueryPerformanceCounter(&now);
-      return static_cast<std::uint32_t>(now.QuadPart * 9765 / g_qpf.QuadPart * 16) & 0xFFFF;  // ~bus clock / 256
+      const LONGLONG now = NowQpc();
+      return static_cast<std::uint32_t>(now * 9765 / g_qpf.QuadPart * 16) & 0xFFFF;  // ~bus clock / 256
     }
     return g_hw[a];
   }
@@ -743,10 +799,9 @@ void System(std::uint8_t* state, std::uint32_t raw) {
   if (((raw >> 21) & 31) == 0) {  // mfc0
     std::uint32_t v = rd == 12 ? g_status : rd == 15 ? 0x2E20 /* processor id */ : s.cop0[rd];
     if (rd == 9) {  // Count: CPU cycles at 294.912 MHz, from the host clock
-      LARGE_INTEGER now;
-      QueryPerformanceCounter(&now);
-      const std::uint64_t whole = static_cast<std::uint64_t>(now.QuadPart / g_qpf.QuadPart);
-      const std::uint64_t rest = static_cast<std::uint64_t>(now.QuadPart % g_qpf.QuadPart);
+      const LONGLONG now = NowQpc();
+      const std::uint64_t whole = static_cast<std::uint64_t>(now / g_qpf.QuadPart);
+      const std::uint64_t rest = static_cast<std::uint64_t>(now % g_qpf.QuadPart);
       v = static_cast<std::uint32_t>(whole * 294912000ull + rest * 294912000ull / static_cast<std::uint64_t>(g_qpf.QuadPart));
     }
     if (rt) s.gpr[rt][0] = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(v)));
@@ -854,8 +909,9 @@ void DeliverInterrupts() {
     if (g_dmacStat & (0x10000u << ch)) RunHandlers(g_dmac, ch);
   }
   LARGE_INTEGER now;
-  QueryPerformanceCounter(&now);
+  now.QuadPart = NowQpc();
   if (now.QuadPart >= g_nextVblank.QuadPart) {
+    AnchorClock();
     g_nextVblank.QuadPart += static_cast<LONGLONG>(static_cast<double>(g_qpf.QuadPart) * 1001.0 / 60000.0 / g_turbo);
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
@@ -1753,6 +1809,11 @@ void PadPoll() {
     static std::uint64_t prevIdle = 0, prevCode = 0, prevVu1 = 0;
     const gs::Stats st = gs::GetStats();
     const double ms = 1000.0 / static_cast<double>(g_qpf.QuadPart) / 600.0;
+    static std::uint64_t lastTsc = 0;  // the code and VU1 times are CPU cycles: cycles per QPC tick over these 600 refreshes
+    const std::uint64_t tsc = __rdtsc();
+    const double msCycles = last.QuadPart && tsc > lastTsc
+                                ? ms * static_cast<double>(now.QuadPart - last.QuadPart) / static_cast<double>(tsc - lastTsc) : 0.0;
+    lastTsc = tsc;
     if (last.QuadPart)
       Log("perf: vblank %llu, %.1f refreshes/s; per refresh: total %.1f ms, GS set-up %.1f ms (textures %.1f ms, %llu decodes), present %.1f ms, transfers %.1f ms, waiting for GS workers %.1f ms, %llu tris %llu sprites",
           static_cast<unsigned long long>(g_vblanks), 600.0 * static_cast<double>(g_qpf.QuadPart) / static_cast<double>(now.QuadPart - last.QuadPart),
@@ -1794,7 +1855,8 @@ void PadPoll() {
       prevSame = st.textureSame;
     }
     Log("perf:   threads%s; idle %.1f ms, in game code %.1f ms, in VU1 %.1f ms per refresh (both with the GS work they start)", threads.c_str(),
-        static_cast<double>(g_idleTicks - prevIdle) * ms, static_cast<double>(g_codeTicks - prevCode) * ms, static_cast<double>(g_vu1Ticks - prevVu1) * ms);
+        static_cast<double>(g_idleTicks - prevIdle) * ms, static_cast<double>(g_codeTicks - prevCode) * msCycles,
+        static_cast<double>(g_vu1Ticks - prevVu1) * msCycles);
     prevIdle = g_idleTicks;
     prevCode = g_codeTicks;
     prevVu1 = g_vu1Ticks;
@@ -2069,17 +2131,13 @@ void Step(NativeState& s) {
     s.cycle_quota = kSliceQuota;
     g_lastEntry = pc;
     if (g_profile) ++g_entryCount[pc];
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
+    const std::uint64_t t0 = __rdtsc();
     reinterpret_cast<EeCode>(code)(reinterpret_cast<std::uint8_t*>(&s), g_ram, g_spr, &g_runtime);
-    QueryPerformanceCounter(&t1);
-    g_codeTicks += static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);  // (GS and VU1 work started by the code included)
+    g_codeTicks += __rdtsc() - t0;  // (GS and VU1 work started by the code included)
     bool due = false;
     if (++g_sinceCheck >= 64) {
       g_sinceCheck = 0;  // a refresh interrupt is due: let the scheduler deliver it
-      LARGE_INTEGER now;
-      QueryPerformanceCounter(&now);
-      due = now.QuadPart >= g_nextVblank.QuadPart;
+      due = NowQpc() >= g_nextVblank.QuadPart;
     }
     if (s.pc == pc || s.cycle_quota <= 0 || g_resched || due) {  // also: a pass of a waiting loop, time slice used up
       g_resched = false;
@@ -2286,9 +2344,7 @@ int wmain(int argc, wchar_t** argv) {
         if (best->status == kRun) best->status = kReady;
         g_current = nullptr;
       }
-      LARGE_INTEGER now;
-      QueryPerformanceCounter(&now);
-      if (seconds > 0 && (now.QuadPart - start.QuadPart) > seconds * g_qpf.QuadPart) Stop("time limit of the run (%.0f s) reached", seconds);
+      if (seconds > 0 && (NowQpc() - start.QuadPart) > seconds * g_qpf.QuadPart) Stop("time limit of the run (%.0f s) reached", seconds);
     }
 
     LARGE_INTEGER end;
