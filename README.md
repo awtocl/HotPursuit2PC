@@ -141,14 +141,19 @@ game, and no part of the game's executable in any form (original, disassembled, 
 So that this can be checked, here is everything in the repository that was *derived from* the disc — all of it facts
 about the disc, none of it content:
 
-| File | What it holds |
-|---|---|
-| `converter/data/slus20362_rom_manifest.tsv` | names, sizes and SHA-256 hashes of the 27 files on the disc — used to tell a good dump from a damaged or different one |
-| `assets-pipeline/data/hp2_slus20362_names.txt` | the names of 362 files inside the game's archive, recovered so that unpacked files get readable names |
-| `tests/fixtures/slus20362_zfileset_inventory.tsv` | per-file offsets, sizes and SHA-256 hashes inside that archive, used by the tests |
-| `docs/dump-analysis.md` | a description of the archive's container format and the full file inventory |
-| `docs/recomp-analysis.md`, `recomp/tests/test_recomp_dump.cpp` | measurements of the game program: section addresses and sizes, counts of instructions, functions and switch tables, a handful of code addresses. No instructions or bytes of the program itself. |
-| `recomp/include/hp2/game_patches.h` | the addresses and values of the 16:9 and 60 fps patches (see [Credits](#license-and-credits)) |
+- [`converter/data/slus20362_rom_manifest.tsv`](converter/data/slus20362_rom_manifest.tsv) — names, sizes and
+  SHA-256 hashes of the 27 files on the disc, used to tell a good dump from a damaged or different one.
+- [`assets-pipeline/data/hp2_slus20362_names.txt`](assets-pipeline/data/hp2_slus20362_names.txt) — the names of 362
+  files inside the game's archive, recovered so that unpacked files get readable names.
+- [`tests/fixtures/slus20362_zfileset_inventory.tsv`](tests/fixtures/slus20362_zfileset_inventory.tsv) — per-file
+  offsets, sizes and SHA-256 hashes inside that archive, used by the tests.
+- [`docs/dump-analysis.md`](docs/dump-analysis.md) — a description of the archive's container format and the full
+  file inventory.
+- [`docs/recomp-analysis.md`](docs/recomp-analysis.md) and `recomp/tests/test_recomp_dump.cpp` — measurements of the
+  game program: section addresses and sizes, counts of instructions, functions and switch tables, a handful of code
+  addresses. No instructions or bytes of the program itself.
+- [`recomp/include/hp2/game_patches.h`](recomp/include/hp2/game_patches.h) — the addresses and values of the 16:9 and
+  60 fps patches (see [Credits](#license-and-credits)).
 
 **You must bring your own copy.** To use these tools you need a dump of a copy of the game that *you* legally own,
 made by you from your own disc. This project does not provide, link to, or help locate game files, disc images or
