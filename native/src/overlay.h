@@ -8,9 +8,9 @@ namespace ui {
 
 struct Settings {
   int renderer = 1;    // 0 software GS, 1 GPU (ADR 0014)
-  int resolution = 0;  // GPU internal resolution: 0 1x (native), 1 2x, 2 3x, 3 4x, 4 6x, 5 8x (above the screen's: supersampling)
+  int resolution = 3;  // GPU internal resolution: 0 1x (native), 1 2x, 2 3x, 3 4x (default), 4 6x, 5 8x (above the screen's: supersampling)
   int frameRate = 1;   // 0 30 frames per second (the game's own), 1 60 (the game's 60 fps patch, ADR 0015)
-  int fullscreen = 0;  // 0 window, 1 borderless full screen
+  int fullscreen = 1;  // 0 window, 1 borderless full screen (default)
   int vsync = 1;       // 0 off (tearing allowed when the system supports it), 1 on
   int filter = 0;      // 0 sharp bilinear, 1 bilinear, 2 nearest
   int aspect = 0;      // 0 16:9 (the game's widescreen patches, ADR 0015), 1 4:3, 2 4:3 integer scale, 3 stretch to the window

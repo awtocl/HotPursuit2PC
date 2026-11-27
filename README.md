@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="docs/GETTING-STARTED.md"><b>Getting started</b></a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
   <a href="#controls">Controls</a> ·
@@ -60,23 +61,22 @@ emulator in the way.
 
 ## Quick start
 
-**You need:** Windows 10/11 x64 · Visual Studio 2022 (or its Build Tools) with the C++ workload · git · PowerShell 7 · about
-3 GB of free disk space for the build tools · and **the contents of your own disc**: a folder holding `SYSTEM.CNF`,
-`SLUS_203.62` and `NFSHP2`. If you made an `.iso` of your disc, double-click it to mount it and use its drive, or
-extract it with a tool such as 7-Zip.
+> [!TIP]
+> **New to this?** Follow the step-by-step guide, **[Getting started](docs/GETTING-STARTED.md)**: what you need,
+> installing the tools, copying your disc, building, the best settings, controls and troubleshooting.
+
+**In short:** with Windows 10/11 x64, *Build Tools for Visual Studio 2022* (C++ workload), Git and PowerShell 7
+installed, and the contents of **your own disc** copied to a folder (`SYSTEM.CNF`, `SLUS_203.62`, `NFSHP2`):
 
 ```powershell
 git clone https://github.com/awtocl/HotPursuit2PC.git
 cd HotPursuit2PC
-pwsh tools/fetch-llvm.ps1           # LLVM source for the recompiler (~171 MB download)
-pwsh tools/build-llvm.ps1           # builds it once (~2.5 GB on disk, takes a while)
-pwsh tools/install-native.ps1       # asks for your disc folder, builds, recompiles, installs
+pwsh tools/install-native.ps1       # asks for your disc folder, then builds everything
 ```
 
-`install-native.ps1` checks the folder and that `SLUS_203.62` is the supported version, builds the project,
-recompiles the game's program **from your copy, on your PC**, and writes `game-native\` with
-`HotPursuit2Native.exe`, the recompiled code (`hp2code.dll`) and **`Play.cmd`** — double-click that to play. You can
-also pass the folder directly: `pwsh tools/install-native.ps1 -Rom "D:\My dumps\Need for Speed - Hot Pursuit 2 (USA)"`.
+The script checks your disc, downloads and builds LLVM the first time (15–40 minutes), builds the project,
+recompiles the game's program **from your copy, on your PC**, and writes `game-native\` — double-click
+**`Play.cmd`** there to play. About an hour the first time; a few minutes after an update.
 
 There are no prebuilt releases: the recompiled code is made from your copy of the game, so it cannot be shipped.
 
@@ -257,6 +257,7 @@ only, races at 30 fps.
 
 | Document | What it is |
 |---|---|
+| [`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md) | Step-by-step: from your disc to playing, recommended settings, troubleshooting |
 | [`docs/STATUS.md`](docs/STATUS.md) | Where the project stands, what is next, open questions |
 | [`docs/adr/`](docs/adr/) | Architecture decision records, each with the options that were rejected |
 | [`docs/recomp-analysis.md`](docs/recomp-analysis.md) | How the game program and its services work, as measured while building the native game |
