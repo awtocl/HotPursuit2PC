@@ -605,6 +605,16 @@ void ParseVif1(const std::vector<std::uint8_t>& incoming) {
 }
 
 void RunDma(std::uint32_t channel, std::uint32_t base, std::uint32_t chcr) {
+  if (channel == 1 && (chcr & 1) == 0) {  // VIF1 towards memory: the GS's local-to-host transfer (the race's sun test)
+    const std::uint32_t madr = g_hw[base + 0x10], bytes = (g_hw[base + 0x20] & 0xFFFF) * 16;
+    LogOnce("gsread", "hw: GS local-to-host transfer read by DMA (%u bytes to %08X)", bytes, madr);
+    if (madr & 0x80000000u) {
+      if ((madr & 0x3FFF) + bytes <= 0x4000) gs::LocalToHost(g_spr + (madr & 0x3FFF), bytes);
+    } else if (InRam(madr, bytes)) {
+      gs::LocalToHost(g_ram + Phys(madr), bytes);
+    }
+    return;
+  }
   std::vector<std::uint8_t> data;
   auto take = [&](std::uint32_t address, std::uint32_t qwc) {
     const bool spr = (address & 0x80000000u) != 0;
@@ -810,18 +820,29 @@ void RaiseGsInterrupt() {
 // game may write the data itself). The game lays its HUD out and squeezes its 2D front end into the middle of the frame
 // from them early on, so the mode is chosen once, at the first refresh: switching between 16:9 and 4:3 needs a restart.
 // The two HUD constants are the low halves of `lui` words the translation reads from memory.
-void ApplyWidescreen() {
+// 60 frames per second: the frame loop's constant (hp2::patches::kFrameRate), written every refresh from the setting, which
+// applies at once.
+void ApplyGamePatches() {
   static const bool wide = [] {
     const bool w = gs::Widescreen();
     gs::SetWidePicture(w);
     Log("Display: %s", w ? "widescreen 16:9 (game patches on)" : "4:3");
     return w;
   }();
-  if (!wide) return;
-  for (const hp2::patches::DataWord& d : hp2::patches::kWidescreenWords)
-    *reinterpret_cast<std::uint32_t*>(g_ram + d.address) = d.widescreen;
-  for (const hp2::patches::Immediate& i : hp2::patches::kRuntimeImmediates)
-    *reinterpret_cast<std::uint16_t*>(g_ram + i.address) = i.widescreen;
+  if (wide) {
+    for (const hp2::patches::DataWord& d : hp2::patches::kWidescreenWords)
+      *reinterpret_cast<std::uint32_t*>(g_ram + d.address) = d.widescreen;
+    for (const hp2::patches::Immediate& i : hp2::patches::kRuntimeImmediates)
+      *reinterpret_cast<std::uint16_t*>(g_ram + i.address) = i.patched;
+  }
+  const bool fast = gs::FrameRate60();
+  static int shown = -1;
+  if (shown != (fast ? 1 : 0)) {
+    shown = fast ? 1 : 0;
+    Log("Frame rate: %s", fast ? "60 (game patch on)" : "30");
+  }
+  constexpr hp2::patches::Immediate f = hp2::patches::kFrameRate;
+  *reinterpret_cast<std::uint16_t*>(g_ram + f.address) = fast ? f.patched : f.original;
 }
 
 void DeliverInterrupts() {
@@ -837,7 +858,7 @@ void DeliverInterrupts() {
     g_nextVblank.QuadPart += static_cast<LONGLONG>(static_cast<double>(g_qpf.QuadPart) * 1001.0 / 60000.0 / g_turbo);
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
-    ApplyWidescreen();
+    ApplyGamePatches();
     if (g_turboUntil == ~0ull && g_menuMusic && g_turbo != 1.0) g_turboUntil = g_vblanks;  // HP2_TURBO_UNTIL=menu
     if (g_turboUntil && g_vblanks == g_turboUntil) {
       g_turbo = 1.0;
@@ -1133,7 +1154,9 @@ bool DiscRead(std::uint64_t offset, void* out, std::uint64_t count) {
 // game starts a movie's sound (stream 0 opened on sector 0 with size 0x7FFFFFFF, then command 01), the runtime plays the
 // sound chunks of the AVI the game last started reading: PS-ADPCM, stereo, left and right alternating in 0x8000-byte blocks
 // (the EA logo's track is 5 x 0x10000 bytes), at the pitch the game sets.
-std::uint32_t g_aviLsn = 0;  // first sector of the AVI file the game last read the start of (game thread)
+std::uint32_t g_aviLsn = 0;
+bool g_musicIsMovie = false;  // the music channel plays a movie's sound
+int g_movieCount = 0;         // movies started (each one's number tells the window a new picture to fit)  // first sector of the AVI file the game last read the start of (game thread)
 std::mutex g_movieMutex;
 std::vector<std::pair<std::uint64_t, std::uint32_t>> g_movieChunks;  // disc offset and size of each sound chunk, in order
 std::vector<std::uint64_t> g_movieStarts;                            // offset of each chunk in the joined sound
@@ -1399,6 +1422,8 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
           ch.bytes = f.length;
           ch.durationVblanks = f.length ? VblanksFor(s == 0 ? f.length / 2 : f.length, ch.rate) : ~0ull;
           const bool movie = s == 0 && f.lsn == 0 && f.size == 0x7FFFFFFFu;  // a movie's sound (see MovieRead)
+          if (s == 0) g_musicIsMovie = movie;
+          if (movie) ++g_movieCount;
           if (movie && audio::Available()) {
             const std::uint32_t bytes = MovieIndex(g_aviLsn);
             Log("streamer: vblank %llu movie sound: AVI at sector %u, %u bytes", static_cast<unsigned long long>(g_vblanks), g_aviLsn, bytes);
@@ -1444,6 +1469,7 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
     }
     i += 2u + na;
   }
+  gs::SetFullScreenMovie(g_music.active && g_musicIsMovie ? g_movieCount : 0);  // (the window fills the screen with it)
   std::uint32_t* w = reinterpret_cast<std::uint32_t*>(g_ram + Phys(recv));
   std::uint32_t entries = 0;
   const auto entry = [&](std::uint32_t slot, std::uint32_t voice, std::uint32_t pos, std::uint32_t wraps, std::uint32_t base,

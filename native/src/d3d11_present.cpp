@@ -38,6 +38,15 @@ ID3D11SamplerState* g_linear = nullptr;
 ID3D11BlendState* g_premul = nullptr;
 ID3D11RasterizerState* g_raster = nullptr;
 ID3D11Buffer* g_cb = nullptr;
+// Full-screen movies (Draw's fitContent): CSBounds finds the picture's non-black part; its result comes back through a ring
+// of staging buffers read without waiting. The part only grows while the movie plays (dark scenes do not shrink it).
+ID3D11ComputeShader* g_boundsCs = nullptr;
+ID3D11Buffer* g_boundsBuf = nullptr;
+ID3D11UnorderedAccessView* g_boundsUav = nullptr;
+ID3D11Buffer* g_boundsStaging[3] = {};
+bool g_boundsQueued[3] = {};
+int g_boundsNext = 0, g_boundsW = 0, g_boundsH = 0;
+float g_content[4] = {1, 1, 0, 0};  // x0, y0, x1, y1 of the picture (0..1); empty while x1 <= x0
 bool g_tearing = false;
 
 struct Tex {
@@ -63,6 +72,17 @@ V VS(uint id : SV_VertexID) {
   return o;
 }
 float3 Fetch(float2 uv) {
+  // a picture larger than the screen (high internal resolution): the average of its pixels under each screen pixel
+  // (bilinear taps spread over the footprint, up to 4 x 4: a box filter, so supersampling smooths instead of aliasing)
+  const float2 ratio = srcSize.xy / dstSize.xy;
+  if (max(ratio.x, ratio.y) > 1.05) {
+    const int2 n = (int2)clamp(ceil(ratio), 1.0, 4.0);
+    float3 sum = 0;
+    [unroll] for (int y = 0; y < 4; ++y)
+      [unroll] for (int x = 0; x < 4; ++x)
+        if (x < n.x && y < n.y) sum += src.SampleLevel(linearS, uv + ((float2(x, y) + 0.5) / n - 0.5) * ratio * srcSize.zw, 0).rgb;
+    return sum / (n.x * n.y);
+  }
   if (prm.x < 0.5) {  // sharp bilinear: nearest inside each texel, a one-output-pixel blend at its edges
     float2 tex = uv * srcSize.xy;
     float2 scale = max(floor(dstSize.xy * srcSize.zw), 1.0);
@@ -90,6 +110,21 @@ float4 PSFrame(V i) : SV_Target {
   return float4(saturate(c), 1);
 }
 float4 PSOverlay(V i) : SV_Target { return src.SampleLevel(pointS, i.uv, 0); }
+// Full-screen movies: the bounds of the picture's non-black part (every 4th pixel), as min x, min y, ~max x, ~max y (all
+// minimums: a buffer clear writes one value to every element).
+RWBuffer<uint> bounds : register(u0);
+[numthreads(16, 16, 1)] void CSBounds(uint3 id : SV_DispatchThreadID) {
+  uint w, h;
+  src.GetDimensions(w, h);
+  const uint2 p = id.xy * 4;
+  if (p.x >= w || p.y >= h) return;
+  const float3 c = src.Load(int3(p, 0)).rgb;
+  if (max(c.r, max(c.g, c.b)) < 0.1) return;
+  InterlockedMin(bounds[0], p.x);
+  InterlockedMin(bounds[1], p.y);
+  InterlockedMin(bounds[2], ~p.x);
+  InterlockedMin(bounds[3], ~p.y);
+}
 )";
 
 using CompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
@@ -263,6 +298,26 @@ bool Init(HWND__* window) {
     return false;
   }
 
+  {  // movie bounds (optional: without them movies keep the picture's own fit)
+    ID3DBlob* cs = nullptr;
+    if (Compile(compile, "CSBounds", "cs_5_0", &cs) && SUCCEEDED(g_dev->CreateComputeShader(cs->GetBufferPointer(), cs->GetBufferSize(), nullptr, &g_boundsCs))) {
+      D3D11_BUFFER_DESC bd = {};
+      bd.ByteWidth = 16;
+      bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+      ud.Format = DXGI_FORMAT_R32_UINT;
+      ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+      ud.Buffer.NumElements = 4;
+      bool made = SUCCEEDED(g_dev->CreateBuffer(&bd, nullptr, &g_boundsBuf)) &&
+                  SUCCEEDED(g_dev->CreateUnorderedAccessView(g_boundsBuf, &ud, &g_boundsUav));
+      bd.BindFlags = 0;
+      bd.Usage = D3D11_USAGE_STAGING;
+      bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      for (ID3D11Buffer*& b : g_boundsStaging) made = made && SUCCEEDED(g_dev->CreateBuffer(&bd, nullptr, &b));
+      if (!made) Release(g_boundsCs);
+    }
+    Release(cs);
+  }
   ID3DBlob *vs = nullptr, *psF = nullptr, *psO = nullptr;
   ok = Compile(compile, "VS", "vs_5_0", &vs) && Compile(compile, "PSFrame", "ps_5_0", &psF) && Compile(compile, "PSOverlay", "ps_5_0", &psO) &&
        SUCCEEDED(g_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_vs)) &&
@@ -308,6 +363,10 @@ void Shutdown() {
   Release(g_overlay.srv);
   Release(g_overlay.tex);
   Release(g_cb);
+  for (ID3D11Buffer*& b : g_boundsStaging) Release(b);
+  Release(g_boundsUav);
+  Release(g_boundsBuf);
+  Release(g_boundsCs);
   Release(g_raster);
   Release(g_premul);
   Release(g_linear);
@@ -332,7 +391,7 @@ void Resize() {
 }
 
 void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged, const std::uint32_t* overlay, int overlayW, int overlayH,
-          bool overlayChanged, const ui::Settings& s, void* gpuFrame, int gpuW, int gpuH) {
+          bool overlayChanged, const ui::Settings& s, void* gpuFrame, int gpuW, int gpuH, int movie) {
   if (!g_swap || !g_rtv) return;
   std::lock_guard<std::recursive_mutex> gfxLock(gfx::Lock());  // (the GS thread's renderer uses the same context)
   RECT rc = {};
@@ -356,6 +415,65 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
   // the picture: the GPU renderer's copy of the shown target, or the software GS's frame uploaded above
   ID3D11ShaderResourceView* const picture = gpuFrame ? static_cast<ID3D11ShaderResourceView*>(gpuFrame) : g_frame.srv;
   const int pw = gpuFrame ? gpuW : g_frame.w, ph = gpuFrame ? gpuH : g_frame.h;
+  const float* fit = nullptr;  // the picture's part that fills the window (full-screen movies)
+  static int boundsMovie = 0;
+  if (picture && pw > 0 && ph > 0 && movie && g_boundsCs) {
+    if (pw != g_boundsW || ph != g_boundsH || movie != boundsMovie) {  // another movie or picture size: start over
+      boundsMovie = movie;
+      for (bool& q : g_boundsQueued) q = false;  // (results of the previous movie are dropped)
+      g_content[0] = g_content[1] = 1;
+      g_content[2] = g_content[3] = 0;
+      g_boundsW = pw;
+      g_boundsH = ph;
+    }
+    for (int k = 0; k < 3; ++k) {  // results of earlier frames that are ready
+      if (!g_boundsQueued[k]) continue;
+      D3D11_MAPPED_SUBRESOURCE m = {};
+      if (g_ctx->Map(g_boundsStaging[k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) != S_OK) continue;
+      const std::uint32_t* b = static_cast<const std::uint32_t*>(m.pData);
+      if (b[0] != 0xFFFFFFFFu && b[1] != 0xFFFFFFFFu) {  // (else nothing but black yet)
+        const float box[4] = {static_cast<float>(b[0]) / static_cast<float>(pw), static_cast<float>(b[1]) / static_cast<float>(ph),
+                              std::min(static_cast<float>(~b[2] + 4) / static_cast<float>(pw), 1.0f),
+                              std::min(static_cast<float>(~b[3] + 4) / static_cast<float>(ph), 1.0f)};
+        const bool empty = g_content[2] <= g_content[0];
+        g_content[0] = empty ? box[0] : std::min(g_content[0], box[0]);
+        g_content[1] = empty ? box[1] : std::min(g_content[1], box[1]);
+        g_content[2] = empty ? box[2] : std::max(g_content[2], box[2]);
+        g_content[3] = empty ? box[3] : std::max(g_content[3], box[3]);
+      }
+      g_ctx->Unmap(g_boundsStaging[k], 0);
+      g_boundsQueued[k] = false;
+    }
+    const int k = g_boundsNext;
+    if (!g_boundsQueued[k]) {  // this frame's bounds (read in a later frame)
+      const UINT reset[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+      g_ctx->ClearUnorderedAccessViewUint(g_boundsUav, reset);
+      g_ctx->CSSetShader(g_boundsCs, nullptr, 0);
+      g_ctx->CSSetShaderResources(0, 1, &picture);
+      g_ctx->CSSetUnorderedAccessViews(0, 1, &g_boundsUav, nullptr);
+      g_ctx->Dispatch(static_cast<UINT>((pw / 4 + 15) / 16), static_cast<UINT>((ph / 4 + 15) / 16), 1);
+      ID3D11ShaderResourceView* noSrv = nullptr;
+      ID3D11UnorderedAccessView* noUav = nullptr;
+      g_ctx->CSSetShaderResources(0, 1, &noSrv);
+      g_ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+      g_ctx->CopyResource(g_boundsStaging[k], g_boundsBuf);
+      g_boundsQueued[k] = true;
+      g_boundsNext = (k + 1) % 3;
+    }
+    static const bool boundsLog = std::getenv("HP2_MOVIE_BOX_LOG") != nullptr;  // development
+    static int logged = 0;
+    if (boundsLog && logged++ < 300)
+      if (FILE* f = std::fopen(".cache/native/movie_box.txt", logged == 1 ? "w" : "a")) {
+        std::fprintf(f, "movie %d picture %dx%d content %.3f %.3f %.3f %.3f\n", movie, pw, ph, g_content[0], g_content[1], g_content[2], g_content[3]);
+        std::fclose(f);
+      }
+    const float cw0 = g_content[2] - g_content[0], ch0 = g_content[3] - g_content[1];
+    if (cw0 > 0.25f && ch0 > 0.25f && cw0 * ch0 < 0.97f) fit = g_content;  // (all of it: nothing to enlarge)
+  } else if (!movie) {
+    g_content[0] = g_content[1] = 1;
+    g_content[2] = g_content[3] = 0;
+    for (bool& q : g_boundsQueued) q = false;
+  }
   if (picture && pw > 0 && ph > 0) {
     // destination rectangle: the PS2 picture is 4:3 whatever its pixel size, or 16:9 with the game's widescreen patches
     // (ADR 0015: the game then draws a wider view into the same frame, shown here at its real shape)
@@ -369,6 +487,15 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
       vh = static_cast<float>(ph * k);
     }
     D3D11_VIEWPORT vp = {std::floor((static_cast<float>(cw) - vw) / 2), std::floor((static_cast<float>(ch) - vh) / 2), vw, vh, 0, 1};
+    if (fit && (s.aspect == 0 || s.aspect == 1)) {  // the rectangle at its own shape, as large as the window allows, centred
+      const float shape = s.aspect == 0 ? 16.0f / 9.0f : 4.0f / 3.0f;  // the whole picture's
+      const float bw = (fit[2] - fit[0]) * shape, bh = fit[3] - fit[1];  // the rectangle in picture heights
+      const float k = std::min(static_cast<float>(cw) / bw, static_cast<float>(ch) / bh);  // window pixels per picture height
+      vw = k * shape;
+      vh = k;
+      vp = {std::floor(static_cast<float>(cw) / 2 - (fit[0] + fit[2]) / 2 * vw), std::floor(static_cast<float>(ch) / 2 - (fit[1] + fit[3]) / 2 * vh),
+            vw, vh, 0, 1};
+    }
     g_ctx->RSSetViewports(1, &vp);
     D3D11_MAPPED_SUBRESOURCE m = {};
     if (SUCCEEDED(g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {

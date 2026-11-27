@@ -1,4 +1,4 @@
-# ADR 0015 — Widescreen 16:9 by default, through game patches switchable at run time
+# ADR 0015 — Widescreen 16:9 by default and 60 fps, through game patches applied by the runtime
 
 - **Status:** Accepted (2026-11-27)
 - **Depends on:** ADR 0009 (code package), ADR 0012 (native runtime), ADR 0013 (settings overlay)
@@ -31,13 +31,19 @@ misplaced (measured: lap panel and tachometer pushed off the right edge).
    written every refresh from then on (as PCSX2 applies patches each vsync: the game may write those words itself) and the
    window shows the picture at 16:9. Switching between 16:9 and the 4:3 modes takes effect after a restart; the settings
    menu marks a pending change "(restart)". 4:3, 4:3 integer scale and Stretch apply at once among themselves.
-3. **Settings:** *Aspect ratio* has 16:9 (default), 4:3, 4:3 integer scale and Stretch, stored under a new key
-   (`aspect_ratio`) so the old `aspect` values (0 = 4:3) do not carry over. `HP2_ASPECT=n` overrides it for tests.
+3. **60 frames per second** ("60 FPS" by asasega in the same file): the frame loop's `sltiu v0, v0, 2` (wait for two
+   vertical blanks) at 0x00113E2C reads its constant from memory like the HUD `lui` constants; the runtime writes 2 or 1
+   every refresh from the *Frame rate* setting (60 by default), which applies at once. Measured: the race clock advances
+   10.0 s in 10 s of game time at 60 fps (the game times its simulation itself), 600 pictures per 10 s.
+4. **Settings:** *Aspect ratio* has 16:9 (default), 4:3, 4:3 integer scale and Stretch, stored under a new key
+   (`aspect_ratio`) so the old `aspect` values (0 = 4:3) do not carry over. `HP2_ASPECT=n` and `HP2_FPS=30|60` override
+   them for tests.
 
 ## Consequences
 
 - Races fill a 16:9 screen with a wider view (Hor+), the HUD keeps its shapes; menus keep their 4:3 shape inside the
   16:9 picture (drawn so by the game).
-- A change between 16:9 and 4:3 needs a restart.
+- A change between 16:9 and 4:3 needs a restart; the frame rate switches at once.
+- At 60 fps the game does twice the work per second (CPU, VU1 and GS); the native runtime keeps 60 refreshes per second.
 - Future game patches use the same three mechanisms; a code word that is not neutral with the original data needs a
   run-time form like the `lui` constants.

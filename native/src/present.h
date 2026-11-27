@@ -18,6 +18,8 @@ void Resize();              // after the window's client size changed
 void RequestShot(const char* path);
 // gpuFrame (an ID3D11ShaderResourceView*, gpuW x gpuH): the GPU renderer's picture, shown instead of `frame` (ADR 0014).
 void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged, const std::uint32_t* overlay, int overlayW,
-          int overlayH, bool overlayChanged, const ui::Settings& s, void* gpuFrame = nullptr, int gpuW = 0, int gpuH = 0);
+          int overlayH, bool overlayChanged, const ui::Settings& s, void* gpuFrame = nullptr, int gpuW = 0, int gpuH = 0,
+          int movie = 0);  // movie: the full-screen movie playing (a number per movie, 0 none); its picture's non-black
+                           // part fills the window at its own shape (the black around it may fall outside)
 
 }  // namespace present

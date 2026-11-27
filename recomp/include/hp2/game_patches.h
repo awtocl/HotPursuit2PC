@@ -1,9 +1,10 @@
 // Game patches for SLUS-20362 (ADR 0015), shared by the recompiler and the native runtime.
+// 60 frames per second: "60 FPS" by asasega in the same file (one constant, switchable while the game runs).
 // Widescreen 16:9: the camera and HUD values of PCSX2's patch database (pcsx2_patches, SLUS-20362_1D2818AF.pnach,
 // "Widescreen 16:9" by nemesis2000 and "HUD fixed for widescreen" by Aero_), applied so that 4:3 and 16:9 can be switched
 // while the game runs:
 //  - code words that change nothing with the game's own data are built into the translation (kBakedPatches);
-//  - `lui` instructions whose constant differs between the modes read it from guest memory at run time
+//  - `lui` and `sltiu` instructions whose constant differs between the modes read it from guest memory at run time
 //    (kRuntimeImmediates): the runtime writes the wanted constant into the instruction word's low half;
 //  - data words are written by the runtime (kWidescreenWords).
 #pragma once
@@ -22,10 +23,10 @@ inline constexpr CodeWord kBakedPatches[] = {
     {0x0010E994u, 0x460E1702u, 0x46011702u},  // mul.s f28, f2, f14 -> mul.s f28, f2, f1
 };
 
-// `lui` instructions translated to read their 16-bit constant from the instruction word in guest memory.
+// Instructions (`lui`, `sltiu`) translated to read their 16-bit constant from the instruction word in guest memory.
 struct Immediate {
   std::uint32_t address;
-  std::uint16_t original, widescreen;
+  std::uint16_t original, patched;
 };
 inline constexpr Immediate kRuntimeImmediates[] = {
     {0x0010EDECu, 0x4320u, 0x42F0u},  // HUD: 160.0 -> 120.0
@@ -43,10 +44,13 @@ inline constexpr DataWord kWidescreenWords[] = {
     {0x00330188u, 0x00000000u, 0x44555555u},  // HUD: 0 -> 853.33 (640 * 4/3)
 };
 
+// The frame loop waits until the vertical blank counter has advanced by 2 (30 frames per second); 1 gives 60.
+inline constexpr Immediate kFrameRate = {0x00113E2Cu, 0x0002u, 0x0001u};  // sltiu v0, v0, 2 -> 1
+
 constexpr bool IsRuntimeImmediate(std::uint32_t address) {
   for (const Immediate& i : kRuntimeImmediates)
     if (i.address == address) return true;
-  return false;
+  return address == kFrameRate.address;
 }
 
 }  // namespace hp2::patches

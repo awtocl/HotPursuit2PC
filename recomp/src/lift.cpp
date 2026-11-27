@@ -775,7 +775,12 @@ class FunctionLifter : public VectorCode {
       case Op::SLT: W(rd, b_.CreateZExt(b_.CreateICmpSLT(R(rs), R(rt)), i64_)); break;
       case Op::SLTU: W(rd, b_.CreateZExt(b_.CreateICmpULT(R(rs), R(rt)), i64_)); break;
       case Op::SLTI: W(rt, b_.CreateZExt(b_.CreateICmpSLT(R(rs), sx64(in.simm())), i64_)); break;
-      case Op::SLTIU: W(rt, b_.CreateZExt(b_.CreateICmpULT(R(rs), sx64(in.simm())), i64_)); break;
+      case Op::SLTIU:
+        if (patches::IsRuntimeImmediate(pc))  // a game patch point (ADR 0015): the constant is what guest memory holds there
+          W(rt, b_.CreateZExt(b_.CreateICmpULT(R(rs), b_.CreateSExt(read(b_.getInt32(pc), 2), i64_)), i64_));
+        else
+          W(rt, b_.CreateZExt(b_.CreateICmpULT(R(rs), sx64(in.simm())), i64_));
+        break;
       case Op::MOVZ: if (rd) W(rd, b_.CreateSelect(b_.CreateICmpEQ(R(rt), b_.getInt64(0)), R(rs), R(rd))); break;
       case Op::MOVN: if (rd) W(rd, b_.CreateSelect(b_.CreateICmpNE(R(rt), b_.getInt64(0)), R(rs), R(rd))); break;
       case Op::MFHI: W(rd, ld(i64_, L_.hi)); break;

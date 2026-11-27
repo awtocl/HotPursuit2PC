@@ -189,6 +189,7 @@ struct Depth {
   int w = 0, h = 0;
   ID3D11Texture2D* tex = nullptr;
   ID3D11DepthStencilView* dsv = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;  // (R32_FLOAT view for ReadDepth)
 };
 struct GpuTexture {
   std::shared_ptr<const u32[]> keep;  // (the decoded buffer stays allocated while it is cached here: its address is the key)
@@ -224,6 +225,22 @@ constexpr std::size_t kMaxVertices = 1 << 16;
 
 bool g_tried = false, g_ok = false;
 std::string g_error;  // why the renderer is unavailable
+// ReadDepth: a compute shader gathers the rectangle's Z values (one sample per GS pixel) into a small buffer read back.
+const char kReadHlsl[] = R"(
+Texture2D<float> depth : register(t0);
+RWBuffer<uint> zout : register(u0);
+cbuffer P : register(b0) { uint4 rect; uint4 scale; };  // x, y, w, h (GS pixels); internal scale
+[numthreads(8, 8, 1)] void CS(uint3 id : SV_DispatchThreadID) {
+  if (id.x >= rect.z || id.y >= rect.w) return;
+  const uint n = scale.x;
+  const float v = depth.Load(int3((rect.x + id.x) * n + n / 2, (rect.y + id.y) * n + n / 2, 0));
+  zout[id.y * rect.z + id.x] = (uint)min(v * 4294967296.0, 4294967040.0);  // (depth is stored as Z / 2^32)
+}
+)";
+ID3D11ComputeShader* g_readCs = nullptr;
+ID3D11Buffer *g_readCb = nullptr, *g_readBuf = nullptr, *g_readStaging = nullptr;
+ID3D11UnorderedAccessView* g_readUav = nullptr;
+UINT g_readSize = 0;  // elements in g_readBuf
 ID3D11Device* g_dev = nullptr;
 ID3D11DeviceContext* g_ctx = nullptr;
 ID3D11VertexShader* g_vs = nullptr;
@@ -256,7 +273,8 @@ int g_newest = -1, g_next = 0;
 std::mutex g_pictureMutex;
 
 struct Counters {
-  u64 targetsDropped = 0, prims = 0, batches = 0, textureUploads = 0, targetsCreated = 0, feedbackCopies = 0, approximations = 0, uploads = 0, presents = 0;
+  u64 targetsDropped = 0, prims = 0, batches = 0, textureUploads = 0, targetsCreated = 0, feedbackCopies = 0, approximations = 0, uploads = 0, presents = 0,
+      readbacks = 0;
 } g_count, g_reported;
 std::map<u64, u64> g_approxAlpha;
 std::map<std::string, u64> g_notes;  // unimplemented features met (Note)  // ALPHA register values that were approximated (diagnostic)
@@ -286,6 +304,18 @@ bool Init() {
     g_error += std::string(" pixel shader: ") + static_cast<const char*>(err->GetBufferPointer());
     Release(err);
   }
+  ID3DBlob* cs = nullptr;  // (ReadDepth's; without it the sun test reads GS memory)
+  if (ok && SUCCEEDED(compile(kReadHlsl, sizeof kReadHlsl - 1, "gs_read", nullptr, nullptr, "CS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &err))) {
+    g_dev->CreateComputeShader(cs->GetBufferPointer(), cs->GetBufferSize(), nullptr, &g_readCs);
+    D3D11_BUFFER_DESC cd = {};
+    cd.ByteWidth = 32;
+    cd.Usage = D3D11_USAGE_DYNAMIC;
+    cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_dev->CreateBuffer(&cd, nullptr, &g_readCb);
+  }
+  Release(cs);
+  Release(err);
   std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
   ok = ok && SUCCEEDED(g_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_vs)) &&
        SUCCEEDED(g_dev->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &g_ps));
@@ -390,11 +420,19 @@ Depth* GetDepth(u32 page, int w, int h) {
   d.Width = static_cast<UINT>(w * g_scale);
   d.Height = static_cast<UINT>(h * g_scale);
   d.MipLevels = d.ArraySize = 1;
-  d.Format = DXGI_FORMAT_D32_FLOAT;
+  d.Format = DXGI_FORMAT_R32_TYPELESS;  // depth view D32_FLOAT, shader view R32_FLOAT (ReadDepth)
   d.SampleDesc.Count = 1;
-  d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+  d.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
   g_dev->CreateTexture2D(&d, nullptr, &z->tex);
-  g_dev->CreateDepthStencilView(z->tex, nullptr, &z->dsv);
+  D3D11_DEPTH_STENCIL_VIEW_DESC dv = {};
+  dv.Format = DXGI_FORMAT_D32_FLOAT;
+  dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+  if (z->tex) g_dev->CreateDepthStencilView(z->tex, &dv, &z->dsv);
+  D3D11_SHADER_RESOURCE_VIEW_DESC sv = {};
+  sv.Format = DXGI_FORMAT_R32_FLOAT;
+  sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+  sv.Texture2D.MipLevels = 1;
+  if (z->tex) g_dev->CreateShaderResourceView(z->tex, &sv, &z->srv);
   if (z->dsv) g_ctx->ClearDepthStencilView(z->dsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
   g_depthBuffers.push_back(z);
   return z;
@@ -671,6 +709,7 @@ void DropAll() {  // every target and depth buffer (a new internal resolution, o
   for (Depth* z : g_depthBuffers) {
     Release(z->dsv);
     Release(z->tex);
+    Release(z->srv);
     delete z;
   }
   g_depthBuffers.clear();
@@ -871,6 +910,59 @@ bool ReadFrame(std::vector<std::uint32_t>& bgra, int* w, int* h) {
   return ok;
 }
 
+bool ReadDepth(std::uint32_t bp, int x, int y, int w, int h, std::vector<std::uint32_t>& z) {
+  if (bp % 32 || w <= 0 || h <= 0 || !g_readCs || !g_readCb) return false;
+  Depth* src = nullptr;
+  for (Depth* d : g_depthBuffers)
+    if (d->page == bp / 32 && d->srv && x + w <= d->w && y + h <= d->h) src = d;
+  if (!src) return false;
+  Flush();  // (a pending batch may draw into it)
+  std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
+  const UINT count = static_cast<UINT>(w * h);
+  if (count > g_readSize) {  // buffers for the largest rectangle so far
+    Release(g_readUav);
+    Release(g_readBuf);
+    Release(g_readStaging);
+    g_readSize = 0;
+    D3D11_BUFFER_DESC bd = {};
+    bd.ByteWidth = count * 4;
+    bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_readBuf))) return false;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R32_UINT;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = count;
+    if (FAILED(g_dev->CreateUnorderedAccessView(g_readBuf, &ud, &g_readUav))) return false;
+    bd.BindFlags = 0;
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_readStaging))) return false;
+    g_readSize = count;
+  }
+  D3D11_MAPPED_SUBRESOURCE m = {};
+  if (FAILED(g_ctx->Map(g_readCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+  const u32 p[8] = {static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(w), static_cast<u32>(h), static_cast<u32>(g_scale), 0, 0, 0};
+  std::memcpy(m.pData, p, sizeof p);
+  g_ctx->Unmap(g_readCb, 0);
+  g_ctx->OMSetRenderTargets(0, nullptr, nullptr);  // (the depth buffer is read, not bound for drawing; each batch binds again)
+  g_ctx->CSSetShader(g_readCs, nullptr, 0);
+  g_ctx->CSSetConstantBuffers(0, 1, &g_readCb);
+  g_ctx->CSSetShaderResources(0, 1, &src->srv);
+  g_ctx->CSSetUnorderedAccessViews(0, 1, &g_readUav, nullptr);
+  g_ctx->Dispatch(static_cast<UINT>((w + 7) / 8), static_cast<UINT>((h + 7) / 8), 1);
+  ID3D11ShaderResourceView* noSrv = nullptr;
+  ID3D11UnorderedAccessView* noUav = nullptr;
+  g_ctx->CSSetShaderResources(0, 1, &noSrv);
+  g_ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+  D3D11_BOX box = {0, 0, 0, count * 4, 1, 1};
+  g_ctx->CopySubresourceRegion(g_readStaging, 0, 0, 0, 0, g_readBuf, 0, &box);
+  if (FAILED(g_ctx->Map(g_readStaging, 0, D3D11_MAP_READ, 0, &m))) return false;
+  z.assign(static_cast<const std::uint32_t*>(m.pData), static_cast<const std::uint32_t*>(m.pData) + count);
+  g_ctx->Unmap(g_readStaging, 0);
+  ++g_count.readbacks;
+  return true;
+}
+
 std::string StatsText() {
   if (g_tried && !g_ok) return "unavailable: " + g_error;
   if (!g_tried) return "not started (no primitive drawn yet)";
@@ -885,8 +977,10 @@ std::string StatsText() {
                 g_textures.size(), g_targets.size(), g_depthBuffers.size(), static_cast<unsigned long long>(c.feedbackCopies - r.feedbackCopies),
                 static_cast<unsigned long long>(c.uploads - r.uploads), static_cast<unsigned long long>(c.approximations - r.approximations),
                 static_cast<unsigned long long>(c.targetsDropped - r.targetsDropped));
+  const u64 readbacks = c.readbacks - r.readbacks;
   g_reported = g_count;
   std::string out = line;
+  out += "; " + std::to_string(readbacks) + " depth read-backs";
   out += "; targets:";  // page (width, bits, rows used)
   for (const Target* t : g_targets) {
     char one[64];

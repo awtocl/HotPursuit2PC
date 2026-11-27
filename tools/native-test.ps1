@@ -60,7 +60,8 @@ if ($Turbo -ne '1') { $vars.HP2_TURBO = $Turbo; if ($TurboUntil -and $TurboUntil
 if (-not $env:HP2_AUDIO_SILENT) { $vars.HP2_AUDIO_SILENT = '1' }  # sound runs once turbo ends, at volume 0
 foreach ($k in $Env.Keys) { $vars[$k] = [string]$Env[$k] }
 $saved = @{}
-foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $(if ($vars[$k]) { $vars[$k] } else { $null })) }
+# (an empty value removes the variable: the runtime treats a set but empty variable as set, e.g. HP2_FAST_BOOT)
+foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); if ($vars[$k]) { Set-Item "env:$k" $vars[$k] } else { Remove-Item "env:$k" -ErrorAction SilentlyContinue } }
 $watch = [Diagnostics.Stopwatch]::StartNew()
 try {
   Push-Location $repo
@@ -70,7 +71,7 @@ try {
   $code = $LASTEXITCODE
 } finally {
   Pop-Location
-  foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+  foreach ($k in $saved.Keys) { if ($saved[$k]) { Set-Item "env:$k" $saved[$k] } else { Remove-Item "env:$k" -ErrorAction SilentlyContinue } }
 }
 $watch.Stop()
 

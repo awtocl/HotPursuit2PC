@@ -522,11 +522,14 @@ void ApplyDisplayMode(HWND h) {  // borderless full screen on the window's monit
   }
 }
 // The renderer settings, handed from the window thread to the GS thread (applied there between frames: DoPresent).
-std::atomic<int> g_wantRenderer{-1}, g_wantScale{1}, g_wantWide{-1};
+std::atomic<int> g_wantRenderer{-1}, g_wantScale{1}, g_wantWide{-1}, g_want60{-1};
 std::atomic<bool> g_widePicture{false};  // the game draws for 16:9 (SetWidePicture, once at start)
+std::atomic<int> g_movie{0};             // the full-screen movie playing (SetFullScreenMovie), 0 none
 void PublishRendererSettings(const ui::Settings& s) {
-  g_wantScale = s.resolution + 1;
+  static const int kScales[] = {1, 2, 3, 4, 6, 8};  // the Internal resolution choices
+  g_wantScale = kScales[std::clamp(s.resolution, 0, 5)];
   g_wantWide = s.aspect == 0 ? 1 : 0;
+  g_want60 = s.frameRate == 1 ? 1 : 0;
   g_wantRenderer = s.renderer;
 }
 
@@ -707,8 +710,10 @@ void WindowThread() {
       }
     }
     static bool shownWide = false;
-    if (g_widePicture != shownWide) {
+    static int shownMovie = 0;
+    if (g_widePicture != shownWide || g_movie != shownMovie) {
       shownWide = g_widePicture;
+      shownMovie = g_movie;
       g_redraw = true;
     }
     const bool menu = ui::Visible();
@@ -732,7 +737,7 @@ void WindowThread() {
       else if (shown.aspect == 0) shown.aspect = 1;
       present::Draw(gpuFrame || frame.empty() ? nullptr : frame.data(), fw, fh, changed && !gpuFrame,
                     menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr, g_overlayW, g_overlayH, menuChanged, shown, gpuFrame,
-                    gw, gh);
+                    gw, gh, shownMovie);  // (a full-screen movie: its picture fills the window)
       gpu::ReleaseFrame(gpuFrame);
       g_redraw = false;
     }
@@ -1551,6 +1556,46 @@ BandPool& Bands() {
   static BandPool pool;
   return pool;
 }
+// Local-to-host transfers (TRXDIR 1): the source rectangle of BITBLTBUF/TRXPOS/TRXREG packed as the GS sends it (32-bit
+// formats 4 bytes a pixel, 24-bit 3, 16-bit 2), made on the GS thread when TRXDIR is written. The race reads 32x32 pixels of
+// its depth buffer around the sun each frame and dims the glare by how much of it is covered.
+std::vector<u8> g_readback;
+
+// Local-to-host transfers (TRXDIR 1): the source rectangle of BITBLTBUF/TRXPOS/TRXREG packed as the GS sends it (32-bit
+// formats 4 bytes a pixel, 24-bit 3, 16-bit 2), made on the GS thread when TRXDIR is written. The race reads 32x32 pixels of
+// its depth buffer around the sun each frame and dims the glare by how much of it is covered.
+void PrepareReadBack() {
+  const u32 sbp = static_cast<u32>(g_bitbltbuf & 0x3FFF), sbw = static_cast<u32>((g_bitbltbuf >> 16) & 63),
+            spsm = static_cast<u32>((g_bitbltbuf >> 24) & 0x3F);
+  const u32 sx = static_cast<u32>(g_trxpos & 0x7FF), sy = static_cast<u32>((g_trxpos >> 16) & 0x7FF);
+  const u32 w = static_cast<u32>(g_trxreg & 0xFFF), h = static_cast<u32>((g_trxreg >> 32) & 0xFFF);
+  const u32 bytes = (spsm & 0xF) == 0 ? 4 : (spsm & 0xF) == 1 ? 3 : 2;  // (CT32/Z32, CT24/Z24, the 16-bit formats)
+  g_readback.clear();
+  if (w == 0 || h == 0 || w * h > 1024 * 1024) return;
+  std::vector<u32> px(static_cast<std::size_t>(w) * h);
+  std::vector<std::uint32_t> z;
+  if (gpu::Enabled() && (spsm == Z32 || spsm == Z24) && gpu::ReadDepth(sbp, static_cast<int>(sx), static_cast<int>(sy),
+                                                                        static_cast<int>(w), static_cast<int>(h), z)) {
+    for (std::size_t i = 0; i < px.size(); ++i) px[i] = spsm == Z24 ? z[i] >> 8 : z[i];  // (Z24 keeps the top 24 bits)
+  } else {
+    if (gpu::Enabled()) gpu::Note("local to host from GS memory");
+    DrawBarrier();
+    for (u32 y = 0; y < h; ++y)
+      for (u32 x = 0; x < w; ++x) px[static_cast<std::size_t>(y) * w + x] = ReadPixel(spsm, sbp, sbw, sx + x, sy + y);
+  }
+  g_readback.resize(px.size() * bytes);
+  for (std::size_t i = 0; i < px.size(); ++i) std::memcpy(&g_readback[i * bytes], &px[i], bytes);
+  static const bool readLog = getenv("HP2_READBACK_LOG") != nullptr;  // development: what the game gets
+  static int logged = 0;
+  if (readLog && logged++ < 2000)
+    if (FILE* f = fopen(".cache/native/gs_readback.txt", logged == 1 ? "w" : "a")) {
+      u32 lo = ~0u, hi = 0, zeros = 0;
+      for (u32 v : px) { lo = std::min(lo, v); hi = std::max(hi, v); zeros += v == 0; }
+      fprintf(f, "%s psm %02X at %u,%u %ux%u: min %08X max %08X zeros %u\n", z.empty() ? "memory" : "gpu", spsm, sx, sy, w, h, lo, hi, zeros);
+      fclose(f);
+    }
+}
+
 void DrawBarrier() {
   if (!Bands().Active()) return;
   const u64 t0 = __rdtsc();
@@ -1992,7 +2037,9 @@ void DoRegWrite(std::uint32_t reg, std::uint64_t v) {
     case 0x53:  // TRXDIR
       g_trxdir = v;
       if ((v & 3) == 0) BeginTransfer();
-      else if ((v & 3) == 2) {  // local to local copy
+      else if ((v & 3) == 1) {  // local to host: the rectangle is prepared here, the game's DMA takes it (LocalToHost)
+        PrepareReadBack();
+      } else if ((v & 3) == 2) {  // local to local copy
         if (gpu::Enabled()) gpu::Note("local copy");
         const u32 sbp = static_cast<u32>(g_bitbltbuf & 0x3FFF), sbw = static_cast<u32>((g_bitbltbuf >> 16) & 63), spsm = static_cast<u32>((g_bitbltbuf >> 24) & 0x3F);
         const u32 dbp = static_cast<u32>((g_bitbltbuf >> 32) & 0x3FFF), dbw = static_cast<u32>((g_bitbltbuf >> 48) & 63), dpsm = static_cast<u32>((g_bitbltbuf >> 56) & 0x3F);
@@ -2229,6 +2276,15 @@ void SetWidePicture(bool wide) {
   if (g_widePicture.exchange(wide) != wide) SetEvent(g_frameEvent);  // the window thread redraws in the new shape
 }
 
+void SetFullScreenMovie(int movie) {
+  if (g_movie.exchange(movie) != movie) SetEvent(g_frameEvent);
+}
+
+bool FrameRate60() {
+  if (g_want60 < 0) PublishRendererSettings(ui::Load());  // (before the window thread has loaded them)
+  return g_want60 == 1;
+}
+
 bool Widescreen() {
   if (g_wantWide < 0) PublishRendererSettings(ui::Load());  // (before the window thread has loaded them)
   return g_wantWide == 1;
@@ -2413,6 +2469,15 @@ GsThread& Gs() {
 }  // namespace
 
 void FlushGs() { if (Gs().On()) Gs().Flush(); }
+
+std::size_t LocalToHost(std::uint8_t* out, std::size_t bytes) {
+  FlushGs();  // (the TRXDIR write and every drawing before it are done)
+  const std::size_t n = std::min(bytes, g_readback.size());
+  if (n) std::memcpy(out, g_readback.data(), n);
+  if (bytes > n) std::memset(out + n, 0, bytes - n);
+  g_readback.erase(g_readback.begin(), g_readback.begin() + static_cast<std::ptrdiff_t>(n));
+  return n;
+}
 void StopGs() { Gs().Stop(); }
 
 void Reset() {

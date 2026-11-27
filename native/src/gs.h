@@ -47,10 +47,18 @@ bool OverlayVisible();
 void OverlayPad(std::uint16_t pressed);
 // Opens the graphics settings (from the game's Options > Display menu); no effect if already open.
 void OpenSettings();
+// A local-to-host transfer (TRXDIR 1) read by the game's DMA (VIF1, direction "to memory"): the next `bytes` of the
+// rectangle, after the GS has drawn everything queued before it; the rest (if any) zeros. Returns the bytes taken.
+std::size_t LocalToHost(std::uint8_t* out, std::size_t bytes);
 // The Aspect ratio setting is 16:9: the runtime keeps the game's widescreen patches written (ADR 0015). Any thread.
 bool Widescreen();
+// The Frame rate setting is 60: the runtime keeps the game's 60 fps patch written (ADR 0015). Any thread; applies at once.
+bool FrameRate60();
 // The game draws its picture for 16:9 (the widescreen patches are in place, decided at start): the window shows it at 16:9.
 void SetWidePicture(bool wide);
+// A full-screen movie plays (its sound started): at 16:9 the window enlarges the picture 4/3 so the movie, drawn by the
+// game at 3/4 width like its menus, fills the screen's width at its own shape.
+void SetFullScreenMovie(int movie);  // the movie's number (each new movie another), 0 none
 // Development: writes the last presented frame as a BMP file (kept out of git: .cache).
 bool DumpFrame(const char* path);
 // Development: the next picture the window shows (post-processing and settings menu included) as a BMP file.

@@ -22,11 +22,12 @@ struct Item {
   const wchar_t* label;
   int Settings::*field;
   int count;
-  const wchar_t* names[4];
+  const wchar_t* names[6];
 };
 const Item kItems[] = {
     {L"Renderer", &Settings::renderer, 2, {L"Software", L"GPU"}},
-    {L"Internal resolution", &Settings::resolution, 4, {L"1x (native)", L"2x", L"3x", L"4x"}},
+    {L"Internal resolution", &Settings::resolution, 6, {L"1x (native)", L"2x", L"3x", L"4x", L"6x", L"8x"}},
+    {L"Frame rate", &Settings::frameRate, 2, {L"30 (original)", L"60"}},
     {L"Display mode", &Settings::fullscreen, 2, {L"Window", L"Full screen"}},
     {L"V-Sync", &Settings::vsync, 2, {L"Off", L"On"}},
     {L"Scaling filter", &Settings::filter, 3, {L"Sharp bilinear", L"Bilinear", L"Nearest"}},
@@ -46,7 +47,7 @@ std::wstring IniPath() {
 }
 
 const wchar_t* Key(int i) {
-  static const wchar_t* keys[] = {L"renderer", L"resolution", L"fullscreen", L"vsync", L"filter", L"aspect_ratio", L"sharpen", L"scanlines"};
+  static const wchar_t* keys[] = {L"renderer", L"resolution", L"framerate", L"fullscreen", L"vsync", L"filter", L"aspect_ratio", L"sharpen", L"scanlines"};
   return keys[i];
 }
 
@@ -89,6 +90,7 @@ Settings Load() {
     s.*kItems[i].field = std::clamp(v, 0, kItems[i].count - 1);
   }
   if (const char* e = std::getenv("HP2_ASPECT")) s.aspect = std::clamp(std::atoi(e), 0, 3);  // tests: without touching the file
+  if (const char* e = std::getenv("HP2_FPS")) s.frameRate = std::atoi(e) >= 60 ? 1 : 0;
   return s;
 }
 

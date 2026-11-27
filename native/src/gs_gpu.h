@@ -47,6 +47,9 @@ bool Present(std::uint64_t dispfb, int x, int y, int w, int h);
 // Window thread: the last picture (ID3D11ShaderResourceView*, AddRef'd; release with ReleaseFrame) or nullptr.
 void* AcquireFrame(int* w, int* h);
 void ReleaseFrame(void* srv);
+// A local-to-host transfer of a depth buffer the GPU holds (the game reads depth around the sun to hide its glare behind
+// scenery): Z values (32-bit) of the GS-pixel rectangle, read from the GPU. False: no GPU depth buffer holds it.
+bool ReadDepth(std::uint32_t bp, int x, int y, int w, int h, std::vector<std::uint32_t>& z);
 // Development: the last picture on the CPU (BGRA), for test screenshots.
 bool ReadFrame(std::vector<std::uint32_t>& bgra, int* w, int* h);
 // A GS feature the GPU path does not render yet, counted (perf line) so the gaps that matter show up.
