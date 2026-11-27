@@ -9,8 +9,9 @@ game is a double-click.
 > this project, and none are downloaded.
 
 > [!WARNING]
-> **Saving is not implemented yet.** The game runs as if no memory card were inserted, so career progress is lost when
-> you quit. Single races play from start to finish.
+> **Saving has not been tested yet.** The game writes to a memory card kept as files in the game folder, but saving and
+> loading a career have not been checked from start to finish. Don't count on keeping career progress yet. Single races
+> play from start to finish.
 
 ---
 
@@ -56,30 +57,16 @@ which comes with Windows 10 and 11.
 
 </details>
 
-## Step 2 — Copy your disc to the PC (once)
+## Step 2 — Have your disc ready
 
-The game reads its data from a copy of your disc, so the disc does not have to stay in the drive.
+The launcher copies your disc to the PC in step 5, so the disc does not have to stay in the drive afterwards. Before
+step 5, do one of these:
 
-1. Make a folder for it, for example `C:\Games\HP2 disc`.
-2. Put the disc in the DVD drive and open the drive in **File Explorer** (*This PC* → the DVD drive).
-3. Select everything on it (**Ctrl+A**) and copy it (**Ctrl+C**) into your new folder (**Ctrl+V**). It is about
-   **3 GB** and takes a few minutes.
-
-When it is done, the folder must hold at least these three items:
-
-```
-C:\Games\HP2 disc\
-    NFSHP2\          (a folder)
-    SLUS_203.62
-    SYSTEM.CNF
-```
-
-**If you have an `.iso` of your own disc instead:** double-click the `.iso` file. Windows shows it as a new DVD drive;
-copy its contents exactly as above, then eject it.
-
-> [!TIP]
-> Keep this folder where it is: the game reads it every time it runs (it never changes anything in it). If you move
-> it, run the installer again (step 4).
+- **Your disc:** put it in the DVD drive.
+- **An `.iso` image of your own disc:** double-click the `.iso` file in File Explorer. Windows shows it as a new DVD
+  drive (you can eject it after step 5).
+- **You already copied the disc's files to a folder:** nothing to do; you can choose that folder in step 5. It must hold
+  `SYSTEM.CNF`, `SLUS_203.62` and the `NFSHP2` folder.
 
 ## Step 3 — Download HotPursuit2PC (once)
 
@@ -103,38 +90,63 @@ In the same PowerShell 7 window, type:
 pwsh tools/install-native.ps1
 ```
 
-A window asks for your disc folder: choose the folder from step 2 (if you don't see the window, it may be hidden
-behind the PowerShell one). Then the script works through five steps and tells you which one it is on:
+The script works through five steps and tells you which one it is on:
 
 | Step | What happens | How long |
 |---|---|---|
-| 1/5 Your disc | Checks the folder and that your disc is the supported version | seconds |
+| 1/5 Your disc | Nothing yet: the launcher asks for your disc in step 5 | — |
 | 2/5 LLVM | **First time only:** downloads and builds LLVM, the code generator the recompiler uses | **15–40 min** |
-| 3/5 Building | Builds HotPursuit2PC | 3–10 min |
-| 4/5 Recompiling | Translates the game's program from your disc into native PC code | a few minutes |
-| 5/5 Game folder | Puts everything into `game-native\` | seconds |
+| 3/5 Building | Builds HotPursuit2PC: the launcher, the game and the recompiler | 3–10 min |
+| 4/5 Preparing | Nothing yet: the launcher does it after checking your disc | — |
+| 5/5 Game folder | Puts the three programs into `game-native\` | seconds |
 
-Your PC may get loud and busy during steps 2 and 3; that is normal. When it ends with **"Done … To play,
-double-click"** in green, you are ready.
+Your PC may get loud and busy during steps 2 and 3; that is normal. When it ends with **"Done …"** in green, the
+launcher opens by itself.
 
-## Step 5 — Play
+## Step 5 — Set up the game in the launcher (once)
 
-Open `Documents\HotPursuit2PC\game-native` and double-click **`Play.cmd`**.
+The first time, the launcher walks you through four short steps:
 
-To make a desktop shortcut: right-click `Play.cmd` → *Show more options* → **Send to → Desktop (create shortcut)**.
+1. **Disc** — your DVD drive (or the mounted `.iso`) appears by itself; select **Copy from …** to copy it into the game
+   folder (about 3 GB, a few minutes). Or choose **a folder with the disc's files**. If the disc is another region or
+   edition, the launcher says so here.
+2. **Check** — every file is compared with the original disc.
+3. **Prepare** — the game's program is translated into code for your processor (about a minute).
+4. **Ready** — the picture quality is already set for your screen. Select **PLAY NOW**.
 
-The game starts in full screen with the intro movies; press **Enter** (or Start on the controller) to skip them.
+![The launcher's home screen](assets/launcher-home.png)
+
+## Step 6 — Play
+
+From now on, open **`HotPursuit2Launcher.exe`** in `Documents\HotPursuit2PC\game-native` and select **PLAY**. For a
+desktop shortcut: launcher → **Disc & setup** → **Desktop shortcut**.
+
+The launcher works with the mouse, the keyboard (arrows, Enter, Esc, Page Up/Down) or an Xbox controller (A select,
+B back, LB/RB pages, Start plays). Its pages:
+
+| Page | What it's for |
+|---|---|
+| **Play** | Start the game; whether the disc and the game are in order; your play time |
+| **Settings** | The picture and display settings, each explained, with the recommendation for your screen |
+| **Memory card** | What the game has saved; back it up and restore a backup |
+| **Screenshots** | The pictures you took with **F12** in the game |
+| **Disc & setup** | Check all disc files, prepare the game again, use another disc copy, make a desktop shortcut |
+| **About** | What this project is, credits, links to this guide and to the issue tracker |
+
+The game starts in full screen with the intro movies; press **Enter** (or Start on the controller) to skip them. The
+launcher hides while you play and comes back when you quit.
 
 ### Recommended settings
 
-Press **F1** in the game (or **Select + Start** on the controller) to open the settings. The defaults are already
-good; the one worth adjusting is **Internal resolution**, which decides how sharp the picture is:
+Change them on the launcher's **Settings** page, or while you play with **F1** (or **Select + Start** on the controller).
+The setup already chose the **Picture quality** (the internal resolution) for your screen; it decides how sharp the
+picture is:
 
-| Your screen | Internal resolution |
+| Your screen | Picture quality |
 |---|---|
-| 1920 × 1080 (Full HD) | **4x** (default) |
-| 2560 × 1440 | **6x** |
-| 3840 × 2160 (4K) | **8x** |
+| 1920 × 1080 (Full HD) | **Quality (4x)** |
+| 2560 × 1440 | **Ultra (6x)** |
+| 3840 × 2160 (4K) | **Maximum (8x)** |
 
 Higher is smoother and sharper (it renders more pixels than your screen has and averages them). If the game ever
 stutters, choose the next lower value.
@@ -167,6 +179,7 @@ they work through a tool that presents them as an Xbox controller, such as Steam
 | X | ○ | Q / W | L1 / R1 |
 | A | □ | 1 / 2 | L2 / R2 |
 | S | △ | F1 | Settings |
+| | | F12 | Screenshot |
 
 The analog sticks work as the DualShock 2's sticks. Steering with the left stick or the arrows, ✕ accelerates.
 
@@ -176,15 +189,16 @@ The analog sticks work as the DualShock 2's sticks. Steering with the left stick
 
 ## Updating
 
-When the project gets new features, update and rebuild — your settings stay:
+When the project gets new features, update and rebuild — your settings, saves and disc copy stay:
 
 ```powershell
 cd $HOME\Documents\HotPursuit2PC
 git pull
-pwsh tools/install-native.ps1 -Rom "C:\Games\HP2 disc"
+pwsh tools/install-native.ps1
 ```
 
-(Use your own disc folder. LLVM is not rebuilt, so this takes only a few minutes.)
+LLVM is not rebuilt, so this takes only a few minutes. The launcher then shows **PREPARE & PLAY**: the game is prepared
+again for the new version (about a minute) and starts.
 
 ## If something goes wrong
 
@@ -192,16 +206,20 @@ pwsh tools/install-native.ps1 -Rom "C:\Games\HP2 disc"
 |---|---|
 | *"The C++ build tools were not found"* | Step 1 is not complete: install the Build Tools with **Desktop development with C++**, restart the PC, try again. |
 | *"pwsh is not recognized"* | PowerShell 7 is not installed, or the PC was not restarted after step 1. |
-| *"… does not look like the contents of the disc: … is missing"* | You chose the wrong folder, or the copy is incomplete. Choose the folder that directly holds `SYSTEM.CNF`, `SLUS_203.62` and `NFSHP2`. |
-| *"SLUS_203.62 is not the supported version"* | Your disc is another region or edition. Only the North American `SLUS-20362` release is supported. |
+| The launcher doesn't find your disc | Wait a few seconds after inserting it; for an `.iso`, double-click it first. Or copy the disc's files into a folder yourself and choose **a folder with the disc's files**. |
+| *"This folder does not hold the contents of a PlayStation 2 disc"* or *"… is missing"* | You chose the wrong folder, or the copy is incomplete. Choose the folder that directly holds `SYSTEM.CNF`, `SLUS_203.62` and `NFSHP2`. |
+| *"This disc is SLES-…"* or *"… is not the supported version"* | Your disc is another region or edition. Only the North American `SLUS-20362` release is supported. |
+| *"… differs from the original disc"* | The disc copy is damaged (often a scratched disc). Clean the disc and copy it again (**Disc & setup** → **Change disc**). |
+| *"Preparing the game failed"* | The details are in `game-native\prepare.log`; please attach it to an [issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *"The game stopped: …"* on the launcher's Play page | Select **Open log** and **Report a problem**; attach `native.log`. |
 | *"Downloading LLVM failed"* | Check your internet connection and run the installer again. |
 | *"The build failed"* | Copy the red lines and [open an issue](https://github.com/awtocl/HotPursuit2PC/issues). |
 | *"…cannot be loaded because running scripts is disabled"* | You downloaded a ZIP instead of using `git clone`. Use `git clone` (step 3). |
-| The game window is black, or the picture is wrong | F1 → Renderer → **Software**. If that helps, please report it with your graphics card model. |
+| The game window is black, or the picture is wrong | Launcher → **Settings** → Renderer → **Software**. If that helps, please report it with your graphics card model. |
 | No sound | The game uses Windows' default playback device: check it in the Windows sound settings, then restart the game. |
 | The controller does nothing | Only Xbox-compatible (XInput) controllers are seen; see [Controls](#controls). The keyboard always works. |
-| It stutters | Lower the Internal resolution (F1) and make sure V-Sync is On. |
-| Everything looks wrong after changing settings | Close the game and delete `game-native\hp2native.ini`; the defaults come back. |
+| It stutters | Lower the **Picture quality** (launcher → Settings) and make sure V-Sync is On. |
+| Everything looks wrong after changing settings | Launcher → **Settings** → **Reset to defaults**. |
 
 **Reporting a problem:** after the game closes, the file `game-native\native.log` describes what happened. Attach it
 to an [issue](https://github.com/awtocl/HotPursuit2PC/issues) with your Windows version and graphics card. The log
@@ -210,7 +228,9 @@ contains no personal data apart from folder paths, which you can remove.
 ## Uninstalling
 
 Nothing is installed into Windows by this project itself. To remove it, delete the `Documents\HotPursuit2PC` folder
-(the build tools live inside it, in `.cache`). Your disc folder from step 2 is yours to keep or delete. The tools from
+(the build tools live inside it, in `.cache`, and the copy of your disc in `game-native\disc`). Back up
+`game-native\saves` first if you want to keep your saves. A desktop shortcut made by the launcher can be deleted like
+any other. The tools from
 step 1 can be removed in *Settings → Apps* like any other program.
 
 ---

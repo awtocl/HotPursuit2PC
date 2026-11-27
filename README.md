@@ -56,8 +56,11 @@ emulator in the way.
 | **16:9 and 60 fps** | Widescreen by default (the camera sees more, the HUD keeps its shape, menus keep theirs) and 60 frames per second, through the game's own community patches (see [Credits](#license-and-credits)). Both can be turned off. |
 | **Full sound** | EA Trax music, sound effects, police radio and the intro movies' sound, mixed natively. |
 | **Movies** | The intro movies fill the screen at their own shape. |
+| **A launcher** | First-run setup that finds your disc (DVD or mounted `.iso`), copies and checks it file by file and prepares the game; then Play, settings with a recommendation for your screen, memory card backups, a screenshot gallery (F12) — with mouse, keyboard or controller ([ADR 0016](docs/adr/0016-launcher.md)). |
 | **In-game settings** | **F1** (or Select+Start) opens a settings menu styled after the game's own, with *Quit game*. |
 | **Your files stay yours** | Your dump is only read, never modified. What the tools derive from it stays on your PC. |
+
+<p align="center"><img src="docs/assets/launcher-home.png" width="760" alt="The HotPursuit2PC launcher: the Play page with the disc and game status, a large PLAY button and the in-game keys"></p>
 
 ## Quick start
 
@@ -66,19 +69,21 @@ emulator in the way.
 > installing the tools, copying your disc, building, the best settings, controls and troubleshooting.
 
 **In short:** with Windows 10/11 x64, *Build Tools for Visual Studio 2022* (C++ workload), Git and PowerShell 7
-installed, and the contents of **your own disc** copied to a folder (`SYSTEM.CNF`, `SLUS_203.62`, `NFSHP2`):
+installed, and **your own disc** in the drive (or your `.iso` of it mounted):
 
 ```powershell
 git clone https://github.com/awtocl/HotPursuit2PC.git
 cd HotPursuit2PC
-pwsh tools/install-native.ps1       # asks for your disc folder, then builds everything
+pwsh tools/install-native.ps1       # builds everything, then opens the launcher
 ```
 
-The script checks your disc, downloads and builds LLVM the first time (15–40 minutes), builds the project,
-recompiles the game's program **from your copy, on your PC**, and writes `game-native\` — double-click
-**`Play.cmd`** there to play. About an hour the first time; a few minutes after an update.
+The script downloads and builds LLVM the first time (15–40 minutes), builds the project and puts the launcher, the
+game and the recompiler into `game-native\`. The launcher then copies and checks your disc and recompiles the game's
+program **from your copy, on your PC** (about a minute). From then on, start **`HotPursuit2Launcher.exe`** there. About
+an hour the first time; a few minutes after an update.
 
-There are no prebuilt releases: the recompiled code is made from your copy of the game, so it cannot be shipped.
+There are no prebuilt downloads yet. The recompiled code is always made from your copy of the game, on your PC: it is
+never shipped.
 
 ## Controls
 
@@ -91,15 +96,17 @@ An Xbox-style controller works as a DualShock 2. On the keyboard:
 | X | ○ | Q / W | L1 / R1 |
 | A | □ | 1 / 2 | L2 / R2 |
 | S | △ | F1 | settings menu |
+| | | F12 | screenshot |
 
 Alt+Enter or F11 toggles full screen; Alt+F4 or *Quit game* in the settings menu quits. Settings are kept in
-`hp2native.ini` next to the executable.
+`hp2native.ini` next to the executable and can also be changed in the launcher.
 
 ## Known problems
 
 This is a development build, tested on one PC so far.
 
-- **No saving yet** — the memory card is not implemented; the game runs as with no card inserted.
+- **Saving is untested** — the game has a memory card (files in `game-native\saves`), but saving and loading a career
+  have not been checked end to end.
 - **Sound:** no reverb and no real ADSR envelopes yet, so sounds end more abruptly than on a console.
 - **Graphics:** no depth fog, mipmaps, dithering or lines yet; the race's distance fog is skipped.
 - **Input:** digital buttons only (no DualShock 2 pressure), no rumble, no steering wheel.
@@ -126,6 +133,8 @@ flowchart LR
   software, and on the GPU.
 - **Game patches** (ADR [0015](docs/adr/0015-widescreen.md)): 16:9 and 60 fps are applied by the runtime as patch
   points the recompiler leaves switchable, so they are settings rather than separate builds.
+- **Launcher** (`launcher/`, ADR [0016](docs/adr/0016-launcher.md)): copies and checks your disc against the known file
+  hashes, runs the recompiler with a progress bar, keeps the game in step with updates (`--check-package`) and starts it.
 
 Design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/), each with the options that were rejected.
 
@@ -245,6 +254,7 @@ only, races at 30 fps.
 | Path | Contents |
 |---|---|
 | [`native/`](native/) | The native game: runtime, kernel and I/O services, GS (software and Direct3D 11), sound mixer, settings menu |
+| [`launcher/`](launcher/) | The player's launcher: first-run setup from your disc, Play, settings, memory card backups, screenshots |
 | [`recomp/`](recomp/) | Static recompiler: executable reader, R5900 decoder, function discovery, LLVM translator for the CPU and VU1, packaging |
 | [`engine/`](engine/) | The reference launcher and the virtual disc |
 | [`converter/`](converter/) | Converter core, CLI and GUI; disc-image builder |
