@@ -357,10 +357,12 @@ void Draw(const std::uint32_t* frame, int frameW, int frameH, bool frameChanged,
   ID3D11ShaderResourceView* const picture = gpuFrame ? static_cast<ID3D11ShaderResourceView*>(gpuFrame) : g_frame.srv;
   const int pw = gpuFrame ? gpuW : g_frame.w, ph = gpuFrame ? gpuH : g_frame.h;
   if (picture && pw > 0 && ph > 0) {
-    // destination rectangle: the PS2 picture is 4:3 whatever its pixel size
+    // destination rectangle: the PS2 picture is 4:3 whatever its pixel size, or 16:9 with the game's widescreen patches
+    // (ADR 0015: the game then draws a wider view into the same frame, shown here at its real shape)
     float vw = static_cast<float>(cw), vh = static_cast<float>(ch);
-    if (s.aspect == 0) {
-      if (vw / vh > 4.0f / 3.0f) vw = vh * 4.0f / 3.0f; else vh = vw * 3.0f / 4.0f;
+    if (s.aspect == 0 || s.aspect == 1) {
+      const float shape = s.aspect == 0 ? 16.0f / 9.0f : 4.0f / 3.0f;
+      if (vw / vh > shape) vw = vh * shape; else vh = vw / shape;
     } else if (s.aspect == 2) {
       const int k = std::max(1, std::min(cw / pw, ch / ph));
       vw = static_cast<float>(pw * k);

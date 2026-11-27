@@ -18,7 +18,7 @@ namespace hp2 {
 
 inline constexpr std::uint32_t kCodeTableMagic = 0x43325048;  // "HP2C"
 // Raise whenever the table layout or the translators' output changes meaning.
-inline constexpr std::uint32_t kCodeTableVersion = 2;  // 2: Hp2CodeLayout gained `sa`
+inline constexpr std::uint32_t kCodeTableVersion = 3;  // 2: Hp2CodeLayout gained `sa`; 3: game patch points (ADR 0015)
 inline constexpr const char* kCodeTableSymbol = "hp2_code_table";
 inline constexpr const char* kCodeDllName = "hp2code.dll";
 

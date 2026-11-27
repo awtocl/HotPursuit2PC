@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "hp2/discover.h"
+#include "hp2/game_patches.h"
 #include "hp2/lift.h"
 #include "hp2/vu.h"
 #include "hp2/vulift.h"
@@ -181,7 +182,21 @@ CodePackageResult build_code_package(ByteView elf_bytes, const Hp2CodeLayout& la
   };
   CodePackageResult r;
   const auto t0 = std::chrono::steady_clock::now();
-  const ElfImage elf = ElfImage::parse(Bytes(elf_bytes.begin(), elf_bytes.end()));
+  // The game patches built into the translation (ADR 0015), each only where the file holds the expected original word.
+  Bytes file(elf_bytes.begin(), elf_bytes.end());
+  {
+    const ElfImage original = ElfImage::parse(file);
+    for (const patches::CodeWord& p : patches::kBakedPatches)
+      for (const ElfSegment& seg : original.segments())
+        if (seg.loadable() && p.address >= seg.vaddr && p.address - seg.vaddr + 4 <= seg.filesz &&
+            original.try_word(p.address) == p.original) {
+          const std::uint32_t at = seg.offset + (p.address - seg.vaddr);
+          for (int k = 0; k < 4; ++k) file[at + k] = static_cast<std::uint8_t>(p.patched >> (8 * k));
+          log(std::format("game patch at {:08X}: {:08X} -> {:08X}", p.address, p.original, p.patched));
+          break;
+        }
+  }
+  const ElfImage elf = ElfImage::parse(std::move(file));
   std::array<std::uint8_t, 32> sha{};
   {
     Sha256 h;

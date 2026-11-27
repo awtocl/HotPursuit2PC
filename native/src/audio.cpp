@@ -96,7 +96,7 @@ struct Stream {
   int hist[2][2] = {}, s0[2] = {}, s1[2] = {};
   std::vector<std::int16_t> pcm[2];
   std::size_t rd = 0;
-  float left = 1, right = 1;
+  float left = 1, right = 1, wantLeft = 1, wantRight = 1;  // volumes move to the wanted ones over ~20 ms (StreamVolume)
   std::size_t Available() const { return pcm[0].size() - rd; }
 } g_stream[kStreams];
 
@@ -225,6 +225,10 @@ void Mix(float* out) {  // kFrames stereo frames, lock held
         o[c] = (static_cast<float>(s.s0[c]) + static_cast<float>(s.s1[c] - s.s0[c]) * static_cast<float>(s.frac) / 4096.0f) / 32768.0f;
       if (s.channels == 1) o[1] = o[0];
       if (noStreams) continue;  // still played at its rate, so the game sees it end on time
+      constexpr float kStep = 1.0f / 1024.0f;
+      if (s.left != s.wantLeft) s.left = s.left < s.wantLeft ? std::min(s.left + kStep, s.wantLeft) : std::max(s.left - kStep, s.wantLeft);
+      if (s.right != s.wantRight)
+        s.right = s.right < s.wantRight ? std::min(s.right + kStep, s.wantRight) : std::max(s.right - kStep, s.wantRight);
       out[f * 2] += o[0] * s.left;
       out[f * 2 + 1] += o[1] * s.right;
     }
@@ -462,8 +466,8 @@ void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t byt
   s.interleave = std::clamp<std::uint32_t>(interleave & ~15u, 0x800, 0x40000);
   s.pitch = std::clamp<std::uint32_t>(pitch, 0x100, 0x3FFF);
   s.frac = 0;
-  s.left = Vol(left);
-  s.right = Vol(right);
+  s.left = s.wantLeft = Vol(left);
+  s.right = s.wantRight = Vol(right);
   s.queue.clear();
   std::memset(s.hist, 0, sizeof s.hist);
   s.s0[0] = s.s0[1] = s.s1[0] = s.s1[1] = 0;
@@ -483,6 +487,14 @@ void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes) {
   s.queue.emplace_back(start, bytes);
   s.eof = false;
   g_feed.notify_one();
+}
+
+void StreamVolume(int stream, int left, int right) {
+  if (stream < 0 || stream >= static_cast<int>(kStreams)) return;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  Stream& s = g_stream[stream];
+  if (left >= 0) s.wantLeft = Vol(static_cast<std::uint16_t>(left));
+  if (right >= 0) s.wantRight = Vol(static_cast<std::uint16_t>(right));
 }
 
 void StreamStop(int stream) {

@@ -522,9 +522,11 @@ void ApplyDisplayMode(HWND h) {  // borderless full screen on the window's monit
   }
 }
 // The renderer settings, handed from the window thread to the GS thread (applied there between frames: DoPresent).
-std::atomic<int> g_wantRenderer{-1}, g_wantScale{1};
+std::atomic<int> g_wantRenderer{-1}, g_wantScale{1}, g_wantWide{-1};
+std::atomic<bool> g_widePicture{false};  // the game draws for 16:9 (SetWidePicture, once at start)
 void PublishRendererSettings(const ui::Settings& s) {
   g_wantScale = s.resolution + 1;
+  g_wantWide = s.aspect == 0 ? 1 : 0;
   g_wantRenderer = s.renderer;
 }
 
@@ -536,6 +538,7 @@ void SettingsChanged(HWND h) {
 }
 void MenuInput(HWND h, ui::Input in) {
   if (ui::Navigate(in, g_settings)) SettingsChanged(h);
+  if (ui::TakeQuit()) PostMessageW(h, WM_CLOSE, 0, 0);  // Quit game: the same ending as the window's close button
   g_overlayDirty = g_redraw = true;
 }
 void ToggleMenu() {
@@ -613,7 +616,19 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
         SetStretchBltMode(dc, COLORONCOLOR);
-        StretchDIBits(dc, 0, 0, rc.right, rc.bottom, 0, 0, g_frameW, g_frameH, g_frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        int x = 0, y = 0, dw = rc.right, hgt = rc.bottom;  // the Aspect ratio setting's shape (integer scale: as 4:3)
+        if ((g_settings.aspect != 3 || g_widePicture) && dw > 0 && hgt > 0) {
+          const bool wide = g_widePicture;
+          const int num = wide ? 16 : 4, den = wide ? 9 : 3;
+          if (dw * den > hgt * num) dw = hgt * num / den; else hgt = dw * den / num;
+          x = (rc.right - dw) / 2;
+          y = (rc.bottom - hgt) / 2;
+          PatBlt(dc, 0, 0, rc.right, y, BLACKNESS);
+          PatBlt(dc, 0, y + hgt, rc.right, rc.bottom - y - hgt, BLACKNESS);
+          PatBlt(dc, 0, y, x, hgt, BLACKNESS);
+          PatBlt(dc, x + dw, y, rc.right - x - dw, hgt, BLACKNESS);
+        }
+        StretchDIBits(dc, x, y, dw, hgt, 0, 0, g_frameW, g_frameH, g_frame.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
       }
       EndPaint(h, &ps);
       return 0;
@@ -632,12 +647,17 @@ void WindowThread() {
   RegisterClassW(&wc);
   g_settings = ui::Load();
   PublishRendererSettings(g_settings);
-  RECT r = {0, 0, 640 * g_scalePercent / 100, 480 * g_scalePercent / 100};
-  if (g_scalePercent == 100) {  // default: 4:3 at 80% of the primary monitor's work area height
+  const bool wide = g_settings.aspect == 0;  // the window starts in the picture's shape: 16:9 or 4:3
+  RECT r = {0, 0, (wide ? 854 : 640) * g_scalePercent / 100, 480 * g_scalePercent / 100};
+  if (g_scalePercent == 100) {  // default: 80% of the primary monitor's work area height (and at most 90% of its width)
     RECT work = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) && work.bottom - work.top > 600) {
       r.bottom = (work.bottom - work.top) * 8 / 10;
-      r.right = r.bottom * 4 / 3;
+      r.right = r.bottom * (wide ? 16 : 4) / (wide ? 9 : 3);
+      if (r.right > (work.right - work.left) * 9 / 10) {
+        r.right = (work.right - work.left) * 9 / 10;
+        r.bottom = r.right * (wide ? 9 : 3) / (wide ? 16 : 4);
+      }
     }
   }
   AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
@@ -686,6 +706,11 @@ void WindowThread() {
         changed = true;
       }
     }
+    static bool shownWide = false;
+    if (g_widePicture != shownWide) {
+      shownWide = g_widePicture;
+      g_redraw = true;
+    }
     const bool menu = ui::Visible();
     bool menuChanged = false;
     if (menu && g_overlayDirty) {
@@ -702,8 +727,11 @@ void WindowThread() {
       if (shotAt && ++drawn == shotAt) present::RequestShot(".cache/native/present.bmp");
       int gw = 0, gh = 0;
       void* gpuFrame = gpuPicture ? gpu::AcquireFrame(&gw, &gh) : nullptr;
+      ui::Settings shown = g_settings;  // the game's picture is 16:9 or 4:3 from the start (a change of mode needs a restart)
+      if (g_widePicture) shown.aspect = 0;
+      else if (shown.aspect == 0) shown.aspect = 1;
       present::Draw(gpuFrame || frame.empty() ? nullptr : frame.data(), fw, fh, changed && !gpuFrame,
-                    menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr, g_overlayW, g_overlayH, menuChanged, g_settings, gpuFrame,
+                    menu && !g_overlayPixels.empty() ? g_overlayPixels.data() : nullptr, g_overlayW, g_overlayH, menuChanged, shown, gpuFrame,
                     gw, gh);
       gpu::ReleaseFrame(gpuFrame);
       g_redraw = false;
@@ -2196,6 +2224,16 @@ void RequestWindowShot(const char* path) {
   std::lock_guard<std::mutex> lock(g_frameMutex);
   g_windowShot = path;
 }
+void SetWidePicture(bool wide) {
+  ui::SetWidescreenActive(wide);
+  if (g_widePicture.exchange(wide) != wide) SetEvent(g_frameEvent);  // the window thread redraws in the new shape
+}
+
+bool Widescreen() {
+  if (g_wantWide < 0) PublishRendererSettings(ui::Load());  // (before the window thread has loaded them)
+  return g_wantWide == 1;
+}
+
 void OpenSettings() {
   if (g_hwnd) PostMessageW(g_hwnd, kPadMessage, 0x20000, 0);
 }

@@ -47,6 +47,10 @@ bool OverlayVisible();
 void OverlayPad(std::uint16_t pressed);
 // Opens the graphics settings (from the game's Options > Display menu); no effect if already open.
 void OpenSettings();
+// The Aspect ratio setting is 16:9: the runtime keeps the game's widescreen patches written (ADR 0015). Any thread.
+bool Widescreen();
+// The game draws its picture for 16:9 (the widescreen patches are in place, decided at start): the window shows it at 16:9.
+void SetWidePicture(bool wide);
 // Development: writes the last presented frame as a BMP file (kept out of git: .cache).
 bool DumpFrame(const char* path);
 // Development: the next picture the window shows (post-processing and settings menu included) as a BMP file.

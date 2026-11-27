@@ -22,6 +22,8 @@
 // needed.
 #include "lift_internal.h"
 
+#include "hp2/game_patches.h"
+
 #include <map>
 #include <set>
 #include <thread>
@@ -764,7 +766,12 @@ class FunctionLifter : public VectorCode {
       case Op::ANDI: W(rt, b_.CreateAnd(R(rs), b_.getInt64(in.imm()))); break;
       case Op::ORI: W(rt, b_.CreateOr(R(rs), b_.getInt64(in.imm()))); break;
       case Op::XORI: W(rt, b_.CreateXor(R(rs), b_.getInt64(in.imm()))); break;
-      case Op::LUI: W(rt, sx64(static_cast<std::int32_t>(in.imm() << 16))); break;
+      case Op::LUI:
+        if (patches::IsRuntimeImmediate(pc))  // a game patch point: the constant is what guest memory holds there (ADR 0015)
+          W32(rt, b_.CreateShl(b_.CreateZExt(read(b_.getInt32(pc), 2), i32_), 16));
+        else
+          W(rt, sx64(static_cast<std::int32_t>(in.imm() << 16)));
+        break;
       case Op::SLT: W(rd, b_.CreateZExt(b_.CreateICmpSLT(R(rs), R(rt)), i64_)); break;
       case Op::SLTU: W(rd, b_.CreateZExt(b_.CreateICmpULT(R(rs), R(rt)), i64_)); break;
       case Op::SLTI: W(rt, b_.CreateZExt(b_.CreateICmpSLT(R(rs), sx64(in.simm())), i64_)); break;

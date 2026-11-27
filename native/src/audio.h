@@ -29,6 +29,7 @@ bool VoicePlaying(int voice, std::uint32_t* address = nullptr, std::uint32_t* st
 void StreamStart(int stream, Reader read, std::uint64_t start, std::uint32_t bytes, int channels, std::uint32_t interleave,
                  std::uint16_t pitch, std::uint16_t left, std::uint16_t right);
 void StreamQueue(int stream, std::uint64_t start, std::uint32_t bytes);  // plays after what is playing or queued
+void StreamVolume(int stream, int left, int right);  // 0..0x3FFF, -1 keeps that side; moves there over ~20 ms
 void StreamStop(int stream);
 bool StreamPlaying(int stream);
 std::uint64_t StreamFramesPlayed(int stream);  // sample frames played since StreamStart

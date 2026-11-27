@@ -28,6 +28,7 @@
 #include <map>
 #include <unordered_map>
 #include <memory>
+#include <mutex>
 #include <algorithm>
 
 #include "virtual_disc.h"
@@ -41,6 +42,7 @@
 
 #include "hp2/code_package.h"
 #include "hp2/elf.h"
+#include "hp2/game_patches.h"
 #include "hp2/io.h"
 #include "hp2/native_state.h"
 #include "hp2/r5900.h"
@@ -804,6 +806,24 @@ void RaiseGsInterrupt() {
   g_intcStat |= 1u;
 }
 
+// Widescreen 16:9 (ADR 0015): the game patches of hp2/game_patches.h, written every refresh (as PCSX2 applies its patches: the
+// game may write the data itself). The game lays its HUD out and squeezes its 2D front end into the middle of the frame
+// from them early on, so the mode is chosen once, at the first refresh: switching between 16:9 and 4:3 needs a restart.
+// The two HUD constants are the low halves of `lui` words the translation reads from memory.
+void ApplyWidescreen() {
+  static const bool wide = [] {
+    const bool w = gs::Widescreen();
+    gs::SetWidePicture(w);
+    Log("Display: %s", w ? "widescreen 16:9 (game patches on)" : "4:3");
+    return w;
+  }();
+  if (!wide) return;
+  for (const hp2::patches::DataWord& d : hp2::patches::kWidescreenWords)
+    *reinterpret_cast<std::uint32_t*>(g_ram + d.address) = d.widescreen;
+  for (const hp2::patches::Immediate& i : hp2::patches::kRuntimeImmediates)
+    *reinterpret_cast<std::uint16_t*>(g_ram + i.address) = i.widescreen;
+}
+
 void DeliverInterrupts() {
   const bool enabled = (g_status & 0x10000) != 0;  // the game can disable interrupts: handlers wait, time does not
   while (enabled && !g_pendingDmac.empty() && !g_stop) {
@@ -817,6 +837,7 @@ void DeliverInterrupts() {
     g_nextVblank.QuadPart += static_cast<LONGLONG>(static_cast<double>(g_qpf.QuadPart) * 1001.0 / 60000.0 / g_turbo);
     if (now.QuadPart > g_nextVblank.QuadPart) g_nextVblank.QuadPart = now.QuadPart;
     ++g_vblanks;
+    ApplyWidescreen();
     if (g_turboUntil == ~0ull && g_menuMusic && g_turbo != 1.0) g_turboUntil = g_vblanks;  // HP2_TURBO_UNTIL=menu
     if (g_turboUntil && g_vblanks == g_turboUntil) {
       g_turbo = 1.0;
@@ -1068,7 +1089,19 @@ void Syscall(NativeState& s) {
     case 0x71: g_hw[0x12001010] = A(s, 0); Ret(s, 0); return;                 // GsPutIMR
     case 0x73: g_vsyncFlag1 = A(s, 0); g_vsyncFlag2 = A(s, 1); return;        // SetVSyncFlag
     case 0x76: Ret(s, -1); return;  // SifDmaStat: transfer finished
-    case 0x77: Ret(s, 1); return;   // SifSetDma: accepted (the I/O side is served by host services)
+    case 0x77: {  // SifSetDma(list of {EE source, IOP destination, bytes, attributes}, count): accepted
+      static const bool sifLog = std::getenv("HP2_SIF_LOG") != nullptr;  // development: every transfer
+      if (sifLog)
+        for (std::uint32_t k = 0, list = A(s, 0); k < A(s, 1) && k < 32; ++k) {
+          const std::uint32_t at = list + k * 16;  // main memory or scratchpad
+          const std::uint32_t* t = reinterpret_cast<const std::uint32_t*>(
+              (at >> 28) == 7 ? g_spr + (at & 0x3FF0) : Phys(at) + 16 <= kNativeRamSize ? g_ram + Phys(at) : nullptr);
+          if (!t) break;
+          Log("sif: vblank %llu dma %08X -> IOP %08X, %u bytes, attr %X", static_cast<unsigned long long>(g_vblanks), t[0], t[1], t[2], t[3]);
+        }
+      Ret(s, 1);
+      return;
+    }
     case 0x78: return;              // SifSetDChain
     case 0x79: g_hw[0xF0000000u + A(s, 0)] = A(s, 1); Ret(s, 0); return;  // SifSetReg
     case 0x7A: Ret(s, A(s, 0) == 4 ? 0x00060000 : static_cast<std::int32_t>(g_hw[0xF0000000u + A(s, 0)])); return;  // SifGetReg
@@ -1094,6 +1127,80 @@ bool DiscRead(std::uint64_t offset, void* out, std::uint64_t count) {
     return false;
   }
 }
+// ---- movie sound -------------------------------------------------------------------------------------------------------
+// The game decodes its AVI movies (video "mv30", sound in "##wb" chunks) on the EE and hands the sound to its IOP sound
+// library through a callback object the I/O side calls back into; the native streamer has no such side. Instead, when the
+// game starts a movie's sound (stream 0 opened on sector 0 with size 0x7FFFFFFF, then command 01), the runtime plays the
+// sound chunks of the AVI the game last started reading: PS-ADPCM, stereo, left and right alternating in 0x8000-byte blocks
+// (the EA logo's track is 5 x 0x10000 bytes), at the pitch the game sets.
+std::uint32_t g_aviLsn = 0;  // first sector of the AVI file the game last read the start of (game thread)
+std::mutex g_movieMutex;
+std::vector<std::pair<std::uint64_t, std::uint32_t>> g_movieChunks;  // disc offset and size of each sound chunk, in order
+std::vector<std::uint64_t> g_movieStarts;                            // offset of each chunk in the joined sound
+void NoteDiscRead(std::uint32_t lsn, const std::uint8_t* data) {
+  if (std::memcmp(data, "RIFF", 4) == 0 && std::memcmp(data + 8, "AVI ", 4) == 0) g_aviLsn = lsn;
+}
+// Reads the joined sound of the current movie (the mixer's reader: its feeder thread).
+bool MovieRead(std::uint64_t offset, void* out, std::uint64_t count) {
+  std::lock_guard<std::mutex> lock(g_movieMutex);
+  std::uint8_t* dst = static_cast<std::uint8_t*>(out);
+  auto it = std::upper_bound(g_movieStarts.begin(), g_movieStarts.end(), offset);
+  if (it == g_movieStarts.begin()) return false;
+  for (std::size_t k = static_cast<std::size_t>(it - g_movieStarts.begin()) - 1; count > 0 && k < g_movieChunks.size(); ++k) {
+    const std::uint64_t within = offset - g_movieStarts[k];
+    const std::uint64_t n = std::min<std::uint64_t>(count, g_movieChunks[k].second - within);
+    if (!DiscRead(g_movieChunks[k].first + within, dst, n)) return false;
+    dst += n;
+    offset += n;
+    count -= n;
+  }
+  if (count > 0) std::memset(dst, 0, count);  // past the end: silence
+  return true;
+}
+// Indexes the sound chunks of the AVI at `lsn` (from its idx1 index). Returns the joined sound's size, 0 if none.
+std::uint32_t MovieIndex(std::uint32_t lsn) {
+  const std::uint64_t base = lsn * 2048ull;
+  std::uint8_t head[12] = {};
+  if (!lsn || !DiscRead(base, head, 12) || std::memcmp(head, "RIFF", 4) != 0) return 0;
+  std::uint32_t riff = 0;
+  std::memcpy(&riff, head + 4, 4);
+  // top-level chunks after "AVI ": LIST hdrl, LIST movi, idx1
+  std::uint64_t at = 12, movi = 0, idx = 0;
+  std::uint32_t idxSize = 0;
+  while (at + 12 <= riff + 8ull) {
+    std::uint8_t h[12] = {};
+    if (!DiscRead(base + at, h, 12)) return 0;
+    std::uint32_t size = 0;
+    std::memcpy(&size, h + 4, 4);
+    if (std::memcmp(h, "LIST", 4) == 0 && std::memcmp(h + 8, "movi", 4) == 0) movi = at + 8;  // idx1 offsets count from here
+    if (std::memcmp(h, "idx1", 4) == 0) {
+      idx = at + 8;
+      idxSize = size;
+    }
+    at += 8ull + size + (size & 1);
+  }
+  if (!movi || !idx || idxSize < 16 || idxSize > 0x1000000) return 0;
+  std::vector<std::uint8_t> entries(idxSize);
+  if (!DiscRead(base + idx, entries.data(), idxSize)) return 0;
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> chunks;
+  std::vector<std::uint64_t> starts;
+  std::uint64_t total = 0;
+  for (std::uint32_t e = 0; e + 16 <= idxSize; e += 16) {
+    if (entries[e + 2] != 'w' || entries[e + 3] != 'b') continue;  // "##wb": sound
+    std::uint32_t offset = 0, size = 0;
+    std::memcpy(&offset, &entries[e + 8], 4);
+    std::memcpy(&size, &entries[e + 12], 4);
+    if (!size) continue;
+    chunks.emplace_back(base + movi + offset + 8, size);  // (an idx1 offset points at the chunk's header)
+    starts.push_back(total);
+    total += size;
+  }
+  std::lock_guard<std::mutex> lock(g_movieMutex);
+  g_movieChunks = std::move(chunks);
+  g_movieStarts = std::move(starts);
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(total, 0x7FFFFFF0u));
+}
+
 // Finds a file by its path ("cdrom:\NFSHP2\FILE.BIN;1"): first sector and size.
 bool DiscFind(std::string path, std::uint32_t& lsn, std::uint32_t& size) {
   if (const auto colon = path.find(':'); colon != std::string::npos) path.erase(0, colon + 1);
@@ -1270,7 +1377,14 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
         if (na >= 2 && s < 48 && !voiceStream(s)) audio::VoicePitch(s, c[i + 3]);
         break;
       case 0xCB:
-        if (na >= 3 && s < 48 && !voiceStream(s)) audio::VoiceVolume(s, c[i + 3], c[i + 4]);
+        if (na >= 3 && s < 48 && !voiceStream(s)) {
+          audio::VoiceVolume(s, c[i + 3], c[i + 4]);
+        } else if (na >= 3 && s < 48) {  // a stream's voice: the music's left voice sets its left side (the game pans it hard
+          // left: [volume, 4]), the right voice its right side ([4, volume]); the speech voice both sides
+          if (g_music.active && s == g_music.voice[0]) audio::StreamVolume(0, c[i + 3], -1);
+          else if (g_music.active && s == g_music.voice[1]) audio::StreamVolume(0, -1, c[i + 4]);
+          else audio::StreamVolume(2, c[i + 3], c[i + 4]);
+        }
         break;
       case 0x01:
         if (na >= 5 && s < 8) {
@@ -1280,10 +1394,18 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
           ch.start = g_vblanks;
           ch.voice[0] = c[i + 3] & 0x3F;
           ch.volume = c[i + 4];
-                    if (s == 0 && ch.voice[0] == 0x2E) g_menuMusic = true;
+          if (s == 0 && ch.voice[0] == 0x2E) g_menuMusic = true;
           ch.rate = std::max<std::uint32_t>(static_cast<std::uint32_t>(c[i + 6]) * 48000u / 4096u, 4000);
           ch.bytes = f.length;
           ch.durationVblanks = f.length ? VblanksFor(s == 0 ? f.length / 2 : f.length, ch.rate) : ~0ull;
+          const bool movie = s == 0 && f.lsn == 0 && f.size == 0x7FFFFFFFu;  // a movie's sound (see MovieRead)
+          if (movie && audio::Available()) {
+            const std::uint32_t bytes = MovieIndex(g_aviLsn);
+            Log("streamer: vblank %llu movie sound: AVI at sector %u, %u bytes", static_cast<unsigned long long>(g_vblanks), g_aviLsn, bytes);
+            ch.audioStarted = bytes != 0;
+            if (bytes) audio::StreamStart(0, &MovieRead, 0, bytes, 2, 0x8000u, c[i + 6], c[i + 4], c[i + 4]);
+            break;
+          }
           ch.audioStarted = audio::Available() && f.lsn && f.length;
           if (ch.audioStarted)
             audio::StreamStart(s == 0 ? 0 : 2, &DiscRead, f.lsn * 2048ull + f.offset, f.length, s == 0 ? 2 : 1, 0x8000u, c[i + 6],
@@ -1311,8 +1433,8 @@ void StreamerService(std::uint32_t send, std::uint32_t recv) {
       default:
         break;
     }
-    static const bool allCommands = std::getenv("HP2_STREAMER_LOG") != nullptr;  // development: every command, not only stream set-up
-    if (allCommands ? (id != 0x0E && id != 0x09) : (id == 0x01 || id == 0x05 || id == 0x1E || id == 0x29 || id == 0x2C || id == 0x1B)) {
+    static const int allCommands = std::getenv("HP2_STREAMER_LOG") ? std::atoi(std::getenv("HP2_STREAMER_LOG")) : 0;  // development: 1 every command but the frequent 09 and 0E, 2 all
+    if (allCommands ? (allCommands > 1 || (id != 0x0E && id != 0x09)) : (id == 0x01 || id == 0x05 || id == 0x1E || id == 0x29 || id == 0x2C || id == 0x1B)) {
       static int logged = 0;
       if (logged++ < (allCommands ? 200000 : 400)) {
         char args[128] = {};
@@ -1824,15 +1946,18 @@ void Hook(NativeState& s) {
         if (lsn == 0xFFFFFFFFu) break;
         if (static_cast<std::int32_t>(lsn) < 0 || !InRam(address, count * 2048) || !DiscRead(lsn * 2048ull, g_ram + Phys(address), count * 2048ull))
           Log("io: sceCdReadChain entry (sector %d, %u sectors, %08X) not served", static_cast<std::int32_t>(lsn), count, address);
-        else
+        else {
           ++g_discReads;
+          if (count) NoteDiscRead(lsn, g_ram + Phys(address));
+        }
       }
     }
     if (server == 0x80000595 && fn == 1 && A(s, 4) >= 12 && InRam(A(s, 3), 12)) {  // sceCdRead(lsn, sectors, buffer, ...)
       const std::uint32_t lsn = Rd<std::uint32_t>(A(s, 3)), sectors = Rd<std::uint32_t>(A(s, 3) + 4), buf = Rd<std::uint32_t>(A(s, 3) + 8);
-      if (InRam(buf, sectors * 2048) && DiscRead(lsn * 2048ull, g_ram + Phys(buf), sectors * 2048ull))
+      if (InRam(buf, sectors * 2048) && DiscRead(lsn * 2048ull, g_ram + Phys(buf), sectors * 2048ull)) {
         ++g_discReads;
-      else
+        if (sectors) NoteDiscRead(lsn, g_ram + Phys(buf));
+      } else
         Log("io: sceCdRead(lsn %u, %u sectors, %08X) failed", lsn, sectors, buf);
     }
     if (server == 0x00012345 && fn == 0 && recv && rsize >= 0x120 && InRam(recv, rsize) && InRam(A(s, 3), 4096)) StreamerService(A(s, 3), recv);

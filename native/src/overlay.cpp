@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <string>
 
 namespace ui {
@@ -13,6 +14,9 @@ namespace {
 
 std::atomic<bool> g_visible{false};
 int g_selected = 0;
+bool g_quitArmed = false;           // the Quit row asked for its confirmation press
+std::atomic<bool> g_quit{false};    // quit confirmed (TakeQuit)
+std::atomic<bool> g_wideActive{false};  // the game runs with its widescreen patches (chosen at start)
 
 struct Item {
   const wchar_t* label;
@@ -26,11 +30,12 @@ const Item kItems[] = {
     {L"Display mode", &Settings::fullscreen, 2, {L"Window", L"Full screen"}},
     {L"V-Sync", &Settings::vsync, 2, {L"Off", L"On"}},
     {L"Scaling filter", &Settings::filter, 3, {L"Sharp bilinear", L"Bilinear", L"Nearest"}},
-    {L"Aspect ratio", &Settings::aspect, 3, {L"4:3", L"Stretch", L"Integer scale"}},
+    {L"Aspect ratio", &Settings::aspect, 4, {L"16:9", L"4:3", L"4:3 integer scale", L"Stretch"}},
     {L"Sharpening", &Settings::sharpen, 4, {L"Off", L"Low", L"Medium", L"High"}},
     {L"Scanlines", &Settings::scanlines, 3, {L"Off", L"Light", L"Strong"}},
 };
 constexpr int kItemCount = static_cast<int>(sizeof kItems / sizeof kItems[0]);
+constexpr int kRows = kItemCount + 1;  // the settings, then Quit game
 
 std::wstring IniPath() {
   wchar_t path[MAX_PATH] = {};
@@ -41,7 +46,7 @@ std::wstring IniPath() {
 }
 
 const wchar_t* Key(int i) {
-  static const wchar_t* keys[] = {L"renderer", L"resolution", L"fullscreen", L"vsync", L"filter", L"aspect", L"sharpen", L"scanlines"};
+  static const wchar_t* keys[] = {L"renderer", L"resolution", L"fullscreen", L"vsync", L"filter", L"aspect_ratio", L"sharpen", L"scanlines"};
   return keys[i];
 }
 
@@ -83,6 +88,7 @@ Settings Load() {
     const int v = static_cast<int>(GetPrivateProfileIntW(L"graphics", Key(i), s.*kItems[i].field, ini.c_str()));
     s.*kItems[i].field = std::clamp(v, 0, kItems[i].count - 1);
   }
+  if (const char* e = std::getenv("HP2_ASPECT")) s.aspect = std::clamp(std::atoi(e), 0, 3);  // tests: without touching the file
   return s;
 }
 
@@ -93,19 +99,39 @@ void Save(const Settings& s) {
 }
 
 bool Visible() { return g_visible; }
-void Toggle() { g_visible = !g_visible; }
+void Toggle() {
+  g_visible = !g_visible;
+  g_quitArmed = false;
+}
+
+bool TakeQuit() { return g_quit.exchange(false); }
+void SetWidescreenActive(bool wide) { g_wideActive = wide; }
 
 bool Navigate(Input in, Settings& s) {
   if (!g_visible) return false;
+  if (in != Input::Accept) g_quitArmed = false;
+  if (g_selected == kItemCount && in != Input::Up && in != Input::Down && in != Input::Back) {  // Quit game: Enter twice
+    if (in == Input::Accept) {
+      if (g_quitArmed) g_quit = true;
+      g_quitArmed = !g_quitArmed;
+    }
+    return false;
+  }
+  if (in == Input::Back) {
+    g_visible = false;
+    return false;
+  }
+  if (in == Input::Up || in == Input::Down) {
+    g_selected = (g_selected + (in == Input::Up ? kRows - 1 : 1)) % kRows;
+    return false;
+  }
   int& v = s.*kItems[g_selected].field;
   const int n = kItems[g_selected].count;
   switch (in) {
-    case Input::Up: g_selected = (g_selected + kItemCount - 1) % kItemCount; return false;
-    case Input::Down: g_selected = (g_selected + 1) % kItemCount; return false;
+    case Input::Up: case Input::Down: case Input::Back: return false;
     case Input::Left: v = (v + n - 1) % n; return true;
     case Input::Right:
     case Input::Accept: v = (v + 1) % n; return true;
-    case Input::Back: g_visible = false; return false;
   }
   return false;
 }
@@ -134,7 +160,7 @@ bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>
   const double k = std::min(height / 720.0, width / 1280.0);
   auto S = [k](int v) { return static_cast<int>(v * k + 0.5); };
   const int pw = S(760), rowH = S(52), headH = S(78), skew = S(26);
-  const int ph = headH + S(24) + rowH * kItemCount + S(70);
+  const int gap = S(14), ph = headH + S(24) + rowH * kRows + gap + S(70);
   const int px = (width - pw) / 2, py = (height - ph) / 2;
 
   // panel: dark steel body, lighter rim, header band with the orange accent stripe
@@ -146,11 +172,11 @@ bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>
 
   HFONT title = Font(S(40), FW_BLACK, L"Arial Black"), item = Font(S(27), FW_BOLD, L"Arial"),
         small = Font(S(19), FW_BOLD, L"Arial");
-  Text(dc, title, edge(py + headH / 2) + S(36), py, pw - S(88), headH - S(6), L"GRAPHICS SETTINGS", Rgb(236, 240, 246), DT_LEFT);
+  Text(dc, title, edge(py + headH / 2) + S(36), py, pw - S(88), headH - S(6), L"SETTINGS", Rgb(236, 240, 246), DT_LEFT);
 
   const int listY = py + headH + S(24);
-  for (int i = 0; i < kItemCount; ++i) {
-    const int y = listY + i * rowH, x = edge(y + rowH / 2);
+  for (int i = 0; i < kRows; ++i) {
+    const int y = listY + i * rowH + (i == kItemCount ? gap : 0), x = edge(y + rowH / 2);
     const bool sel = i == g_selected;
     if (sel) {
       Parallelogram(dc, x + S(18), y + S(4), pw - S(40), rowH - S(8), skew * (rowH - S(8)) / ph, Rgb(46, 78, 120));
@@ -158,9 +184,17 @@ bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>
       FillPoly(dc, chevron, 3, Rgb(255, 146, 28));
     }
     const COLORREF label = sel ? Rgb(255, 156, 40) : Rgb(204, 210, 220);
+    if (i == kItemCount) {  // Quit game
+      Parallelogram(dc, x + S(18), y - gap / 2 - S(1), pw - S(40), S(2), 1, Rgb(60, 84, 116));
+      Text(dc, item, x + S(56), y, pw / 2, rowH, L"Quit game", label, DT_LEFT);
+      Text(dc, item, x + pw / 2, y, pw / 2 - S(48), rowH, g_quitArmed && sel ? L"Press again to quit" : L"Exit to Windows",
+           g_quitArmed && sel ? Rgb(255, 214, 150) : Rgb(150, 170, 196), DT_RIGHT);
+      continue;
+    }
     Text(dc, item, x + S(56), y, pw / 2, rowH, kItems[i].label, label, DT_LEFT);
-    const std::wstring value = sel ? std::wstring(L"‹  ") + kItems[i].names[s.*kItems[i].field] + L"  ›"
-                                   : std::wstring(kItems[i].names[s.*kItems[i].field]);
+    std::wstring name = kItems[i].names[s.*kItems[i].field];
+    if (kItems[i].field == &Settings::aspect && (s.aspect == 0) != g_wideActive) name += L" (restart)";  // 16:9 <-> 4:3
+    const std::wstring value = sel ? L"‹  " + name + L"  ›" : name;
     Text(dc, item, x + pw / 2, y, pw / 2 - S(48), rowH, value.c_str(), sel ? Rgb(255, 214, 150) : Rgb(150, 170, 196), DT_RIGHT);
   }
   Text(dc, small, edge(py + ph - S(38)) + S(30), py + ph - S(58), pw - S(80), S(40),

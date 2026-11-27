@@ -12,7 +12,7 @@ struct Settings {
   int fullscreen = 0;  // 0 window, 1 borderless full screen
   int vsync = 1;       // 0 off (tearing allowed when the system supports it), 1 on
   int filter = 0;      // 0 sharp bilinear, 1 bilinear, 2 nearest
-  int aspect = 0;      // 0 4:3, 1 stretch to the window, 2 integer scale
+  int aspect = 0;      // 0 16:9 (the game's widescreen patches, ADR 0015), 1 4:3, 2 4:3 integer scale, 3 stretch to the window
   int sharpen = 0;     // 0 off, 1 low, 2 medium, 3 high
   int scanlines = 0;   // 0 off, 1 light, 2 strong
 };
@@ -25,6 +25,10 @@ void Toggle();
 // Menu navigation. Returns true when a setting changed (the caller applies and saves it).
 enum class Input { Up, Down, Left, Right, Accept, Back };
 bool Navigate(Input in, Settings& s);
+// True once after Quit game was confirmed in the menu (the caller closes the window: the game ends as on Alt+F4).
+bool TakeQuit();
+// The game runs with its widescreen patches (decided at start): a change between 16:9 and 4:3 shows "(restart)".
+void SetWidescreenActive(bool wide);
 // Draws the menu (when visible) into a premultiplied BGRA image of the given size. Returns false when there is nothing to draw.
 bool Render(const Settings& s, int width, int height, std::vector<std::uint32_t>& out);
 
