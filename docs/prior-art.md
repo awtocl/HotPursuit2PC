@@ -40,6 +40,12 @@ data is in the tree itself.
 | Cranelift, QBE, MIR, asmjit | — | **not used, not fetched** | Named in ADR 0007 from prior knowledge only. | Everything about them. |
 | The MIPS R5900 instruction encodings | public processor documentation; also visible in the reference core's sources (BSD 2-Clause) | **reference-only** | `recomp/src/r5900.cpp` was written from the published opcode tables; no code was copied. All 431,681 words of the game's code decode with it and its control-flow predictions match what the reference core executed. | The meaning of each instruction is not implemented yet. |
 
+## Game patches in the native game (ADR 0015)
+
+| Source | License | Verdict | What was taken | What remains UNVERIFIED |
+|---|---|---|---|---|
+| [PCSX2/pcsx2_patches](https://github.com/PCSX2/pcsx2_patches), `patches/SLUS-20362_1D2818AF.pnach` — "Widescreen 16:9" by nemesis2000, "HUD fixed for widescreen" by Aero_, "60 FPS" by asasega (read 2026-11-27 through the GitHub API) | **None declared** (no license in the repository metadata or root) | **facts used, credited** | Addresses and values only: one instruction word, two `lui` constants, five data words (16:9) and one `sltiu` constant (60 fps). No code or text copied. Each was checked against the game's own code before use (`recomp/include/hp2/game_patches.h`, ADR 0015) and verified in the native game (screenshots, the race clock at 60 fps). | The patch file's own licensing intent. If its authors object, the values can be re-derived from the game program (they are the camera's width scale, the HUD layout and the frame loop's wait). |
+
 ## Third-party software in the launcher (`HotPursuit2.exe`)
 
 Exactly the static libraries that the link step uses (checked in the build

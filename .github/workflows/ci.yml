@@ -14,13 +14,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Guard - no game data or user folders in the repository
         shell: pwsh
         run: |
           $bad = git ls-files | Where-Object {
-            $_ -match '^(ROM|game)/' -or $_ -match '\.(iso|ISO|bin|BIN|BUN|LZC|IRX|IMG|ELF)$' -or $_ -match 'SLUS_'
+            $_ -match '^(ROM|game|game-native)/' -or $_ -match '\.(iso|ISO|bin|BIN|BUN|LZC|IRX|IMG|ELF)$' -or $_ -match 'SLUS_'
           }
           if ($bad) { Write-Error "Forbidden files are tracked:`n$($bad -join "`n")"; exit 1 }
           Write-Host "OK: no game data tracked."
@@ -43,7 +43,7 @@ jobs:
 
       - name: Upload converter binaries
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hotpursuit2pc-windows-x64
           # The converter carries the launcher inside it; no game data is involved.

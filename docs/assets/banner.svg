@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-labelledby="t d">
+  <title id="t">HotPursuit2PC</title>
+  <desc id="d">Project banner: the project name over angled steel-blue panels with an orange accent stripe.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07101d"/>
+      <stop offset="0.55" stop-color="#11233b"/>
+      <stop offset="1" stop-color="#1d3a5f"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b6aa0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#3b6aa0" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff7a00"/>
+    </linearGradient>
+    <linearGradient id="title" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#b9cbe2"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" rx="18" fill="url(#bg)"/>
+  <!-- speed lines -->
+  <g stroke="#8fb3dc" stroke-opacity="0.18" stroke-width="2" stroke-linecap="round">
+    <line x1="760" y1="58" x2="1240" y2="58"/>
+    <line x1="840" y1="86" x2="1210" y2="86"/>
+    <line x1="700" y1="250" x2="1180" y2="250"/>
+    <line x1="900" y1="276" x2="1250" y2="276"/>
+    <line x1="60" y1="40" x2="300" y2="40"/>
+  </g>
+  <!-- angled panels -->
+  <polygon points="40,96 1000,96 960,232 0,232" fill="url(#panel)"/>
+  <polygon points="1010,96 1280,96 1280,232 970,232" fill="#3b6aa0" fill-opacity="0.12"/>
+  <polygon points="52,236 900,236 896,248 48,248" fill="url(#accent)"/>
+  <!-- chevrons -->
+  <g fill="#ff921c">
+    <polygon points="1072,128 1102,164 1072,200 1088,200 1118,164 1088,128"/>
+    <polygon points="1110,128 1140,164 1110,200 1126,200 1156,164 1126,128" fill-opacity="0.7"/>
+    <polygon points="1148,128 1178,164 1148,200 1164,200 1194,164 1164,128" fill-opacity="0.4"/>
+  </g>
+  <text x="76" y="190" font-family="Arial Black, Arial, Helvetica, sans-serif" font-weight="900" font-style="italic" font-size="88" letter-spacing="1" fill="url(#title)">HotPursuit2<tspan fill="#ff921c">PC</tspan></text>
+  <text x="80" y="292" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-style="italic" font-size="26" fill="#c9d6e8" letter-spacing="1">PS2 GAME  →  NATIVE WINDOWS x64  ·  STATIC RECOMPILATION  ·  YOUR OWN DISC</text>
+</svg>
