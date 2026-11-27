@@ -50,11 +50,15 @@ endif()
 add_subdirectory("${HP2_PLAY_DIR}/Source" "${CMAKE_CURRENT_BINARY_DIR}/play/core" EXCLUDE_FROM_ALL)
 add_subdirectory("${HP2_PLAY_DIR}/Source/gs/GSH_OpenGL" "${CMAKE_CURRENT_BINARY_DIR}/play/gsh_opengl" EXCLUDE_FROM_ALL)
 
-# Play!'s Framework uses WINAPI_FAMILY_ONE_PARTITION (PathUtils.cpp) without including <winapifamily.h>; the standard
-# headers of Visual Studio 2022 brought it in, those of Visual Studio 2026 (MSVC 19.5x) do not. Included up front here,
-# so the pinned source builds with both, unmodified.
-if(MSVC AND TARGET Framework)
-  target_compile_options(Framework PRIVATE /FIwinapifamily.h)
+# Play!'s Framework uses WINAPI_FAMILY_ONE_PARTITION (PathUtils.cpp), which the Windows SDK of Visual Studio 2026
+# (MSVC 19.5x) no longer provides: play_compat.h, included up front, defines it when missing, so the pinned source
+# builds unmodified with Visual Studio 2022 and 2026.
+if(MSVC)
+  if(TARGET Framework)
+    target_compile_options(Framework PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/play_compat.h")
+  else()
+    message(WARNING "Play!'s Framework target not found: play_compat.h not applied")
+  endif()
 endif()
 
 # Play!'s code generator registers its own test suite with CTest
