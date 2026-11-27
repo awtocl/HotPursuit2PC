@@ -521,8 +521,16 @@ void ApplyDisplayMode(HWND h) {  // borderless full screen on the window's monit
                  g_windowedRect.bottom - g_windowedRect.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
   }
 }
+// The renderer settings, handed from the window thread to the GS thread (applied there between frames: DoPresent).
+std::atomic<int> g_wantRenderer{-1}, g_wantScale{1};
+void PublishRendererSettings(const ui::Settings& s) {
+  g_wantScale = s.resolution + 1;
+  g_wantRenderer = s.renderer;
+}
+
 void SettingsChanged(HWND h) {
   ui::Save(g_settings);
+  PublishRendererSettings(g_settings);
   ApplyDisplayMode(h);
   g_overlayDirty = g_redraw = true;
 }
@@ -623,6 +631,7 @@ void WindowThread() {
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   RegisterClassW(&wc);
   g_settings = ui::Load();
+  PublishRendererSettings(g_settings);
   RECT r = {0, 0, 640 * g_scalePercent / 100, 480 * g_scalePercent / 100};
   if (g_scalePercent == 100) {  // default: 4:3 at 80% of the primary monitor's work area height
     RECT work = {};
@@ -1571,6 +1580,12 @@ gpu::Texture GpuTexture() {  // a GPU target when TEX0 names one, else the decod
     return t;
   }
   const TexCache& tc = GetTexture(c);
+  if (gpu::CoversPages(tc.pageList)) {
+    char what[96];
+    snprintf(what, sizeof what, "texture %u/%02X %ux%u from GPU-drawn memory", static_cast<u32>(c.tex0 & 0x3FFF),
+             static_cast<u32>((c.tex0 >> 20) & 0x3F), tc.w, tc.h);
+    gpu::Note(what);
+  }
   t.pix = tc.pix;
   t.w = tc.w;
   t.h = tc.h;
@@ -1732,8 +1747,16 @@ void Kick(bool hasF, u64 xyz, bool draw) {
     g_primLogText += line;
   }
   switch (type) {
-    case 0: ++g_stats.points; break;
-    case 1: case 2: ++g_stats.lines; break;  // lines are not drawn yet
+    case 0: {  // point: the one pixel it falls in, as a 1x1 sprite (its colour, depth and texel)
+      ++g_stats.points;
+      if (!draw) break;  // (XYZ3: no drawing kick)
+      Vertex b = v;
+      b.x += 16;
+      b.y += 16;
+      DrawSprite(v, b);
+      break;
+    }
+    case 1: case 2: ++g_stats.lines; if (gpu::Enabled()) gpu::Note("lines"); break;  // lines are not drawn yet
     case 3:  // triangle list
       g_queue[g_queued++] = v;
       if (g_queued == 3 && !draw) g_queued = 0;  // (no-kick vertex completing a triangle: dropped)
@@ -1770,7 +1793,14 @@ void BumpTransferPages() {  // page versions of the transfer rectangle (texture 
   g_xfer.written = false;
   BumpRect(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
            static_cast<int>(g_xfer.y0 + g_xfer.h) - 1);
-  // GPU renderer: a finished upload into a frame buffer the GPU holds goes into its target too (CT32/CT24)
+  // GPU renderer: a finished upload into a frame buffer the GPU holds goes into its target too (CT32/CT24); any other upload
+  // over pages a target covers makes GS memory the truth there again (the target is dropped)
+  if (gpu::Enabled() && !(!g_xfer.active && (g_xfer.psm == CT32 || g_xfer.psm == CT24) && gpu::HoldsBuffer(g_xfer.bp, g_xfer.bw))) {
+    std::vector<u16> pages;
+    ForPages(g_xferSurf, static_cast<int>(g_xfer.x0), static_cast<int>(g_xfer.x0 + g_xfer.w) - 1, static_cast<int>(g_xfer.y0),
+             static_cast<int>(g_xfer.y0 + g_xfer.h) - 1, [&](u32 page) { pages.push_back(static_cast<u16>(page)); });
+    gpu::MemoryWritten(pages);
+  }
   if (!g_xfer.active && (g_xfer.psm == CT32 || g_xfer.psm == CT24) && gpu::Enabled() && gpu::HoldsBuffer(g_xfer.bp, g_xfer.bw)) {
     std::vector<u32> rgba(static_cast<std::size_t>(g_xfer.w) * g_xfer.h);
     for (u32 y = 0; y < g_xfer.h; ++y)
@@ -1935,6 +1965,7 @@ void DoRegWrite(std::uint32_t reg, std::uint64_t v) {
       g_trxdir = v;
       if ((v & 3) == 0) BeginTransfer();
       else if ((v & 3) == 2) {  // local to local copy
+        if (gpu::Enabled()) gpu::Note("local copy");
         const u32 sbp = static_cast<u32>(g_bitbltbuf & 0x3FFF), sbw = static_cast<u32>((g_bitbltbuf >> 16) & 63), spsm = static_cast<u32>((g_bitbltbuf >> 24) & 0x3F);
         const u32 dbp = static_cast<u32>((g_bitbltbuf >> 32) & 0x3FFF), dbw = static_cast<u32>((g_bitbltbuf >> 48) & 63), dpsm = static_cast<u32>((g_bitbltbuf >> 56) & 0x3F);
         const u32 sx = static_cast<u32>(g_trxpos & 0x7FF), sy = static_cast<u32>((g_trxpos >> 16) & 0x7FF);
@@ -2080,6 +2111,14 @@ void DoPresent() {
   const u32 magh = static_cast<u32>((dp >> 23) & 15), magv = static_cast<u32>((dp >> 27) & 3);
   const u32 dw = static_cast<u32>((dp >> 32) & 0xFFF) + 1, dh = static_cast<u32>((dp >> 44) & 0x7FF) + 1;
   const u32 w = std::clamp<u32>(dw / (magh + 1), 1, 1024), h = std::clamp<u32>(dh / (magv + 1), 1, 1024);
+  {  // renderer settings, between frames: Graphics Settings (hp2native.ini), HP2_GPU=0/1 overriding
+    if (g_wantRenderer < 0) PublishRendererSettings(ui::Load());  // (before the window thread has loaded them)
+    static const char* force = std::getenv("HP2_GPU");
+    const bool gpuWanted = force && (force[0] == '0' || force[0] == '1') ? force[0] == '1' : g_wantRenderer == 1;
+    gpu::SetActive(gpuWanted);
+    static const char* scale = std::getenv("HP2_GPU_SCALE");  // (tests: without touching hp2native.ini)
+    gpu::SetScale(scale ? std::atoi(scale) : g_wantScale.load());
+  }
   if (gpu::Enabled()) {  // the GPU renderer's target, copied on the GPU (no read-back)
     const bool shown = gpu::Present(fb, static_cast<int>(dbx), static_cast<int>(dby), static_cast<int>(w), static_cast<int>(h));
     {

@@ -7,6 +7,8 @@
 namespace ui {
 
 struct Settings {
+  int renderer = 1;    // 0 software GS, 1 GPU (ADR 0014)
+  int resolution = 0;  // GPU internal resolution: 0 1x (native), 1 2x, 2 3x, 3 4x
   int fullscreen = 0;  // 0 window, 1 borderless full screen
   int vsync = 1;       // 0 off (tearing allowed when the system supports it), 1 on
   int filter = 0;      // 0 sharp bilinear, 1 bilinear, 2 nearest

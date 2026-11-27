@@ -21,6 +21,8 @@ struct Item {
   const wchar_t* names[4];
 };
 const Item kItems[] = {
+    {L"Renderer", &Settings::renderer, 2, {L"Software", L"GPU"}},
+    {L"Internal resolution", &Settings::resolution, 4, {L"1x (native)", L"2x", L"3x", L"4x"}},
     {L"Display mode", &Settings::fullscreen, 2, {L"Window", L"Full screen"}},
     {L"V-Sync", &Settings::vsync, 2, {L"Off", L"On"}},
     {L"Scaling filter", &Settings::filter, 3, {L"Sharp bilinear", L"Bilinear", L"Nearest"}},
@@ -39,7 +41,7 @@ std::wstring IniPath() {
 }
 
 const wchar_t* Key(int i) {
-  static const wchar_t* keys[] = {L"fullscreen", L"vsync", L"filter", L"aspect", L"sharpen", L"scanlines"};
+  static const wchar_t* keys[] = {L"renderer", L"resolution", L"fullscreen", L"vsync", L"filter", L"aspect", L"sharpen", L"scanlines"};
   return keys[i];
 }
 

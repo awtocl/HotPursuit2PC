@@ -69,10 +69,10 @@ float4 Texel(int2 p) {
   int tw = int(texs.x), th = int(texs.y);
   p.x = WrapC(p.x, tw, wrap.x, int(region.x), int(region.y)) & (tw - 1);
   p.y = WrapC(p.y, th, wrap.y, int(region.z), int(region.w)) & (th - 1);
-  int sc = int(texs.z);
-  float4 raw = T.Load(int3(p * sc + sc / 2, 0));
-  float4 t = floor(raw * 255.0 + 0.5);
-  if (misc.w != 0) t.a = floor(raw.a * 128.0 + 0.5);
+  float4 t = floor(T.Load(int3(p, 0)) * 255.0 + 0.5);
+  return t;
+}
+float4 Converted(float4 t) {  // CT16 / CT24 views
   if (wrap.w == 1) {  // CT16 target: 5-bit colour, alpha bit through TEXA
     t.rgb = floor(t.rgb / 8) * 8;
     t.a = t.a >= 128 ? blendf.z : ((blendf.w != 0 && all(t.rgb == 0)) ? 0 : blendf.y);
@@ -81,13 +81,33 @@ float4 Texel(int2 p) {
   }
   return t;
 }
+// A GPU target as texture, on its own (internal resolution) grid: GS texel coordinate u lands on fine coordinate
+// (u - 0.5) * N + 0.5, so the game's u = x + 0.5 copies stay exact 1:1 copies at any resolution.
+float4 TargetTexel(int2 p) {
+  int2 size = int2(texs.xy * texs.z);
+  float4 raw = T.Load(int3(clamp(p, int2(0, 0), size - 1), 0));
+  float4 t = floor(raw * 255.0 + 0.5);
+  t.a = floor(raw.a * 128.0 + 0.5);  // (targets keep alpha / 128)
+  return Converted(t);
+}
 struct POut { float4 c : SV_Target0; float4 f : SV_Target1; };
 POut PS(VOut i) {
   float4 c = floor(i.c);
   if (texi.x != 0) {
     float2 st = texi.y != 0 ? i.uv : (i.stq.z != 0 ? i.stq.xy / i.stq.z * texs.xy : float2(0, 0));
     float4 t;
-    if (wrap.z != 0) {
+    if (misc.w != 0) {
+      float2 U = (st - 0.5) * texs.z + 0.5;
+      if (wrap.z != 0) {
+        float2 f = U - 0.5;
+        float2 fl = floor(f);
+        int2 p = int2(fl);
+        float2 w = floor((f - fl) * 256) / 256;
+        t = floor(lerp(lerp(TargetTexel(p), TargetTexel(p + int2(1, 0)), w.x), lerp(TargetTexel(p + int2(0, 1)), TargetTexel(p + int2(1, 1)), w.x), w.y));
+      } else {
+        t = TargetTexel(int2(floor(U)));
+      }
+    } else if (wrap.z != 0) {
       float2 f = st - 0.5;
       float2 fl = floor(f);
       int2 p = int2(fl);
@@ -159,6 +179,7 @@ struct Target {
   u32 page = 0, fbw = 0;
   bool is16 = false;
   int w = 0, h = 0;  // GS pixels
+  int usedRows = 0;  // rows drawn or uploaded so far (the GS memory the target stands for)
   ID3D11Texture2D* tex = nullptr;
   ID3D11RenderTargetView* rtv = nullptr;
   ID3D11ShaderResourceView* srv = nullptr;
@@ -196,7 +217,8 @@ bool SameKey(const Key& a, const Key& b) {
          a.scissor.right == b.scissor.right && a.scissor.bottom == b.scissor.bottom;
 }
 
-constexpr int kScale = 1;  // internal resolution (stage 3 makes it a setting)
+int g_scale = 1;        // internal resolution (Graphics Settings; SetScale applies it between frames)
+bool g_active = false;  // the renderer draws (SetActive: the Renderer setting or HP2_GPU)
 constexpr int kTargetHeight = 1024;
 constexpr std::size_t kMaxVertices = 1 << 16;
 
@@ -227,16 +249,17 @@ std::vector<GpuVertex> g_verts;
 struct Picture {
   ID3D11Texture2D* tex = nullptr;
   ID3D11ShaderResourceView* srv = nullptr;
-  int w = 0, h = 0;
+  int w = 0, h = 0;  // texture size (GS pixels x internal resolution)
 };
 Picture g_pictures[3];
 int g_newest = -1, g_next = 0;
 std::mutex g_pictureMutex;
 
 struct Counters {
-  u64 prims = 0, batches = 0, textureUploads = 0, targetsCreated = 0, feedbackCopies = 0, approximations = 0, uploads = 0, presents = 0;
+  u64 targetsDropped = 0, prims = 0, batches = 0, textureUploads = 0, targetsCreated = 0, feedbackCopies = 0, approximations = 0, uploads = 0, presents = 0;
 } g_count, g_reported;
-std::map<u64, u64> g_approxAlpha;  // ALPHA register values that were approximated (diagnostic)
+std::map<u64, u64> g_approxAlpha;
+std::map<std::string, u64> g_notes;  // unimplemented features met (Note)  // ALPHA register values that were approximated (diagnostic)
 
 using CompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
 
@@ -341,8 +364,8 @@ Target* GetTarget(u32 page, u32 fbw, bool is16) {
   t->w = static_cast<int>(std::max<u32>(fbw, 1) * 64);
   t->h = kTargetHeight;
   D3D11_TEXTURE2D_DESC d = {};
-  d.Width = static_cast<UINT>(t->w * kScale);
-  d.Height = static_cast<UINT>(t->h * kScale);
+  d.Width = static_cast<UINT>(t->w * g_scale);
+  d.Height = static_cast<UINT>(t->h * g_scale);
   d.MipLevels = d.ArraySize = 1;
   d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
   d.SampleDesc.Count = 1;
@@ -364,8 +387,8 @@ Depth* GetDepth(u32 page, int w, int h) {
   z->w = w;
   z->h = h;
   D3D11_TEXTURE2D_DESC d = {};
-  d.Width = static_cast<UINT>(w * kScale);
-  d.Height = static_cast<UINT>(h * kScale);
+  d.Width = static_cast<UINT>(w * g_scale);
+  d.Height = static_cast<UINT>(h * g_scale);
   d.MipLevels = d.ArraySize = 1;
   d.Format = DXGI_FORMAT_D32_FLOAT;
   d.SampleDesc.Count = 1;
@@ -438,7 +461,7 @@ void Flush() {
   ID3D11ShaderResourceView* none = nullptr;
   g_ctx->PSSetShaderResources(0, 1, &none);  // (a target is unbound as texture before being bound for drawing)
   g_ctx->OMSetRenderTargets(1, &k.rt->rtv, k.ds ? k.ds->dsv : nullptr);
-  D3D11_VIEWPORT vp = {0, 0, static_cast<float>(k.rt->w * kScale), static_cast<float>(k.rt->h * kScale), 0, 1};
+  D3D11_VIEWPORT vp = {0, 0, static_cast<float>(k.rt->w * g_scale), static_cast<float>(k.rt->h * g_scale), 0, 1};
   g_ctx->RSSetViewports(1, &vp);
   g_ctx->RSSetScissorRects(1, &k.scissor);
   g_ctx->RSSetState(g_raster);
@@ -498,9 +521,9 @@ bool MakeKey(const State& st, const Texture& tex, Key& k) {
   }
   Consts& c = k.c;
   c = {};
-  c.target[0] = static_cast<float>(k.rt->w * kScale);
-  c.target[1] = static_cast<float>(k.rt->h * kScale);
-  c.target[2] = static_cast<float>(kScale);
+  c.target[0] = static_cast<float>(k.rt->w * g_scale);
+  c.target[1] = static_cast<float>(k.rt->h * g_scale);
+  c.target[2] = static_cast<float>(g_scale);
   const bool tme = ((st.prim >> 4) & 1) != 0;
   k.srv = nullptr;
   k.srvIsRt = false;
@@ -529,7 +552,7 @@ bool MakeKey(const State& st, const Texture& tex, Key& k) {
       if (!src) return false;
       k.srv = src->srv;
       k.srvIsRt = src == k.rt;
-      c.texs[2] = static_cast<float>(kScale);
+      c.texs[2] = static_cast<float>(g_scale);
       c.wrap[3] = t16 ? 1 : (tpsm == 0x01 ? 2 : 0);
       c.misc[3] = 1;
     } else {
@@ -588,6 +611,8 @@ bool MakeKey(const State& st, const Texture& tex, Key& k) {
       else { k.destBlend = D3D11_BLEND_ONE; ++g_count.approximations; ++g_approxAlpha[st.alpha]; }  // 1 + C
     }
   }
+  if ((test >> 14) & 1) Note("DATE");
+  if (abe && (st.pabe & 1)) Note("PABE");
   c.misc[0] = static_cast<u32>(st.fba & 1);
   c.misc[1] = is16 ? 1 : 0;
   // frame buffer mask: whole channels only
@@ -599,14 +624,17 @@ bool MakeKey(const State& st, const Texture& tex, Key& k) {
     if ((fbmsk & 0x7C00) != 0x7C00) mask |= D3D11_COLOR_WRITE_ENABLE_BLUE;
     if ((fbmsk & 0x8000) == 0) mask |= D3D11_COLOR_WRITE_ENABLE_ALPHA;
   } else {
-    for (int ch = 0; ch < 4; ++ch)
-      if (((fbmsk >> (ch * 8)) & 0xFF) != 0xFF) mask |= 1u << ch;
+    for (int ch = 0; ch < 4; ++ch) {
+      const u32 m = (fbmsk >> (ch * 8)) & 0xFF;
+      if (m != 0xFF) mask |= 1u << ch;
+      if (m != 0xFF && m != 0) Note("partial FBMSK");
+    }
     if (fpsm == 0x01) mask &= ~static_cast<u32>(D3D11_COLOR_WRITE_ENABLE_ALPHA);  // CT24: no alpha
   }
   k.writeMask = mask;
   const int sx0 = static_cast<int>(st.scissor & 0x7FF), sx1 = static_cast<int>((st.scissor >> 16) & 0x7FF);
   const int sy0 = static_cast<int>((st.scissor >> 32) & 0x7FF), sy1 = static_cast<int>((st.scissor >> 48) & 0x7FF);
-  k.scissor = {sx0 * kScale, sy0 * kScale, (sx1 + 1) * kScale, (sy1 + 1) * kScale};
+  k.scissor = {sx0 * g_scale, sy0 * g_scale, (sx1 + 1) * g_scale, (sy1 + 1) * g_scale};
   return true;
 }
 
@@ -619,20 +647,93 @@ void Add(const State& st, const Texture& tex, const GpuVertex* v, int n) {
   if (!MakeKey(st, tex, k)) return;
   if (!g_verts.empty() && (!SameKey(k, g_key) || g_verts.size() + static_cast<std::size_t>(n) > kMaxVertices)) Flush();
   if (g_verts.empty()) g_key = k;
+  float maxY = 0;  // rows the primitive reaches (inside the scissor): the GS memory the target now stands for
+  for (int i = 0; i < n; ++i) maxY = std::max(maxY, v[i].y);
+  const int rows = std::min(static_cast<int>(maxY) + 1, static_cast<int>(k.scissor.bottom / g_scale));
+  k.rt->usedRows = std::max(k.rt->usedRows, std::min(rows, k.rt->h));
   g_verts.insert(g_verts.end(), v, v + n);
   ++g_count.prims;
 }
 
 }  // namespace
 
+void Note(const char* what) { ++g_notes[what]; }
+
+void DropAll() {  // every target and depth buffer (a new internal resolution, or the software GS takes over)
+  std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
+  for (Target* t : g_targets) {
+    Release(t->srv);
+    Release(t->rtv);
+    Release(t->tex);
+    delete t;
+  }
+  g_targets.clear();
+  for (Depth* z : g_depthBuffers) {
+    Release(z->dsv);
+    Release(z->tex);
+    delete z;
+  }
+  g_depthBuffers.clear();
+  Release(g_copySrv);
+  Release(g_copyTex);
+  g_copyW = g_copyH = 0;
+}
+
+bool Covers(const Target* t, const std::vector<std::uint16_t>& pages) {
+  const int pageRows = t->is16 ? 64 : 32;  // (CT32 pages are 64x32 pixels, CT16 64x64)
+  const u32 count = t->fbw * static_cast<u32>((t->usedRows + pageRows - 1) / pageRows);
+  for (std::uint16_t p : pages)
+    if (p >= t->page && p < t->page + count) return true;
+  return false;
+}
+bool CoversPages(const std::vector<std::uint16_t>& pages) {
+  for (const Target* t : g_targets)
+    if (Covers(t, pages)) return true;
+  return false;
+}
+void MemoryWritten(const std::vector<std::uint16_t>& pages) {
+  bool flushed = false;
+  for (auto it = g_targets.begin(); it != g_targets.end();) {
+    Target* t = *it;
+    if (!Covers(t, pages)) {
+      ++it;
+      continue;
+    }
+    if (!flushed) {  // (a pending batch may draw into it)
+      Flush();
+      flushed = true;
+    }
+    std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
+    Release(t->srv);
+    Release(t->rtv);
+    Release(t->tex);
+    delete t;
+    it = g_targets.erase(it);
+    ++g_count.targetsDropped;
+  }
+}
+
 bool Enabled() {
-  static const bool wanted = [] {
-    const char* e = std::getenv("HP2_GPU");
-    return e && e[0] == '1';
-  }();
-  if (!wanted) return false;
+  if (!g_active) return false;
   if (!g_tried) g_ok = Init();
   return g_ok;
+}
+
+void SetActive(bool on) {
+  if (on == g_active) return;
+  if (!on) {  // back to the software GS: its own memory is the truth again (targets are redrawn when the GPU comes back)
+    Flush();
+    DropAll();
+  }
+  g_active = on;
+}
+
+void SetScale(int n) {
+  n = std::clamp(n, 1, 8);
+  if (n == g_scale) return;
+  Flush();
+  DropAll();  // (targets are recreated at the new size; the game redraws them in the next frames)
+  g_scale = n;
 }
 
 void Triangle(const State& st, const Texture& tex, const Vertex v[3]) {
@@ -668,11 +769,22 @@ bool HoldsBuffer(std::uint32_t bp, std::uint32_t bw) {
 
 void Uploaded(std::uint32_t bp, std::uint32_t bw, int x, int y, int w, int h, const std::vector<std::uint32_t>& rgba) {
   Target* t = FindTarget(bp / 32, bw, false);
-  if (!t || w <= 0 || h <= 0 || kScale != 1) return;
+  if (!t || w <= 0 || h <= 0) return;
+  const int stride = w;  // (rgba rows: the upload's width)
+  w = std::min(w, t->w - x);
+  h = std::min(h, t->h - y);
+  if (w <= 0 || h <= 0) return;
   Flush();
+  // each pixel N x N at internal resolution N
+  const int n = g_scale;
+  std::vector<u32> scaled(static_cast<std::size_t>(w) * n * h * n);
+  for (int yy = 0; yy < h * n; ++yy)
+    for (int xx = 0; xx < w * n; ++xx)
+      scaled[static_cast<std::size_t>(yy) * w * n + xx] = rgba[static_cast<std::size_t>(yy / n) * stride + xx / n];
   std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
-  const D3D11_BOX box = {static_cast<UINT>(x), static_cast<UINT>(y), 0, static_cast<UINT>(x + w), static_cast<UINT>(y + h), 1};
-  g_ctx->UpdateSubresource(t->tex, 0, &box, rgba.data(), static_cast<UINT>(w * 4), 0);
+  const D3D11_BOX box = {static_cast<UINT>(x * n), static_cast<UINT>(y * n), 0, static_cast<UINT>((x + w) * n), static_cast<UINT>((y + h) * n), 1};
+  g_ctx->UpdateSubresource(t->tex, 0, &box, scaled.data(), static_cast<UINT>(w * n * 4), 0);
+  t->usedRows = std::max(t->usedRows, std::min(y + h, t->h));
   ++g_count.uploads;
 }
 
@@ -685,25 +797,25 @@ bool Present(std::uint64_t dispfb, int x, int y, int w, int h) {
   ++g_count.presents;
   std::lock_guard<std::recursive_mutex> lock(gfx::Lock());
   Picture& p = g_pictures[g_next];
-  if (!p.tex || p.w != w || p.h != h) {
+  if (!p.tex || p.w != w * g_scale || p.h != h * g_scale) {
     std::lock_guard<std::mutex> pl(g_pictureMutex);
     Release(p.srv);
     Release(p.tex);
     D3D11_TEXTURE2D_DESC d = {};
-    d.Width = static_cast<UINT>(w * kScale);
-    d.Height = static_cast<UINT>(h * kScale);
+    d.Width = static_cast<UINT>(w * g_scale);
+    d.Height = static_cast<UINT>(h * g_scale);
     d.MipLevels = d.ArraySize = 1;
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     d.SampleDesc.Count = 1;
     d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     g_dev->CreateTexture2D(&d, nullptr, &p.tex);
     if (p.tex) g_dev->CreateShaderResourceView(p.tex, nullptr, &p.srv);
-    p.w = w;
-    p.h = h;
+    p.w = w * g_scale;
+    p.h = h * g_scale;
   }
   if (!p.tex) return false;
-  const D3D11_BOX box = {static_cast<UINT>(x * kScale), static_cast<UINT>(y * kScale), 0, static_cast<UINT>(std::min(x + w, t->w) * kScale),
-                         static_cast<UINT>(std::min(y + h, t->h) * kScale), 1};
+  const D3D11_BOX box = {static_cast<UINT>(x * g_scale), static_cast<UINT>(y * g_scale), 0, static_cast<UINT>(std::min(x + w, t->w) * g_scale),
+                         static_cast<UINT>(std::min(y + h, t->h) * g_scale), 1};
   g_ctx->CopySubresourceRegion(p.tex, 0, 0, 0, 0, t->tex, 0, &box);
   std::lock_guard<std::mutex> pl(g_pictureMutex);
   g_newest = g_next;
@@ -716,8 +828,8 @@ void* AcquireFrame(int* w, int* h) {
   if (g_newest < 0 || !g_pictures[g_newest].srv) return nullptr;
   Picture& p = g_pictures[g_newest];
   p.srv->AddRef();
-  *w = p.w * kScale;
-  *h = p.h * kScale;
+  *w = p.w;
+  *h = p.h;
   return p.srv;
 }
 void ReleaseFrame(void* srv) {
@@ -767,19 +879,35 @@ std::string StatsText() {
   char line[320];
   std::snprintf(line, sizeof line,
                 "%llu primitives in %llu batches, %llu presents; %llu texture uploads, %zu cached; %zu targets, %zu depth buffers; "
-                "%llu self-sampling copies, %llu uploads into targets, %llu approximated blends",
+                "%llu self-sampling copies, %llu uploads into targets, %llu approximated blends, %llu targets dropped by uploads",
                 static_cast<unsigned long long>(c.prims - r.prims), static_cast<unsigned long long>(c.batches - r.batches),
                 static_cast<unsigned long long>(c.presents - r.presents), static_cast<unsigned long long>(c.textureUploads - r.textureUploads),
                 g_textures.size(), g_targets.size(), g_depthBuffers.size(), static_cast<unsigned long long>(c.feedbackCopies - r.feedbackCopies),
-                static_cast<unsigned long long>(c.uploads - r.uploads), static_cast<unsigned long long>(c.approximations - r.approximations));
+                static_cast<unsigned long long>(c.uploads - r.uploads), static_cast<unsigned long long>(c.approximations - r.approximations),
+                static_cast<unsigned long long>(c.targetsDropped - r.targetsDropped));
   g_reported = g_count;
   std::string out = line;
+  out += "; targets:";  // page (width, bits, rows used)
+  for (const Target* t : g_targets) {
+    char one[64];
+    std::snprintf(one, sizeof one, " %u(w%u,%s,%d)", t->page, t->fbw, t->is16 ? "16" : "32", t->usedRows);
+    out += one;
+  }
   for (const auto& [reg, n] : g_approxAlpha) {  // which blends were approximated
     char one[64];
     std::snprintf(one, sizeof one, "; ALPHA %llX x%llu", static_cast<unsigned long long>(reg), static_cast<unsigned long long>(n));
     out += one;
   }
   g_approxAlpha.clear();
+  std::vector<std::pair<u64, std::string>> notes;  // the most frequent first (log lines are limited)
+  for (const auto& [what, n] : g_notes) notes.emplace_back(n, what);
+  std::sort(notes.rbegin(), notes.rend());
+  for (std::size_t i = 0; i < notes.size() && i < 6; ++i) {
+    char one[128];
+    std::snprintf(one, sizeof one, "; not rendered: %s x%llu", notes[i].second.c_str(), static_cast<unsigned long long>(notes[i].first));
+    out += one;
+  }
+  g_notes.clear();
   return out;
 }
 

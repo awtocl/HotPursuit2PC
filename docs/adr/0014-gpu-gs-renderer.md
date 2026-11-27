@@ -49,6 +49,16 @@ Cs × Ad + Cd); alpha above 128 saturates (bit 7, which DATE and PABE test, is k
 race render; throughput 53–63 game frames/s (software 33–48), independent of fill. Not yet: DATE, PABE, lines and points,
 partial FBMSK, format-converting reads of targets, local copies involving targets, internal resolution above 1×.
 
+## Status of steps 2–3 (2026-11-26)
+
+Measured first which gaps the game meets (counters in the perf line, `gpu::Note`): from boot to the race only points and
+reads of GPU-drawn memory occurred; DATE, PABE, lines, partial FBMSK and local copies did not (they stay counted). Done:
+points (1×1 sprites, both renderers); a target is dropped when an upload rewrites pages it covers (menu render targets whose
+memory the race reuses for textures); target coverage from the rows actually drawn. Internal resolution 1×–4× and the
+renderer choice are in Graphics Settings (`hp2native.ini`: `renderer`, `resolution`; `HP2_GPU=0/1` and `HP2_GPU_SCALE`
+override for tests); targets sampled as textures use their own fine grid ((u − 0.5) × N + 0.5), so the game's 1:1 frame
+copies keep the detail. **The GPU renderer is the default**; the software GS remains selectable and is the fallback.
+
 ## Consequences
 
 - Two renderers to keep equivalent until the GPU one is the default; the software one stays as the reference and the

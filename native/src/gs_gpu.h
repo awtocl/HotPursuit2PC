@@ -27,7 +27,12 @@ struct Texture {
   bool target = false;
 };
 
-bool Enabled();  // HP2_GPU=1 and a Direct3D 11 device
+bool Enabled();  // active (SetActive) and a Direct3D 11 device
+// Between frames (GS thread): draw on the GPU or not (Renderer setting, HP2_GPU), and the internal resolution (1..8x).
+// Either change drops the GPU targets; the game redraws them in the next frames.
+void SetActive(bool on);
+void SetScale(int n);
+void DropAll();
 void Triangle(const State& st, const Texture& tex, const Vertex v[3]);
 void Sprite(const State& st, const Texture& tex, const Vertex& a, const Vertex& b);
 // TEX0's texture is a GPU target (same base, width and a format the target holds): sample it instead of GS memory.
@@ -44,6 +49,13 @@ void* AcquireFrame(int* w, int* h);
 void ReleaseFrame(void* srv);
 // Development: the last picture on the CPU (BGRA), for test screenshots.
 bool ReadFrame(std::vector<std::uint32_t>& bgra, int* w, int* h);
+// A GS feature the GPU path does not render yet, counted (perf line) so the gaps that matter show up.
+void Note(const char* what);
+// Some GPU target covers one of these GS pages (its contents there are on the GPU, not in GS memory).
+bool CoversPages(const std::vector<std::uint16_t>& pages);
+// An upload rewrote these GS pages in GS memory: targets covering them stand for older contents and are dropped (GS memory
+// is the truth there again).
+void MemoryWritten(const std::vector<std::uint16_t>& pages);
 std::string StatsText();  // draws, batches, targets, textures, unsupported cases since the last call
 
 }  // namespace gpu
