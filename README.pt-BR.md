@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/awtocl/HotPursuit2PC/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/awtocl/HotPursuit2PC/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/awtomi/HotPursuit2PC/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/awtomi/HotPursuit2PC/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <img alt="Plataforma: Windows x64" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-1d3a5f">
   <img alt="Linguagem: C++20" src="https://img.shields.io/badge/C%2B%2B-20-1d3a5f">
   <a href="LICENSE"><img alt="Licença: MIT" src="https://img.shields.io/badge/license-MIT-ff921c"></a>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/awtocl/HotPursuit2PC/releases/latest"><b>Baixar</b></a> ·
+  <a href="https://github.com/awtomi/HotPursuit2PC/releases/latest"><b>Baixar</b></a> ·
   <a href="docs/GETTING-STARTED.pt-BR.md"><b>Primeiros passos</b></a> ·
   <a href="#início-rápido">Início rápido</a> ·
   <a href="#o-que-vem">O que vem</a> ·
@@ -69,7 +69,7 @@ nenhum emulador no meio.
 
 **Baixe e jogue**, sem ferramentas de compilação:
 
-1. Pegue o **`HotPursuit2PC-v0.2.0-win64.zip`** na **[versão mais recente](https://github.com/awtocl/HotPursuit2PC/releases/latest)** e descompacte onde quiser.
+1. Pegue o **`HotPursuit2PC-v0.2.0-win64.zip`** na **[versão mais recente](https://github.com/awtomi/HotPursuit2PC/releases/latest)** e descompacte onde quiser.
 2. Abra o **`HotPursuit2Launcher.exe`**. Os programas não são assinados, então o Windows pode perguntar antes: *Mais
    informações* → *Executar assim mesmo*.
 3. Coloque **seu próprio disco** no drive (ou monte a sua `.iso`). O launcher copia e verifica o disco e traduz o jogo
@@ -86,7 +86,7 @@ O que mudou em cada versão: [CHANGELOG.md](CHANGELOG.md) (em inglês).
 PowerShell 7 instalados, e **seu próprio disco** no drive (ou a sua `.iso` montada):
 
 ```powershell
-git clone https://github.com/awtocl/HotPursuit2PC.git
+git clone https://github.com/awtomi/HotPursuit2PC.git
 cd HotPursuit2PC
 pwsh tools/install-native.ps1       # compila tudo e depois abre o launcher
 ```
@@ -143,7 +143,7 @@ jogo* no menu de configurações para sair.
 - A troca entre 16:9 e 4:3 só vale depois de reiniciar (o jogo monta o HUD uma vez só).
 - Ainda não testado em placas AMD ou Intel, num Windows recém-instalado ou em sessões bem longas.
 
-Achou outra coisa? [Abra uma issue](https://github.com/awtocl/HotPursuit2PC/issues): ajuda muito.
+Achou outra coisa? [Abra uma issue](https://github.com/awtomi/HotPursuit2PC/issues): ajuda muito.
 
 ## Aviso legal e procedência
 

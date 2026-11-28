@@ -40,9 +40,9 @@ using i18n::T;
 namespace {
 
 constexpr const wchar_t* kVersion = L"0.2.0";
-constexpr const wchar_t* kRepoUrl = L"https://github.com/awtocl/HotPursuit2PC";
-constexpr const wchar_t* kGuideUrl = L"https://github.com/awtocl/HotPursuit2PC/blob/main/docs/GETTING-STARTED.md";
-constexpr const wchar_t* kIssuesUrl = L"https://github.com/awtocl/HotPursuit2PC/issues";
+constexpr const wchar_t* kRepoUrl = L"https://github.com/awtomi/HotPursuit2PC";
+constexpr const wchar_t* kGuideUrl = L"https://github.com/awtomi/HotPursuit2PC/blob/main/docs/GETTING-STARTED.md";
+constexpr const wchar_t* kIssuesUrl = L"https://github.com/awtomi/HotPursuit2PC/issues";
 constexpr UINT kJobDone = WM_APP + 1, kGameEnded = WM_APP + 2, kThumbsReady = WM_APP + 3;
 constexpr UINT_PTR kTimer = 1;
 constexpr float kW = 1280, kH = 720;            // logical size; everything is laid out in these units

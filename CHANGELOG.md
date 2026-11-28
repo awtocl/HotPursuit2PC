@@ -3,7 +3,7 @@
 Everything that changed, newest version first. While the project is young (0.x), a new minor version means "a big step";
 there are no promises about compatibility between them yet.
 
-Downloads are on the [Releases page](https://github.com/awtocl/HotPursuit2PC/releases). No game files are ever included:
+Downloads are on the [Releases page](https://github.com/awtomi/HotPursuit2PC/releases). No game files are ever included:
 you need your own disc of the North American PS2 release (SLUS-20362).
 
 ## [Unreleased]
@@ -72,5 +72,5 @@ Not published as a download; it's the starting point the native port grew from.
 - **Reference launcher** on the Play! emulator core with a virtual disc: the game played from the converter-made
   folder. It's kept as a development reference (to compare against); the native game doesn't use any of it.
 
-[0.2.0]: https://github.com/awtocl/HotPursuit2PC/releases/tag/v0.2.0
-[0.1.0]: https://github.com/awtocl/HotPursuit2PC/tree/v0.1.0
+[0.2.0]: https://github.com/awtomi/HotPursuit2PC/releases/tag/v0.2.0
+[0.1.0]: https://github.com/awtomi/HotPursuit2PC/tree/v0.1.0

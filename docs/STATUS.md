@@ -181,7 +181,7 @@ Recompiler analysis (R1a, `docs/recomp-analysis.md`):
 ## Environment facts (development PC)
 
 - Windows 11, MSVC 14.44 (VS Build Tools 2022 17.14) + Windows SDK 10.0.26100, bundled CMake 3.31 + Ninja (not on PATH; `tools/build.ps1` loads `vcvars64.bat`).
-- Repo: branch `main` tracking `origin/main` (`https://github.com/awtocl/HotPursuit2PC`).
+- Repo: branch `main` tracking `origin/main` (`https://github.com/awtomi/HotPursuit2PC`).
 - ROM (read-only, git-ignored): `ROM/Need for Speed - Hot Pursuit 2 (USA)/`.
 - Third-party source (git-ignored): `.cache/third_party/Play-` (pinned, must stay unmodified). `.cache/third_party/Play-fetchtest` is a second, identical copy made to test the fetch script (removable).
 - Scratch from evidence runs (git-ignored, ~25 GB, the owner may remove any of it):

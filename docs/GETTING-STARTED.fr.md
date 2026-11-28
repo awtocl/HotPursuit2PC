@@ -22,7 +22,7 @@ pendant que votre PC compile, alors prévoyez un en-cas. Ensuite, lancer le jeu 
 Depuis la version 0.2.0, il existe un téléchargement prêt à jouer : vous pouvez sauter l'installation des outils et la
 compilation (étapes 1, 3 et 4) :
 
-1. Téléchargez **`HotPursuit2PC-v0.2.0-win64.zip`** depuis la [dernière version](https://github.com/awtocl/HotPursuit2PC/releases/latest).
+1. Téléchargez **`HotPursuit2PC-v0.2.0-win64.zip`** depuis la [dernière version](https://github.com/awtomi/HotPursuit2PC/releases/latest).
 2. Clic droit dessus → **Extraire tout…**, puis choisissez le dossier qui vous plaît (par exemple
    `C:\Jeux\HotPursuit2PC`).
 3. Ouvrez le dossier et double-cliquez sur **`HotPursuit2Launcher.exe`**. Windows peut dire qu'il a protégé votre PC
@@ -94,7 +94,7 @@ Avant l'étape 5, faites l'une de ces choses :
 
    ```powershell
    cd $HOME\Documents
-   git clone https://github.com/awtocl/HotPursuit2PC.git
+   git clone https://github.com/awtomi/HotPursuit2PC.git
    cd HotPursuit2PC
    ```
 
@@ -253,10 +253,10 @@ jeu est préparé à nouveau pour la nouvelle version (environ une minute) puis 
 | *« Ce dossier ne contient pas un disque PlayStation 2 »* ou *« … manque »* | Mauvais dossier, ou copie incomplète. Choisissez le dossier qui contient directement `SYSTEM.CNF`, `SLUS_203.62` et `NFSHP2`. |
 | *« Ce disque est SLES-… »* ou *« … n'est pas la version prise en charge »* | Votre disque est d'une autre région ou édition. Seule l'édition nord-américaine `SLUS-20362` est prise en charge. |
 | *« … diffère du disque d'origine »* | La copie du disque est endommagée (souvent un disque rayé). Nettoyez le disque et copiez-le à nouveau (**Disque et installation** → **Changer de disque**). |
-| *« La préparation du jeu a échoué »* | Les détails sont dans `game-native\prepare.log` ; joignez-le à une [issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *« La préparation du jeu a échoué »* | Les détails sont dans `game-native\prepare.log` ; joignez-le à une [issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *« Le jeu s'est arrêté : … »* sur la page Jouer | Choisissez **Ouvrir le journal** et **Signaler un problème** ; joignez `native.log`. |
 | *« Downloading LLVM failed »* | Vérifiez votre connexion internet et relancez l'installateur. |
-| *« The build failed »* | Copiez les lignes rouges et [ouvrez une issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *« The build failed »* | Copiez les lignes rouges et [ouvrez une issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *« …ne peut pas être chargé car l'exécution de scripts est désactivée »* | Vous avez téléchargé un ZIP au lieu d'utiliser `git clone`. Utilisez `git clone` (étape 3). |
 | La fenêtre du jeu est noire, ou l'image est fausse | Lanceur → **Paramètres** → Rendu → **Logiciel**. Si cela aide, signalez-le en indiquant votre modèle de carte graphique. |
 | Pas de son | Le jeu utilise le périphérique de lecture par défaut de Windows : vérifiez-le dans les paramètres de son de Windows, puis relancez le jeu. |
@@ -266,7 +266,7 @@ jeu est préparé à nouveau pour la nouvelle version (environ une minute) puis 
 | Tout semble faux après avoir changé des réglages | Lanceur → **Paramètres** → **Réinitialiser**. |
 
 **Signaler un problème :** après la fermeture du jeu, le fichier `game-native\native.log` décrit ce qui s'est passé.
-Joignez-le à une [issue](https://github.com/awtocl/HotPursuit2PC/issues) avec votre version de Windows et votre carte
+Joignez-le à une [issue](https://github.com/awtomi/HotPursuit2PC/issues) avec votre version de Windows et votre carte
 graphique. Le journal ne contient aucune donnée personnelle à part des chemins de dossiers, que vous pouvez effacer.
 
 ## Désinstaller
@@ -278,5 +278,5 @@ quel autre. Les outils de l'étape 1 se désinstallent dans *Paramètres → App
 
 ---
 
-Un souci, ou quelque chose n'est pas clair ? [Ouvrez une issue](https://github.com/awtocl/HotPursuit2PC/issues) et
+Un souci, ou quelque chose n'est pas clair ? [Ouvrez une issue](https://github.com/awtomi/HotPursuit2PC/issues) et
 dites-le-nous — ce guide doit marcher pour tout le monde. Amusez-vous bien sur la route, et gare aux flics !

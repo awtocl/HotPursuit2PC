@@ -78,7 +78,7 @@ Set-Content -LiteralPath (Join-Path $out 'THIRD-PARTY-NOTICES.txt') -Value $noti
 
 $readme = @"
 HotPursuit2PC $Version - Need for Speed: Hot Pursuit 2 (PS2) running natively on Windows
-https://github.com/awtocl/HotPursuit2PC
+https://github.com/awtomi/HotPursuit2PC
 
 No game files are included. You need your own disc of the North American PlayStation 2 release (SLUS-20362), in a DVD
 drive or as an .iso image you made of it (double-click the .iso to mount it).

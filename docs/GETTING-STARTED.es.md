@@ -22,7 +22,7 @@ puedes ir por algo para picar. Después, abrir el juego es un doble clic.
 Desde la versión 0.2.0 hay una descarga lista para usar, así que puedes saltarte instalar las herramientas y compilar
 (pasos 1, 3 y 4):
 
-1. Descarga **`HotPursuit2PC-v0.2.0-win64.zip`** de la [última versión](https://github.com/awtocl/HotPursuit2PC/releases/latest).
+1. Descarga **`HotPursuit2PC-v0.2.0-win64.zip`** de la [última versión](https://github.com/awtomi/HotPursuit2PC/releases/latest).
 2. Haz clic derecho sobre el archivo → **Extraer todo…** y elige la carpeta que quieras (por ejemplo
    `C:\Juegos\HotPursuit2PC`).
 3. Abre la carpeta y haz doble clic en **`HotPursuit2Launcher.exe`**. Windows puede decir que protegió tu PC (los
@@ -93,7 +93,7 @@ paso 5, haz una de estas cosas:
 
    ```powershell
    cd $HOME\Documents
-   git clone https://github.com/awtocl/HotPursuit2PC.git
+   git clone https://github.com/awtomi/HotPursuit2PC.git
    cd HotPursuit2PC
    ```
 
@@ -249,10 +249,10 @@ se prepara de nuevo para la versión nueva (un minuto aprox.) y arranca.
 | *"Esta carpeta no contiene un disco de PlayStation 2"* o *"Falta …"* | Elegiste la carpeta equivocada o la copia está incompleta. Elige la carpeta que contiene directamente `SYSTEM.CNF`, `SLUS_203.62` y `NFSHP2`. |
 | *"Este disco es SLES-…"* o *"… no es la versión compatible"* | Tu disco es de otra región o edición. Solo es compatible la edición norteamericana `SLUS-20362`. |
 | *"… no coincide con el disco original"* | La copia del disco está dañada (a menudo por un disco rayado). Limpia el disco y cópialo de nuevo (**Disco e instalación** → **Cambiar disco**). |
-| *"Falló la preparación del juego"* | Los detalles están en `game-native\prepare.log`; adjúntalo en un [issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *"Falló la preparación del juego"* | Los detalles están en `game-native\prepare.log`; adjúntalo en un [issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *"El juego se detuvo: …"* en la página Jugar | Elige **Abrir registro** e **Informar de un problema**; adjunta `native.log`. |
 | *"Downloading LLVM failed"* | Revisa tu conexión a internet y vuelve a ejecutar el instalador. |
-| *"The build failed"* | Copia las líneas en rojo y [abre un issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *"The build failed"* | Copia las líneas en rojo y [abre un issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *"…no se puede cargar porque la ejecución de scripts está deshabilitada"* | Descargaste un ZIP en lugar de usar `git clone`. Usa `git clone` (paso 3). |
 | La ventana del juego se ve negra o la imagen está mal | Launcher → **Ajustes** → Renderizador → **Software**. Si eso ayuda, infórmalo indicando tu tarjeta gráfica. |
 | No hay sonido | El juego usa el dispositivo de reproducción predeterminado de Windows: revísalo en la configuración de sonido de Windows y reinicia el juego. |
@@ -262,7 +262,7 @@ se prepara de nuevo para la versión nueva (un minuto aprox.) y arranca.
 | Todo se ve mal después de cambiar ajustes | Launcher → **Ajustes** → **Restablecer**. |
 
 **Informar de un problema:** después de cerrar el juego, el archivo `game-native\native.log` describe lo que pasó.
-Adjúntalo en un [issue](https://github.com/awtocl/HotPursuit2PC/issues) con tu versión de Windows y tu tarjeta gráfica.
+Adjúntalo en un [issue](https://github.com/awtomi/HotPursuit2PC/issues) con tu versión de Windows y tu tarjeta gráfica.
 El registro no contiene datos personales aparte de rutas de carpetas, que puedes borrar.
 
 ## Desinstalar
@@ -274,5 +274,5 @@ otro. Las herramientas del paso 1 se quitan en *Configuración → Aplicaciones*
 
 ---
 
-¿Algo se trabó, o hay algo que no está claro? [Abre un issue](https://github.com/awtocl/HotPursuit2PC/issues) y cuéntanos —
+¿Algo se trabó, o hay algo que no está claro? [Abre un issue](https://github.com/awtomi/HotPursuit2PC/issues) y cuéntanos —
 esta guía debería funcionarle a todo el mundo. ¡Diviértete en la carretera, y cuidado con la policía!

@@ -1,7 +1,7 @@
 # Project Brief — NFS Hot Pursuit 2 (PS2 NTSC) → Native PC Port
 
 **Addressee:** Claude Fable 5.2 (run in Extra mode)
-**Repository:** https://github.com/awtocl/HotPursuit2PC (currently empty — placeholder `README.md` only; you initialize this project)
+**Repository:** https://github.com/awtomi/HotPursuit2PC (currently empty — placeholder `README.md` only; you initialize this project)
 **Code name:** HotPursuit2PC
 **Target platform:** Windows 10/11 x64
 **Brief version:** v3 (2026-11-11)

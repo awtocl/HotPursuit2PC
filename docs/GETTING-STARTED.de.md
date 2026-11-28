@@ -22,7 +22,7 @@ während dein PC baut, also hol dir ruhig einen Snack. Danach startest du das Sp
 Seit Version 0.2.0 gibt es einen fertigen Download, du kannst also die Installation der Werkzeuge und das Bauen
 überspringen (Schritte 1, 3 und 4):
 
-1. Lade **`HotPursuit2PC-v0.2.0-win64.zip`** aus dem [neuesten Release](https://github.com/awtocl/HotPursuit2PC/releases/latest) herunter.
+1. Lade **`HotPursuit2PC-v0.2.0-win64.zip`** aus dem [neuesten Release](https://github.com/awtomi/HotPursuit2PC/releases/latest) herunter.
 2. Rechtsklick darauf → **Alle extrahieren…** und such dir einen Ordner aus (zum Beispiel `C:\Spiele\HotPursuit2PC`).
 3. Öffne den Ordner und doppelklicke auf **`HotPursuit2Launcher.exe`**. Windows meldet vielleicht, dass es deinen PC
    geschützt hat (die Programme sind nicht signiert): Klick auf **Weitere Informationen** und dann auf **Trotzdem
@@ -93,7 +93,7 @@ eins davon:
 
    ```powershell
    cd $HOME\Documents
-   git clone https://github.com/awtocl/HotPursuit2PC.git
+   git clone https://github.com/awtomi/HotPursuit2PC.git
    cd HotPursuit2PC
    ```
 
@@ -251,10 +251,10 @@ Das Spiel wird für die neue Version neu vorbereitet (etwa eine Minute) und star
 | *„Dieser Ordner enthält keine PlayStation-2-Disc"* oder *„… fehlt"* | Falscher Ordner oder unvollständige Kopie. Wähl den Ordner, der direkt `SYSTEM.CNF`, `SLUS_203.62` und `NFSHP2` enthält. |
 | *„Diese Disc ist SLES-…"* oder *„… ist nicht die unterstützte Version"* | Deine Disc ist aus einer anderen Region oder Ausgabe. Nur die nordamerikanische Ausgabe `SLUS-20362` wird unterstützt. |
 | *„… weicht von der Original-Disc ab"* | Die Disc-Kopie ist beschädigt (oft eine zerkratzte Disc). Reinige die Disc und kopiere sie erneut (**Disc & Einrichtung** → **Disc wechseln**). |
-| *„Die Vorbereitung des Spiels ist fehlgeschlagen"* | Die Details stehen in `game-native\prepare.log`; häng die Datei an ein [Issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *„Die Vorbereitung des Spiels ist fehlgeschlagen"* | Die Details stehen in `game-native\prepare.log`; häng die Datei an ein [Issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *„Das Spiel wurde beendet: …"* auf der Seite Spielen | Wähl **Log öffnen** und **Problem melden**; häng `native.log` an. |
 | *„Downloading LLVM failed"* | Prüf deine Internetverbindung und starte den Installer noch einmal. |
-| *„The build failed"* | Kopiere die roten Zeilen und [eröffne ein Issue](https://github.com/awtocl/HotPursuit2PC/issues). |
+| *„The build failed"* | Kopiere die roten Zeilen und [eröffne ein Issue](https://github.com/awtomi/HotPursuit2PC/issues). |
 | *„…kann nicht geladen werden, da die Ausführung von Skripts deaktiviert ist"* | Du hast ein ZIP heruntergeladen statt `git clone` zu benutzen. Nimm `git clone` (Schritt 3). |
 | Das Spielfenster ist schwarz oder das Bild stimmt nicht | Launcher → **Einstellungen** → Renderer → **Software**. Hilft das, melde es bitte mit deinem Grafikkartenmodell. |
 | Kein Ton | Das Spiel nutzt das Standard-Wiedergabegerät von Windows: Prüf es in den Windows-Soundeinstellungen und starte das Spiel neu. |
@@ -264,7 +264,7 @@ Das Spiel wird für die neue Version neu vorbereitet (etwa eine Minute) und star
 | Nach dem Ändern von Einstellungen sieht alles falsch aus | Launcher → **Einstellungen** → **Zurücksetzen**. |
 
 **Ein Problem melden:** Nach dem Schließen des Spiels beschreibt die Datei `game-native\native.log`, was passiert ist.
-Häng sie mit deiner Windows-Version und deiner Grafikkarte an ein [Issue](https://github.com/awtocl/HotPursuit2PC/issues).
+Häng sie mit deiner Windows-Version und deiner Grafikkarte an ein [Issue](https://github.com/awtomi/HotPursuit2PC/issues).
 Das Log enthält keine persönlichen Daten außer Ordnerpfaden, die du entfernen kannst.
 
 ## Deinstallieren
@@ -276,5 +276,5 @@ jede andere. Die Werkzeuge aus Schritt 1 entfernst du unter *Einstellungen → A
 
 ---
 
-Hängst du fest, oder ist hier etwas unklar? [Eröffne ein Issue](https://github.com/awtocl/HotPursuit2PC/issues) und sag
+Hängst du fest, oder ist hier etwas unklar? [Eröffne ein Issue](https://github.com/awtomi/HotPursuit2PC/issues) und sag
 uns Bescheid — diese Anleitung soll bei allen funktionieren. Viel Spaß auf der Straße, und pass auf die Polizei auf!
